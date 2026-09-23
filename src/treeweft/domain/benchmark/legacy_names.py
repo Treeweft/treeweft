@@ -5,6 +5,9 @@ Results written before the Treeloom -> Treeweft rename name the arm
 "treeloom_*". Rewriting those on load keeps old rows and _summary.json files
 aggregating with new ones. Only dict keys and whole-string arm names are
 rewritten; free text (answers, file paths) is left alone.
+
+Treeloom back-compat: remove on 2026-11-01 (#14), with its call in
+application/benchmark and tests/unit/test_legacy_benchmark_names.py.
 """
 from __future__ import annotations
 

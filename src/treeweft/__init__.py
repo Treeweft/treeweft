@@ -10,6 +10,8 @@ import warnings
 from pathlib import Path
 from typing import MutableMapping
 
+# Treeloom back-compat: remove on 2026-11-01 (#14): _LEGACY_PREFIX,
+# _alias_legacy_env and the two calls to it at the bottom of this file.
 _LEGACY_PREFIX = "TREELOOM_"
 _PREFIX = "TREEWEFT_"
 
@@ -36,8 +38,8 @@ def _alias_legacy_env(
     if found:
         warnings.warn(
             "Treeloom was renamed to Treeweft; rename these env vars to "
-            f"TREEWEFT_*: {', '.join(found)} (still honored for now, see "
-            "docs/migrating-from-treeloom.md)",
+            f"TREEWEFT_*: {', '.join(found)} (still honored until 2026-11-01, "
+            "see docs/migrating-from-treeloom.md)",
             FutureWarning,
             stacklevel=2,
         )
@@ -103,6 +105,7 @@ def _load_dotenv_if_present() -> None:
             return
 
 
+# Treeloom back-compat: remove on 2026-11-01 (#14).
 # Alias before .env loads (so a legacy TREELOOM_SKIP_DOTENV still applies) and
 # again after (for legacy names that only an old .env sets).
 _reported_legacy = _alias_legacy_env(os.environ)
