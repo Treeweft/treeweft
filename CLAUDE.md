@@ -25,7 +25,7 @@ Unit tests need no services. The `env -u PYTHONPATH` is required: a system `/opt
 
 ## Invariants — do not violate without reading the linked notes
 
-- **tree-sitter is unpinned** — `tree-sitter-language-pack` (bundled via `chonkie[code]`) manages parsers. Do NOT add `tree-sitter-languages` or pin `tree-sitter` below 0.24.
+- **tree-sitter is unpinned** — `tree-sitter-language-pack` (declared `>=1.10`; also pulled by `chonkie[code]`) manages parsers. Do NOT add `tree-sitter-languages` or pin `tree-sitter` below 0.24. Keep the pack off 1.9.x: its `get_language()` returns a Rust `Language` that `tree_sitter.Parser` rejects, silently sending every file to the TokenChunker fallback.
 - **`_make_chunker` must keep overwriting `chunker.parser`** with `tree_sitter.Parser(get_language(lang))` (`adapters/tree_sitter/indexer.py`). Removing that line silently sends every file down the TokenChunker/character fallback. Chunkers are built per call — parsers are not safe for concurrent `parse()`.
 - **`.md`/`.markdown`/`.mdx` stay in `MARKDOWN_MAP`, never `LANGUAGE_MAP`** — `tree-sitter-markdown`'s grammar asserts and crashes the indexer. Markdown chunks via `_make_markdown_chunker`, not `CodeChunker`.
 - **`LANGUAGE_QUERIES` keys must equal `LANGUAGE_MAP` values** (`graph_extractor.py`); only `class`/`function`/`import`/`call` are consumed. A mismatched key fails silently (Module-only entity, no graph signals) — this bit twice (`"c_sharp"` vs `"csharp"`, rust's `"struct"`). Never put quantified captures like `(base_list (identifier) @x)?` inside a `@class.def` pattern — they desync the paired name/def lists.
