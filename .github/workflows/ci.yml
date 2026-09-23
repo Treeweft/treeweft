@@ -1,0 +1,117 @@
+name: CI
+
+# `unit-tests` is a required status check on main (repository ruleset), so
+# it must REPORT on every PR. A trigger-level `paths-ignore` would skip the
+# whole workflow on document-only changes and leave the check unreported,
+# which blocks the merge. Instead a cheap `changes` job classifies the diff
+# and `unit-tests` is skipped (not absent) when only docs/images changed —
+# a skipped required job counts as passing.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege for GITHUB_TOKEN: every job only reads the repository, and
+# dorny/paths-filter lists a pull request's changed files through the API.
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      ui: ${{ steps.ui-filter.outputs.ui }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: filter
+        uses: dorny/paths-filter@v4
+        with:
+          # Anything that is NOT a document or image counts as code. The
+          # patterns are all negations, so a file must satisfy EVERY one of
+          # them to count (the default quantifier `some` would let a .md
+          # file match via `!**/*.svg` and run the suite on docs-only PRs).
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '!**/*.md'
+              - '!**/*.svg'
+              - '!**/*.png'
+              - '!**/*.jpg'
+              - '!**/*.jpeg'
+              - '!**/*.gif'
+              - '!**/*.webp'
+              - '!**/*.ico'
+      # A separate step because the patterns here are positive and any one
+      # of them should match: under the `every` quantifier above, a file
+      # would have to be inside ui/ AND be this workflow file.
+      - id: ui-filter
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            ui:
+              - 'ui/**'
+              - '.github/workflows/ci.yml'
+
+  unit-tests:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    # The 3.11 leg must keep the exact name `unit-tests`: that is the
+    # required status check, and a default matrix name (`unit-tests (3.11)`)
+    # would never report it, blocking every merge. 3.11 is the supported
+    # floor (requires-python); 3.14 is what the Docker images run. The 3.14
+    # leg is not required unless the ruleset adds it, and fail-fast is off
+    # so its failure cannot cancel the required leg.
+    name: ${{ matrix.python == '3.11' && 'unit-tests' || format('unit-tests (python {0})', matrix.python) }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - name: Install
+        # dev alone is test-tooling only; tests/unit also imports every
+        # optional-backend package (aiosqlite/chromadb/lancedb/fastembed)
+        # via adapter/factory tests, so the
+        # full suite needs the all-backends + simple extras too.
+        run: pip install -e ".[dev,all-backends,simple]"
+      - name: Provide the quickstart env
+        # The indexer fails loud at import when its service vars are unset,
+        # and the unit suite imports it (services are mocked, never
+        # contacted). src/treeweft/__init__.py loads the repo-root .env, so
+        # the quickstart example doubles as the CI config — which also
+        # keeps .env.example loadable.
+        run: cp .env.example .env
+      - name: Unit tests
+        run: pytest tests/unit -q
+
+  # The operator UI had no CI: Dependabot npm PRs showed green while failing
+  # `npm ci` or the build. Runs only when ui/ (or this file) changes.
+  ui:
+    needs: changes
+    if: needs.changes.outputs.ui == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ui
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          # Same major as the ui/Dockerfile build stage.
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install
+        run: npm ci
+      - name: Type-check and build
+        # `build` is `tsc -b && vite build`, so this is the type-check too.
+        run: npm run build
+      - name: Unit tests
+        run: npm test

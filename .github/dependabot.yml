@@ -1,0 +1,66 @@
+# Dependabot version updates. Security updates are enabled separately in the
+# repository settings and are not affected by this file.
+#
+# Groups keep the PR count low: one PR per ecosystem per week for minor and
+# patch bumps; majors still arrive individually so they get a real review.
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    # pyproject.toml declares `>=` floors, not pins. The default strategy
+    # raises the floor on every release (a PR that changes nothing CI
+    # installs and only excludes users on older versions); this one opens a
+    # PR only when a new release falls outside the declared range.
+    versioning-strategy: increase-if-necessary
+    groups:
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]
+    # tree-sitter is deliberately unpinned and managed by tree-sitter-language-pack
+    # (see CLAUDE.md); do not let Dependabot pin or bump it independently.
+    ignore:
+      - dependency-name: "tree-sitter"
+      - dependency-name: "tree-sitter-languages"
+
+  - package-ecosystem: "npm"
+    directory: "/ui"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+    groups:
+      ui-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: "docker"
+    directories:
+      - "/"
+      - "/ui"
+      - "/services/qwen3_reranker"
+      - "/services/jina_reranker"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    groups:
+      base-images:
+        patterns: ["*"]
+    # The UI build stays on Node LTS. Odd-numbered Node majors are never LTS
+    # (Dependabot proposed node:25 in #27). Ranges must be written out: the
+    # `25.x` shorthand is silently ignored by the docker updater (checked
+    # with the Dependabot CLI). Bump to the next even major by hand once it
+    # reaches LTS; with these rules the updater does not propose it.
+    ignore:
+      - dependency-name: "node"
+        versions: [">= 25, < 26", ">= 27, < 28", ">= 29, < 30"]

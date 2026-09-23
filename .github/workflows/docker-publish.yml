@@ -1,0 +1,176 @@
+name: Docker images
+
+# Builds the Treeweft container images and publishes them to Docker Hub.
+#
+#   * push of a `vYYYY.M.D[.N]` tag -> build + push `YYYY.M.D[.N]`, `YYYY.M`, `latest`
+#   * manual run                    -> build + push `edge` + `sha-<short>` (any ref)
+#   * pull request touching a Dockerfile / this workflow -> build only, no
+#     push, amd64 only, and the CUDA reranker is skipped (its 6 GB base
+#     dominates PR build time and its Dockerfile rarely changes); a newer
+#     push to the same PR cancels the previous build.
+#
+# Versions are CalVer (docs/docker-images.md, "Versioning"): the release
+# date without zero padding, an optional `.N` for a same-day re-release, and
+# the git tag is that version with a `v` prefix. The `check-tag` job refuses
+# a tag that is not CalVer-shaped or does not equal pyproject.toml's version.
+#
+# Repository settings required for the push paths:
+#   secrets.DOCKERHUB_USERNAME  Docker Hub account (or org member) login
+#   secrets.DOCKERHUB_TOKEN     Docker Hub access token with Read & Write
+#   vars.DOCKERHUB_NAMESPACE    (optional) image namespace; defaults to `treeweft`
+#
+# See docs/docker-images.md for the release procedure.
+
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "Dockerfile"
+      - "Dockerfile.indexer"
+      - ".dockerignore"
+      - "ui/Dockerfile"
+      - "services/qwen3_reranker/**"
+      - ".github/workflows/docker-publish.yml"
+  workflow_dispatch:
+
+# One build per ref. PR builds are superseded by a newer push to the same
+# PR; release-tag and manual runs are never cancelled.
+concurrency:
+  group: docker-images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  IMAGE_NAMESPACE: ${{ vars.DOCKERHUB_NAMESPACE || 'treeweft' }}
+
+jobs:
+  check-tag:
+    # Only on release tags: fail loud before any image is built if the tag
+    # is not `vYYYY.M.D[.N]` or does not match pyproject.toml.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Tag is CalVer and equals pyproject version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          calver='^v[0-9]{4}\.([1-9]|1[0-2])\.([1-9]|[12][0-9]|3[01])(\.[1-9][0-9]*)?$'
+          if ! [[ "$TAG" =~ $calver ]]; then
+            echo "::error::tag '$TAG' is not CalVer (expected vYYYY.M.D or vYYYY.M.D.N, no zero padding)"
+            exit 1
+          fi
+          pyver=$(sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head -1)
+          if [[ "v$pyver" != "$TAG" ]]; then
+            echo "::error::tag '$TAG' does not match pyproject.toml version '$pyver' — bump pyproject first"
+            exit 1
+          fi
+          echo "tag $TAG matches pyproject version $pyver"
+
+  build:
+    name: ${{ matrix.image }}
+    needs: [check-tag]
+    # `needs` would skip the build whenever check-tag is skipped (manual runs,
+    # PRs), so run when check-tag either succeeded or was skipped, never when
+    # it failed.
+    if: always() && needs.check-tag.result != 'failure'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: indexer
+            context: .
+            dockerfile: Dockerfile.indexer
+            platforms: linux/amd64
+          - image: mcp-server
+            context: .
+            dockerfile: Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - image: ui
+            context: ./ui
+            dockerfile: ui/Dockerfile
+            platforms: linux/amd64,linux/arm64
+          - image: qwen3-reranker
+            context: ./services/qwen3_reranker
+            dockerfile: services/qwen3_reranker/Dockerfile
+            platforms: linux/amd64
+    env:
+      # A job-level `if` cannot see `matrix`, so the PR-time skip of the
+      # reranker is expressed here and applied to every step below: the
+      # job then completes in seconds with all steps skipped.
+      SKIP: ${{ github.event_name == 'pull_request' && matrix.image == 'qwen3-reranker' }}
+      # PRs build amd64 only; arm64 under QEMU emulation is the slow part of
+      # the ui/mcp-server builds and adds no signal on a PR.
+      PLATFORMS: ${{ github.event_name == 'pull_request' && 'linux/amd64' || matrix.platforms }}
+    steps:
+      - uses: actions/checkout@v7
+        if: env.SKIP != 'true'
+
+      # The runner's ~14 GB free disk is not enough for the CUDA reranker
+      # image (~6 GB base + layers) alongside the preinstalled toolchains.
+      - name: Free runner disk space
+        if: env.SKIP != 'true' && (matrix.image == 'qwen3-reranker' || matrix.image == 'indexer')
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Set up QEMU
+        if: env.SKIP != 'true' && contains(env.PLATFORMS, 'arm64')
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        if: env.SKIP != 'true'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        if: env.SKIP != 'true' && github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        if: env.SKIP != 'true'
+        uses: docker/metadata-action@v6
+        with:
+          images: docker.io/${{ env.IMAGE_NAMESPACE }}/${{ matrix.image }}
+          # CalVer tags are not semver (a same-day re-release has four
+          # parts), so match them by regex: the full version, then the
+          # rolling month tag (`2026.9`), then `latest`. The action splits
+          # each rule on commas, so the patterns must not contain one —
+          # `\d\d?` instead of `\d{1,2}`.
+          tags: |
+            type=match,pattern=^v(\d{4}\.\d\d?\.\d\d?(?:\.\d+)?)$,group=1
+            type=match,pattern=^v(\d{4}\.\d\d?)\.\d\d?(?:\.\d+)?$,group=1
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+            type=raw,value=edge,enable=${{ github.event_name == 'workflow_dispatch' }}
+            type=sha,prefix=sha-,enable=${{ github.event_name == 'workflow_dispatch' }}
+          labels: |
+            org.opencontainers.image.title=treeweft-${{ matrix.image }}
+            org.opencontainers.image.vendor=Treeweft
+
+      - name: Build and push
+        if: env.SKIP != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ env.PLATFORMS }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # PR builds read both caches but write only their own scope, so an
+          # amd64-only PR export never replaces the release scope's arm64
+          # layers (which would make the next release build arm64 cold).
+          cache-from: |
+            type=gha,scope=${{ matrix.image }}
+            type=gha,scope=${{ matrix.image }}-pr
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}${{ github.event_name == 'pull_request' && '-pr' || '' }}
