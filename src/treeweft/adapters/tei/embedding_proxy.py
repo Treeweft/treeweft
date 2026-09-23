@@ -319,20 +319,25 @@ class EmbeddingProxy:
                     break
                 backoff = min(backoff * 2, 30.0)
 
-    async def _select(self, *, require_cpu: bool) -> Backend | None:
+    async def _select(self, *, require_cpu: bool, exclude: frozenset[str] = frozenset()) -> Backend | None:
         """Pick the backend with the lowest in-flight token cost.
 
         Holding the select lock during the read+pick is the cheap way to keep
         two concurrent callers from picking the same idle backend; we release
         before issuing the request.
 
-        Returns None when all eligible backends are tripped (OPEN or failed probe).
+        `exclude` holds URLs already tried for this batch. A dead backend fails
+        instantly, so its in-flight cost stays 0 and it would otherwise keep
+        winning the pick until its breaker trips.
+
+        Returns None when no untried backend is eligible (all tripped or tried).
         """
         now = time.monotonic()
         async with self._select_lock:
-            pool = [b for b in self._backends if b.klass is BackendClass.CPU] if require_cpu else list(self._backends)
+            candidates = [b for b in self._backends if b.url not in exclude]
+            pool = [b for b in candidates if b.klass is BackendClass.CPU] if require_cpu else candidates
             if not pool:
-                pool = list(self._backends)  # no CPU configured — fall through to whatever exists
+                pool = candidates  # no (untried) CPU — fall through to whatever remains
 
             # Promote any OPEN backend past its cooldown to HALF_OPEN
             for b in pool:
@@ -437,17 +442,13 @@ class EmbeddingProxy:
         last_exc: Exception | None = None
 
         while len(tried) < len(self._backends):
-            backend = await self._select(require_cpu=require_cpu)
+            backend = await self._select(require_cpu=require_cpu, exclude=frozenset(tried))
             if backend is None:
+                if last_exc is not None:
+                    break  # every untried backend is tripped — surface the real failure
                 # All backends are tripped (OPEN) — wait for cooldown and retry
                 logger.warning("[embed] all backends tripped; waiting for cooldown")
                 raise RuntimeError("All embedding backends are unavailable (circuit breaker tripped)")
-            if backend.url in tried:
-                # Selected backend already tried — widen the pool by relaxing the CPU constraint
-                if require_cpu:
-                    require_cpu = False
-                    continue
-                break
             tried.add(backend.url)
             try:
                 return await self._post_one(backend, batch)

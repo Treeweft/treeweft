@@ -98,3 +98,30 @@ async def test_learns_cap_and_pre_splits_next_time():
     # pre-split using the learned cap — no oversized request, no repeat 422
     assert 40 not in client.calls
     assert all(c <= 32 for c in client.calls)
+
+
+class _DeadCpuClient:
+    """GPU backend healthy; CPU backend refuses connections (not running)."""
+
+    def __init__(self):
+        self.urls: list[str] = []
+
+    async def post(self, url, json=None):
+        self.urls.append(url)
+        if url.startswith("http://cpu"):
+            raise httpx.ConnectError("All connection attempts failed")
+        return _FakeResp(200, payload=[[0.0, 0.1, 0.2, 0.3] for _ in json["inputs"]])
+
+
+@pytest.mark.asyncio
+async def test_failed_idle_backend_falls_back_to_busy_healthy_backend():
+    # A dead backend fails instantly, so its in-flight cost stays at 0 and it
+    # keeps winning the lowest-cost pick. Fallback must go to an untried
+    # backend (the busy GPU), not re-select the dead one and give up.
+    client = _DeadCpuClient()
+    gpu = Backend(url="http://gpu", klass=BackendClass.GPU, in_flight_tokens=10_000)
+    cpu = Backend(url="http://cpu", klass=BackendClass.CPU)
+    proxy = EmbeddingProxy([gpu, cpu], client=client, max_batch_size=128)
+    out = await proxy.embed(["def foo(): pass"])
+    assert len(out) == 1
+    assert [u.split("/")[2] for u in client.urls] == ["cpu", "gpu"]
