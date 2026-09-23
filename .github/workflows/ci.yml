@@ -71,7 +71,9 @@ jobs:
         python: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v10
+      # setup-uv publishes no floating major tag (`@v10` does not resolve), so
+      # pin the release commit; Dependabot's github-actions updates bump it.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
           python-version: ${{ matrix.python }}
           enable-cache: true
