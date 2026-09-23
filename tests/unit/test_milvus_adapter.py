@@ -191,3 +191,29 @@ class TestMilvusAdapterDeleteByFilter:
         kwargs = mock_client.delete.call_args[1]
         assert kwargs["filter_params"] == {"f_value": "src-1\\"}
         assert "\\" not in kwargs["filter"]
+
+
+# ---------------------------------------------------------------------------
+# Connection URI
+# ---------------------------------------------------------------------------
+
+def test_adapter_uses_milvus_uri_env_over_host_port(monkeypatch):
+    """MILVUS_URI takes precedence — the plain-HTTP local standalone needs it."""
+    from treeweft.adapters.milvus.vector_store import MilvusAdapter
+    monkeypatch.setenv("MILVUS_URI", "http://localhost:19530")
+    adapter = MilvusAdapter(host="localhost", port="19530")
+    assert adapter.uri == "http://localhost:19530"
+
+
+def test_adapter_defaults_to_https_host_port_without_milvus_uri(monkeypatch):
+    from treeweft.adapters.milvus.vector_store import MilvusAdapter
+    monkeypatch.delenv("MILVUS_URI", raising=False)
+    adapter = MilvusAdapter(host="milvus.example", port="443")
+    assert adapter.uri == "https://milvus.example:443"
+
+
+def test_adapter_explicit_uri_wins_over_env(monkeypatch):
+    from treeweft.adapters.milvus.vector_store import MilvusAdapter
+    monkeypatch.setenv("MILVUS_URI", "http://localhost:19530")
+    adapter = MilvusAdapter(host="localhost", port="19530", uri="http://other:19531")
+    assert adapter.uri == "http://other:19531"
