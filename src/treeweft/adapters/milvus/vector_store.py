@@ -52,10 +52,13 @@ class MilvusAdapter(VectorStorePort):
         port: str,
         collection_name: str | None = None,
         vector_dim: int | None = None,
+        uri: str | None = None,
     ):
         self.host = host
         self.port = port
-        self.uri = f"https://{host}:{port}"
+        # MILVUS_URI takes precedence over host/port (docs/engineering-notes.md):
+        # the plain-HTTP local standalone is unreachable via the https default.
+        self.uri = uri or os.environ.get("MILVUS_URI") or f"https://{host}:{port}"
         self.collection_name = collection_name or COLLECTION_NAME
         self.vector_dim = vector_dim or VECTOR_DIM
         self._client: MilvusClient | None = None
