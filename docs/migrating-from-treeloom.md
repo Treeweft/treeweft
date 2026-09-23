@@ -4,6 +4,10 @@ Treeloom was renamed to **Treeweft**. The code, behavior, and data formats are
 unchanged; the names are not. This page lists every rename that can affect an
 existing install and how to keep an existing index working.
 
+> **Compatibility with Treeloom names ends on 2026-11-01.** From then on,
+> `TREELOOM_*` environment variables are ignored and `benchmark rollup` no
+> longer reads pre-rename results. Finish the renames below before that date.
+
 ## Quick path: keep an existing stack's data
 
 Add these to `.env` (values shown are the old defaults; use yours if you
@@ -35,8 +39,8 @@ Every `TREELOOM_` variable is now `TREEWEFT_` with the same suffix
 **Python processes still honor the old names.** On import, `treeweft` copies each
 `TREELOOM_*` variable (from the shell or the repo `.env`) to its `TREEWEFT_*`
 name unless the new name is already set to a non-empty value, and prints one
-`FutureWarning` listing the old names it found. This fallback will be removed in
-a future release.
+`FutureWarning` listing the old names it found. This fallback will be removed on
+2026-11-01.
 
 **Docker Compose and the shell scripts do not.** `docker-compose*.yml`,
 `run.sh`, `run-simple.sh`, and the UI container entrypoint interpolate only the
@@ -94,4 +98,5 @@ or prompts that name `mcp__treeloom__*` tools need the new prefix.
 
 Agentic arms are now `treeweft`, `treeweft-facet`, …. `benchmark rollup` reads
 pre-rename `_summary.json` files (arm `treeloom`, keys `treeloom_*`) as their
-`treeweft` equivalents, so old and new runs aggregate together.
+`treeweft` equivalents, so old and new runs aggregate together. This will be
+removed on 2026-11-01.

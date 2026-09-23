@@ -3,6 +3,8 @@
 Existing .env files and shell profiles predate the Treeloom -> Treeweft
 rename; `treeweft/__init__.py` copies each legacy var to its new name unless
 the new name is already set, and warns once. See docs/migrating-from-treeloom.md.
+
+Treeloom back-compat: remove on 2026-11-01 (#14).
 """
 import warnings
 

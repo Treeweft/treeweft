@@ -383,6 +383,7 @@ def cmd_agentic(args):
 def cmd_rollup(args):
     """Aggregate per-repo agentic summary JSON files into a multi-repo rollup."""
     import datetime
+    # Treeloom back-compat: remove on 2026-11-01 (#14).
     from treeweft.domain.benchmark.legacy_names import upgrade_legacy_names
     from treeweft.domain.benchmark.rollup import format_rollup_table, multi_repo_rollup
 

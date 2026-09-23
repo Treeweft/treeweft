@@ -1,4 +1,7 @@
-"""Pre-rebrand agentic results (arm "treeloom", keys "treeloom_*") still roll up."""
+"""Pre-rebrand agentic results (arm "treeloom", keys "treeloom_*") still roll up.
+
+Treeloom back-compat: remove on 2026-11-01 (#14).
+"""
 from treeweft.domain.benchmark.legacy_names import upgrade_legacy_names
 from treeweft.domain.benchmark.rollup import multi_repo_rollup
 
