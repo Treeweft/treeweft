@@ -79,6 +79,7 @@ else
     echo "  COMPOSE_PROFILES=http-mcp docker compose up -d mcp-server"
 fi
 docker compose up -d postgres ${EMBEDDING_SERVICE} tei-reranker ui ${EXTRA_SERVICES}
+scripts/wait-for-postgres.sh
 
 echo ""
 echo "=== Starting indexer on host ==="

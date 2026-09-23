@@ -48,6 +48,7 @@ else
     echo "  COMPOSE_PROFILES=http-mcp docker compose -f docker-compose.simple.yml up -d mcp-server"
 fi
 docker compose -f docker-compose.simple.yml up -d --build
+scripts/wait-for-postgres.sh -f docker-compose.simple.yml
 
 INDEXER_HOST="${INDEXER_HOST:-127.0.0.1}"
 INDEXER_PORT="${INDEXER_PORT:-8001}"
