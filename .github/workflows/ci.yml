@@ -71,16 +71,21 @@ jobs:
         python: ["3.11", "3.14"]
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: astral-sh/setup-uv@v10
         with:
           python-version: ${{ matrix.python }}
-          cache: pip
+          enable-cache: true
       - name: Install
+        # Installs the exact versions in uv.lock, which is what `uv sync`
+        # users get. A pip install would resolve the newest releases instead
+        # and hide lockfile-only breakage (tree-sitter-language-pack 1.9.1
+        # passed CI while failing from the lock). --locked also fails the job
+        # if uv.lock is out of date with pyproject.toml.
         # dev alone is test-tooling only; tests/unit also imports every
         # optional-backend package (aiosqlite/chromadb/lancedb/fastembed)
         # via adapter/factory tests, so the
         # full suite needs the all-backends + simple extras too.
-        run: pip install -e ".[dev,all-backends,simple]"
+        run: uv sync --locked --extra dev --extra all-backends --extra simple
       - name: Provide the quickstart env
         # The indexer fails loud at import when its service vars are unset,
         # and the unit suite imports it (services are mocked, never
@@ -89,7 +94,7 @@ jobs:
         # keeps .env.example loadable.
         run: cp .env.example .env
       - name: Unit tests
-        run: pytest tests/unit -q
+        run: uv run --locked --no-sync pytest tests/unit -q
 
   # The operator UI had no CI: Dependabot npm PRs showed green while failing
   # `npm ci` or the build. Runs only when ui/ (or this file) changes.
