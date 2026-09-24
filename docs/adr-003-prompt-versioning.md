@@ -113,7 +113,10 @@ UPDATE source_records SET summary_prompt_version = 3
   job completes and when a `resummarize` job completes cleanly. `NULL` means
   unknown or never summarized (for example, indexed with
   `USE_SUMMARY_VECTOR=0`). Backfilling 3 is correct because every existing
-  index was built with v3.
+  index was built with v3. The backfill also applies to sources indexed with
+  `USE_SUMMARY_VECTOR=0`; that is accepted: their summary vectors are zero
+  vectors, so recording v3 is harmless, and a later refresh would populate
+  them. This avoids a per-source scan when the migration runs.
 - Deleting a source deletes its override row, in the source-delete path. There
   is no foreign key because `scope` is polymorphic.
 - Mutations emit `NOTIFY prompt_pins_changed` in the same transaction as the
@@ -228,12 +231,24 @@ record `updated_by`.
 - `PUT /prompt-pins/chunk_summary/sources/{source_id}` with `{"version": N}`,
   and `DELETE` on the same path: set or clear an override. The response lists
   any job enqueued.
+- **Dry run.** Each of the three mutating pin endpoints accepts
+  `?dry_run=true`. It validates the request exactly as a real call would, then
+  returns what the call *would* do and writes nothing: no pin row, no
+  `NOTIFY`, no job. The response has the same shape as a real call, with
+  `"dry_run": true` and, in place of enqueued job IDs, the sources that would
+  get a `resummarize` job, each with its current and target version and its
+  `chunk_count` from `source_records`, plus the total chunk count. The chunk
+  count is an upper bound on LLM calls: the dry run does not read chunk texts,
+  so it cannot say how many would be summary-cache hits. A `hyde` pin change
+  reports that it takes effect on the next query and enqueues nothing.
 - `POST /sources/{source_id}/resummarize`: a manual refresh.
 
 **Operator UI.** A **Prompts** page next to Backends: per operation, the
 versions with their notes and the deployment pin selector; and a sources table
 with each source's built version, target version, a stale badge, an override
-control and a refresh action.
+control and a refresh action. Changing a pin in the UI first calls the dry run
+and shows its result (sources affected, total chunks) in a confirmation step;
+only confirming sends the real request.
 
 **Docs.**
 
@@ -258,6 +273,9 @@ Unit tests (no external services):
   an unknown pinned version fails startup;
 - which sources a pin change enqueues (a deployment change skips overridden
   sources; a source already at its target is a no-op);
+- dry run: it reports exactly the sources and chunk totals the real call would
+  enqueue, applies the same validation (`400` for an unknown version or a HyDE
+  override), and writes no pin row, emits no `NOTIFY` and enqueues no job;
 - `resummarize` against a fake vector store: snapshot then batch, a zero
   vector for missing summaries, and the recorded version advancing only on a
   clean run;
@@ -319,8 +337,9 @@ mechanism.
 - Switching the summary prompt costs LLM calls for uncached chunk texts plus
   summary embeddings and a write-back: no parsing, no code embeddings, no graph
   work.
-- Admins can trial a version on one source before promoting it, and can see
-  exactly which sources are stale.
+- Admins can trial a version on one source before promoting it, can see
+  exactly which sources are stale, and can preview a pin change's scope with a
+  dry run before any LLM work starts.
 - Prompt text becomes reviewable history: a shipped version cannot be changed
   silently.
 
@@ -345,16 +364,14 @@ mechanism.
 - Per-source HyDE pins (a cross-repo query spans sources).
 - Versioning the benchmark prompts (`application/benchmark/*`).
 
-## Open questions
+## Resolved questions
 
-1. Deployments that indexed with `USE_SUMMARY_VECTOR=0` get
-   `summary_prompt_version = 3` from the migration backfill. Accept this (it is
-   harmless: their summary vectors are zero vectors, and a refresh would
-   populate them), or leave it `NULL` for sources whose summary vectors are all
-   zero, at the cost of a scan per source when the migration runs?
-2. Moving the deployment pin can start LLM work across every source. Should
-   the API offer a dry run that shows what would be enqueued, or require an
-   explicit confirmation?
+Both questions raised when this was drafted were settled on 2026-09-24:
+
+1. **Sources indexed with `USE_SUMMARY_VECTOR=0` record v3** from the
+   migration backfill, rather than `NULL` (see §2).
+2. **Moving a pin supports a dry run** (`?dry_run=true`), and the operator UI
+   always shows it as a confirmation step (see §4).
 
 ## References
 
