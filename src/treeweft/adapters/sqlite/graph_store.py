@@ -332,8 +332,41 @@ async def entity_counts_by_source() -> dict[str, int]:
     return {r["source_id"]: r["n"] for r in rows}
 
 
+async def _stage_external_neighbours(conn, doomed_sql: str, params: tuple = ()) -> None:
+    """Record every entity related to the doomed set, before its edges go.
+
+    ExternalModule import targets are created by the relationship pass and
+    owned by no source, so deleting their importers strands them edge-less.
+    Staged in a temp table (dropped first — see delete_source's _doomed note);
+    `_delete_staged_orphans` removes the ones left with no relationships.
+    """
+    await conn.execute("DROP TABLE IF EXISTS _ext_cand")
+    await conn.execute(
+        f"CREATE TEMP TABLE _ext_cand AS "
+        f"SELECT target_id AS id FROM relationships WHERE source_id IN ({doomed_sql}) "
+        f"UNION SELECT source_id FROM relationships WHERE target_id IN ({doomed_sql})",
+        params + params,
+    )
+
+
+async def _delete_staged_orphans(conn) -> None:
+    await conn.execute(
+        """
+        DELETE FROM entities
+        WHERE id IN (SELECT id FROM _ext_cand)
+          AND type = 'ExternalModule'
+          AND NOT EXISTS (SELECT 1 FROM relationships r
+                          WHERE r.source_id = entities.id OR r.target_id = entities.id)
+          AND NOT EXISTS (SELECT 1 FROM source_entities se
+                          WHERE se.entity_id = entities.id)
+        """
+    )
+    await conn.execute("DROP TABLE _ext_cand")
+
+
 async def delete_source(source_id: str):
-    """Delete the source and entities owned EXCLUSIVELY by it."""
+    """Delete the source, entities owned EXCLUSIVELY by it, and the
+    ExternalModule import targets that leaves with no relationships."""
     conn = await _get_conn()
     async with _lock():
         # DROP first. `CREATE TEMP TABLE IF NOT EXISTS ... AS SELECT` does not
@@ -356,6 +389,7 @@ async def delete_source(source_id: str):
             """,
             (source_id,),
         )
+        await _stage_external_neighbours(conn, "SELECT id FROM _doomed")
         await conn.execute(
             "DELETE FROM relationships WHERE source_id IN (SELECT id FROM _doomed) "
             "OR target_id IN (SELECT id FROM _doomed)"
@@ -364,6 +398,7 @@ async def delete_source(source_id: str):
             "DELETE FROM entities WHERE id IN (SELECT id FROM _doomed)"
         )
         await conn.execute("DROP TABLE _doomed")
+        await _delete_staged_orphans(conn)
         await conn.execute(
             "DELETE FROM source_entities WHERE source_id = ?", (source_id,)
         )
@@ -714,6 +749,9 @@ async def clear_all():
 async def delete_file_entities(file_path: str):
     conn = await _get_conn()
     async with _lock():
+        await _stage_external_neighbours(
+            conn, "SELECT id FROM entities WHERE file_path = ?", (file_path,)
+        )
         await conn.execute(
             "DELETE FROM relationships WHERE source_id IN "
             "(SELECT id FROM entities WHERE file_path = ?) "
@@ -728,6 +766,7 @@ async def delete_file_entities(file_path: str):
         await conn.execute(
             "DELETE FROM entities WHERE file_path = ?", (file_path,)
         )
+        await _delete_staged_orphans(conn)
         await conn.commit()
 
 
@@ -746,6 +785,9 @@ async def delete_entities_by_file(source_id: str, file_path: str) -> int:
             await conn.commit()
             return 0
         placeholders = ",".join("?" for _ in ids)
+        await _stage_external_neighbours(
+            conn, placeholders, tuple(ids)
+        )
         await conn.execute(
             f"DELETE FROM relationships WHERE source_id IN ({placeholders}) "
             f"OR target_id IN ({placeholders})",
@@ -758,6 +800,7 @@ async def delete_entities_by_file(source_id: str, file_path: str) -> int:
         await conn.execute(
             f"DELETE FROM entities WHERE id IN ({placeholders})", ids
         )
+        await _delete_staged_orphans(conn)
         await conn.commit()
         return len(ids)
 

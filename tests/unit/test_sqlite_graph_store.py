@@ -413,16 +413,19 @@ async def test_delete_source_does_not_orphan_shared_or_other_source_entities():
 
 
 @pytest.mark.asyncio
-async def test_merge_target_orphan_is_characterized_not_reaped_by_delete():
-    """CHARACTERIZATION (not a "should be empty" assertion): the relationship
-    pass auto-creates a bare ExternalModule TARGET that is never added to
-    source_entities, so it is already an orphan the moment it's created and
-    survives delete_source. This is the ~202k-row MERGE-target population seen in production.
+async def test_merge_target_orphan_is_reaped_by_delete_only_once_dangling():
+    """CHARACTERIZATION. The relationship pass auto-creates a bare
+    ExternalModule TARGET that is never added to source_entities, so it is a
+    source-ownership orphan from birth (the ~202k-row MERGE-target population
+    seen in production). While it is still a relationship target it backs
+    IMPORTS/CALLS traversal to external symbols and must be KEPT
+    (scripts/cleanup_orphan_entities.py population A).
 
-    The cleanup policy (scripts/cleanup_orphan_entities.py) KEEPS these by
-    default because they back IMPORTS/CALLS traversal to external symbols; this
-    test pins the current behavior so a future store_graph change is a
-    conscious decision, not an accident."""
+    Once delete_source removes its last importer it is fully dangling — no
+    edges at all — which the cleanup script already classes as the safe
+    default delete set (population B). delete_source now reaps exactly those,
+    scoped to the neighbours of what it deleted, instead of leaving them for
+    the script. Deliberate change: previously this pinned "survives"."""
     e = _entity(1)
     await gs.store_graph(
         [e],
@@ -430,14 +433,84 @@ async def test_merge_target_orphan_is_characterized_not_reaped_by_delete():
         source_id="src-1",
     )
     # the external target is an orphan from birth (no source_entities row)
+    # but still a relationship target, so it stays
     assert "ext://numpy" in await _orphan_entity_ids()
     assert (await gs.get_entity_by_id("ext://numpy"))["type"] == "ExternalModule"
 
-    # deleting the source reaps the real entity but the external target is
-    # NOT reaped via delete_source (it was never source-contained). The
-    # relationship is dropped because its endpoint `e` was deleted; the bare
-    # ExternalModule node persists as a dangling orphan -> cleanup-script turf.
     await gs.delete_source("src-1")
     assert await gs.get_entity_by_id(e["id"]) is None
-    assert await gs.get_entity_by_id("ext://numpy") is not None  # survives
-    assert "ext://numpy" in await _orphan_entity_ids()
+    assert await gs.get_entity_by_id("ext://numpy") is None  # dangling -> reaped
+    assert "ext://numpy" not in await _orphan_entity_ids()
+
+
+# ---------------------------------------------------------------------------
+# ExternalModule orphans: import targets are created by the relationship pass
+# and owned by no source, so deleting the importer used to strand them with no
+# edges — the graph grew by every deleted source's imports, forever.
+# ---------------------------------------------------------------------------
+
+async def _import(entity: dict, target: str, source_id: str):
+    await gs.store_graph(
+        [entity],
+        [{"source_id": entity["id"], "target_id": target, "type": "IMPORTS"}],
+        source_id=source_id,
+    )
+
+
+@pytest.mark.asyncio
+async def test_delete_source_removes_orphaned_external_modules():
+    await _import(_entity(1), "ext://numpy", "src-a")
+    await gs.delete_source("src-a")
+    assert await gs.get_entity_by_id("ext://numpy") is None
+
+
+@pytest.mark.asyncio
+async def test_delete_source_keeps_external_module_still_imported_elsewhere():
+    await _import(_entity(1), "ext://numpy", "src-a")
+    await _import(_entity(2), "ext://numpy", "src-b")
+    await gs.delete_source("src-a")
+    assert await gs.get_entity_by_id("ext://numpy") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_source_keeps_unrelated_orphans():
+    """Cleanup is scoped to the deleted entities' neighbours, not a global sweep."""
+    conn = await gs._get_conn()
+    await conn.execute(
+        "INSERT INTO entities (id, type) VALUES ('ext://legacy', 'ExternalModule')"
+    )
+    await conn.commit()
+    await _import(_entity(1), "ext://numpy", "src-a")
+    await gs.delete_source("src-a")
+    assert await gs.get_entity_by_id("ext://legacy") is not None
+
+
+@pytest.mark.asyncio
+async def test_delete_entities_by_file_removes_orphaned_external_modules():
+    await _import(_entity(1), "ext://numpy", "src-a")
+    await _import(_entity(2), "ext://numpy", "src-a")
+    await _import(_entity(2), "ext://pandas", "src-a")
+    await gs.delete_entities_by_file("src-a", "/repo/f2.py")
+    assert await gs.get_entity_by_id("ext://pandas") is None
+    assert await gs.get_entity_by_id("ext://numpy") is not None  # f1 still imports it
+
+
+@pytest.mark.asyncio
+async def test_delete_file_entities_removes_orphaned_external_modules():
+    await _import(_entity(1), "ext://numpy", "src-a")
+    await gs.delete_file_entities("/repo/f1.py")
+    assert await gs.get_entity_by_id("ext://numpy") is None
+
+
+@pytest.mark.asyncio
+async def test_defined_target_is_never_treated_as_external_orphan():
+    """A target that a source actually defines has a real type and is owned
+    via source_entities — deleting the importer must not remove it."""
+    a, b = _entity(1), _entity(2)
+    await gs.store_graph(
+        [a, b],
+        [{"source_id": a["id"], "target_id": b["id"], "type": "CALLS"}],
+        source_id="src-a",
+    )
+    await gs.delete_entities_by_file("src-a", "/repo/f1.py")
+    assert await gs.get_entity_by_id(b["id"]) is not None
