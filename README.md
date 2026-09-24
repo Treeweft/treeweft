@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/branding/treeweft-logo-horizontal.svg" alt="Treeweft" width="420">
+  <img src="assets/branding/treeweft-logo-horizontal.svg" alt="Treeweft" width="260">
 </p>
 
 <p align="center"><strong>Parse Trees · Weave Graphs</strong></p>
