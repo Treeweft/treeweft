@@ -80,7 +80,15 @@ def _get_semaphore() -> asyncio.Semaphore:
     return _semaphore
 
 
-async def _chat(messages: list[dict], max_tokens: int, *, operation: str = "") -> str | None:
+async def _chat(
+    messages: list[dict],
+    max_tokens: int,
+    *,
+    operation: str = "",
+    request_timeout: float | None = None,
+) -> str | None:
+    """`request_timeout` bounds the request only — it starts once an
+    LLM_CONCURRENCY slot is acquired, so queue wait never counts against it."""
     from treeweft.infrastructure.tracing import get_tracer
 
     sem = _get_semaphore()
@@ -107,9 +115,9 @@ async def _chat(messages: list[dict], max_tokens: int, *, operation: str = "") -
     ) as _span:
         async with sem:
             try:
-                resp = await _get_client().post(
-                    f"{LLM_URL}/chat/completions",
-                    json=body,
+                resp = await asyncio.wait_for(
+                    _get_client().post(f"{LLM_URL}/chat/completions", json=body),
+                    timeout=request_timeout,
                 )
                 resp.raise_for_status()
                 content = resp.json()["choices"][0]["message"]["content"]
@@ -251,6 +259,9 @@ async def _generate_summary(
         operation=Operation.CHUNK_SUMMARY,
         validator=validator,
         timeout=LLM_TIMEOUT,
+        # Background indexing fans out every uncached chunk at once; waiting
+        # for an LLM_CONCURRENCY slot is expected and must not time out.
+        timeout_includes_queue=False,
     )
 
 

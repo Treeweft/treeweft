@@ -81,6 +81,7 @@ async def call_with_control_layer(
     validator: Optional[ResponseValidator] = None,
     audit_id: str = "",
     timeout: Optional[float] = None,
+    timeout_includes_queue: bool = True,
 ) -> tuple[Optional[str], str]:
     """Call the LLM through the full control layer stack.
 
@@ -91,6 +92,9 @@ async def call_with_control_layer(
         validator: Optional ResponseValidator for output checking.
         audit_id: Optional correlation ID (auto-generated if empty).
         timeout: Optional per-call timeout override.
+        timeout_includes_queue: True (default) makes `timeout` a total
+            deadline including the wait for an LLM_CONCURRENCY slot; False
+            bounds only the request itself (background work that may queue).
 
     Returns:
         (response_text, strategy_name) where strategy_name is:
@@ -125,15 +129,23 @@ async def call_with_control_layer(
 
         # 2. Call the LLM
         t0 = time.monotonic()
+        op_name = str(getattr(operation, "value", operation) or "")
         try:
-            raw = await asyncio.wait_for(
-                _chat(
+            if timeout_includes_queue:
+                # Total deadline, queue wait included: a latency budget (HyDE).
+                raw = await asyncio.wait_for(
+                    _chat(messages, max_tokens=max_tokens, operation=op_name),
+                    timeout=effective_timeout,
+                )
+            else:
+                # Bound only the request, from when an LLM_CONCURRENCY slot
+                # is acquired; _chat returns None if it runs over.
+                raw = await _chat(
                     messages,
                     max_tokens=max_tokens,
-                    operation=str(getattr(operation, "value", operation) or ""),
-                ),
-                timeout=effective_timeout,
-            )
+                    operation=op_name,
+                    request_timeout=effective_timeout,
+                )
             latency = (time.monotonic() - t0) * 1000
         except asyncio.TimeoutError:
             latency = effective_timeout * 1000
