@@ -507,14 +507,14 @@ async def _summaries_for_chunks(chunks: list[dict]) -> list[str | None]:
         "summaries.cache_lookup",
         attributes={"treeweft.keys_requested": len(keys)},
     ) as span:
-        cached = await llm.cache_get_many(keys)
+        cached = await llm.cache_get_many(keys, include_rejected=True)
         span.set_attribute("treeweft.cache_hits", len(cached))
         span.set_attribute("treeweft.cache_misses", len(keys) - len(cached))
     out: list[str | None] = [None] * len(chunks)
     pending: list[int] = []
     for i, key in enumerate(keys):
         if key in cached:
-            out[i] = cached[key]
+            out[i] = cached[key] or None  # rejection marker -> no summary
         else:
             pending.append(i)
 
