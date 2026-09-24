@@ -1,11 +1,13 @@
 name: CI
 
-# `unit-tests` is a required status check on main (repository ruleset), so
-# it must REPORT on every PR. A trigger-level `paths-ignore` would skip the
-# whole workflow on document-only changes and leave the check unreported,
-# which blocks the merge. Instead a cheap `changes` job classifies the diff
-# and `unit-tests` is skipped (not absent) when only docs/images changed —
-# a skipped required job counts as passing.
+# `unit-tests` and `ui` are required status checks on main (repository
+# ruleset), so they must REPORT on every PR. A trigger-level `paths-ignore`
+# would skip the whole workflow on document-only changes and leave the checks
+# unreported, which blocks the merge. Instead a cheap `changes` job classifies
+# the diff and the jobs are skipped (not absent) when only docs/images
+# changed — a skipped required job counts as passing. A skipped job reports
+# under its `name:` WITHOUT evaluating matrix expressions, so every required
+# job needs a static name (no matrix-derived name).
 on:
   push:
     branches: [main]
@@ -22,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       code: ${{ steps.filter.outputs.code }}
-      ui: ${{ steps.ui-filter.outputs.ui }}
+      ui: ${{ steps.ui-filter.outputs.ui == 'true' || steps.ui-filter.outputs.workflow == 'true' }}
     steps:
       - uses: actions/checkout@v7
       - id: filter
@@ -43,39 +45,50 @@ jobs:
               - '!**/*.gif'
               - '!**/*.webp'
               - '!**/*.ico'
-      # A separate step because the patterns here are positive and any one
-      # of them should match: under the `every` quantifier above, a file
-      # would have to be inside ui/ AND be this workflow file.
+      # UI code is a file inside ui/ that is also not a doc/image (so a
+      # README or the brand SVGs under ui/public/ do not trigger the build),
+      # hence `every` again. This workflow file is its own filter because
+      # under `every` a file would have to be inside ui/ AND be ci.yml; the
+      # `ui` output above ORs the two.
       - id: ui-filter
         uses: dorny/paths-filter@v4
         with:
+          predicate-quantifier: every
           filters: |
             ui:
               - 'ui/**'
+              - '!**/*.md'
+              - '!**/*.svg'
+              - '!**/*.png'
+              - '!**/*.jpg'
+              - '!**/*.jpeg'
+              - '!**/*.gif'
+              - '!**/*.webp'
+              - '!**/*.ico'
+            workflow:
               - '.github/workflows/ci.yml'
 
+  # Two jobs sharing one step list (YAML anchor) rather than a matrix: the
+  # required check is `unit-tests`, and a matrix-derived name is not
+  # evaluated when the job is skipped, so a docs-only PR would never report
+  # it and could not merge. 3.11 is the supported floor (requires-python);
+  # 3.14 is what the Docker images run. The 3.14 job is not required unless
+  # the ruleset adds it, and the jobs are independent, so its failure cannot
+  # cancel the required one.
   unit-tests:
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    # The 3.11 leg must keep the exact name `unit-tests`: that is the
-    # required status check, and a default matrix name (`unit-tests (3.11)`)
-    # would never report it, blocking every merge. 3.11 is the supported
-    # floor (requires-python); 3.14 is what the Docker images run. The 3.14
-    # leg is not required unless the ruleset adds it, and fail-fast is off
-    # so its failure cannot cancel the required leg.
-    name: ${{ matrix.python == '3.11' && 'unit-tests' || format('unit-tests (python {0})', matrix.python) }}
+    name: unit-tests
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python: ["3.11", "3.14"]
-    steps:
+    env:
+      PYTHON_VERSION: "3.11"
+    steps: &unit-test-steps
       - uses: actions/checkout@v7
       # setup-uv publishes no floating major tag (`@v10` does not resolve), so
       # pin the release commit; Dependabot's github-actions updates bump it.
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
         with:
-          python-version: ${{ matrix.python }}
+          python-version: ${{ env.PYTHON_VERSION }}
           enable-cache: true
       - name: Install
         # Installs the exact versions in uv.lock, which is what `uv sync`
@@ -98,8 +111,17 @@ jobs:
       - name: Unit tests
         run: uv run --locked --no-sync pytest tests/unit -q
 
+  unit-tests-py314:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    name: unit-tests (python 3.14)
+    runs-on: ubuntu-latest
+    env:
+      PYTHON_VERSION: "3.14"
+    steps: *unit-test-steps
+
   # The operator UI had no CI: Dependabot npm PRs showed green while failing
-  # `npm ci` or the build. Runs only when ui/ (or this file) changes.
+  # `npm ci` or the build. Runs only when ui/ code (or this file) changes.
   ui:
     needs: changes
     if: needs.changes.outputs.ui == 'true'
