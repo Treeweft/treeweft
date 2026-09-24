@@ -84,6 +84,7 @@ more than the title:
 |---|---|---|
 | [adr-001-cost-aware-embedding-proxy.md](adr-001-cost-aware-embedding-proxy.md) | Rule | Why embedding requests are balanced by token cost in-process rather than by connection count in a proxy, and why oversized chunks are pinned to CPU. |
 | [adr-002-no-langchain-langgraph.md](adr-002-no-langchain-langgraph.md) | Rule | Why Treeweft does not adopt LangChain or LangGraph, and the one narrow case in which LangGraph could be reconsidered. |
+| [adr-003-prompt-versioning.md](adr-003-prompt-versioning.md) | Proposal | How LLM prompts would become an immutable versioned registry with admin pins, so a new summary prompt costs a background summary-only refresh instead of a re-index. Proposed; not implemented. |
 
 ## Historical
 
@@ -151,5 +152,6 @@ cost-across-models
 
 adr-001-cost-aware-embedding-proxy
 adr-002-no-langchain-langgraph
+adr-003-prompt-versioning
 gpu-cpu-routing
 ```
