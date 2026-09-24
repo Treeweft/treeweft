@@ -399,6 +399,25 @@ async def entity_counts_by_source() -> dict[str, int]:
         return {r["id"]: r["n"] for r in records if r["id"]}
 
 
+# Appended to a query that has bound `e` to the entities being deleted.
+# ExternalModule import targets are MERGEd by the relationship pass and owned
+# by no Source, so deleting their importers would strand them edge-less (the
+# "fully dangling" set scripts/cleanup_orphan_entities.py already treats as
+# safe to delete). Collect them first, delete `e`, then delete only the
+# neighbours left with no relationships — a module another source still
+# imports keeps its edges and survives. Scoped to neighbours: no global sweep.
+_DELETE_WITH_ORPHANED_EXTERNALS = """
+OPTIONAL MATCH (e)--(x:Entity {type: 'ExternalModule'})
+WITH collect(DISTINCT e) AS doomed, collect(DISTINCT x) AS ext
+WITH doomed, [x IN ext WHERE NOT x IN doomed] AS ext
+FOREACH (n IN doomed | DETACH DELETE n)
+WITH ext
+UNWIND ext AS x
+WITH x WHERE NOT (x)--()
+DELETE x
+"""
+
+
 @_retry_on_disconnect
 async def delete_source(source_id: str):
     async with _get_session() as session:
@@ -411,8 +430,7 @@ async def delete_source(source_id: str):
                 MATCH (other:Source)-[:CONTAINS]->(e)
                 WHERE other.id <> $source_id
             }
-            DETACH DELETE e
-            """,
+            """ + _DELETE_WITH_ORPHANED_EXTERNALS,
             source_id=source_id,
         )
         # Drop the Source node itself.
@@ -824,10 +842,7 @@ async def clear_all():
 async def delete_file_entities(file_path: str):
     async with _get_session() as session:
         await session.run(
-            """
-            MATCH (e:Entity {file_path: $file_path})
-            DETACH DELETE e
-            """,
+            "MATCH (e:Entity {file_path: $file_path})" + _DELETE_WITH_ORPHANED_EXTERNALS,
             file_path=file_path,
         )
 
@@ -854,15 +869,15 @@ async def delete_entities_by_file(source_id: str, file_path: str) -> int:
         file_path: The file path to delete entities for.
 
     Returns:
-        Number of deleted entities (nodes).
+        Number of deleted nodes: the file's entities plus any ExternalModule
+        import targets they left with no relationships.
     """
     async with _get_session() as session:
         result = await session.run(
             """
             MATCH (s:Source {id: $source_id})-[:CONTAINS]->(e:Entity)
             WHERE e.file_path = $file_path
-            DETACH DELETE e
-            """,
+            """ + _DELETE_WITH_ORPHANED_EXTERNALS,
             source_id=source_id,
             file_path=file_path,
         )
