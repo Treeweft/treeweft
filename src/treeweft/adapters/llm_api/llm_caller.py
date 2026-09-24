@@ -189,7 +189,9 @@ async def call_with_control_layer(
                 )
                 if result is not None:
                     return result, f"fallback:{strategy}"
-                return None, "error"
+                # The LLM answered every time; the answers were rejected.
+                # Distinct from "error" so callers can cache the outcome.
+                return None, "rejected"
             raw = validation.cleaned_output
 
         # 5. Success
