@@ -271,8 +271,9 @@ once both versions are raised. Confirm the committed snapshot matches the curren
   indexer restart. When the group completes, the status MUST return to `ok`.
 - **FR-016**: The rebuild MUST keep the summary cache, so re-indexing reuses summaries keyed by
   the LLM model and only recomputes embeddings.
-- **FR-017**: Rebuild requests (dry run and real) MUST be audit-logged with the caller, like
-  other admin operations.
+- **FR-017**: Rebuild requests (dry run and real) MUST be logged with the caller, the sources
+  affected, and each stage of the real rebuild. The indexer has no admin audit trail to reuse
+  (research R8).
 
 **MCP**
 
@@ -359,9 +360,10 @@ once both versions are raised. Confirm the committed snapshot matches the curren
   are untouched.
 - The MCP compatibility check and corrected error mapping from Plan 1 are in place (released in
   1.0.0).
-- Releasing this feature is a separate release PR. The new health fields and the rebuild
-  endpoint are additive, a MINOR bump. This feature itself does not raise
-  `INDEX_SCHEMA_VERSION`.
+- The new health fields and the rebuild endpoint are additive, a MINOR bump. The API contract
+  test requires that bump in the same PR, so this feature sets the version to 1.1.0 (research
+  R10). Tagging and regenerating the API and MCP snapshots stay in a separate release PR. This
+  feature does not raise `INDEX_SCHEMA_VERSION`.
 - Integration tests (stamp read and write against real Milvus and Neo4j) are opt-in, marked
   `slow`, and live under `tests/integration/`. Unit tests use fakes only (constitution
   Principle II).
