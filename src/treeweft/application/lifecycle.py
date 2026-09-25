@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from treeweft import graph_store
+from treeweft.application import index_guard
 from treeweft.application import indexer_state as _state
 from treeweft.application import indexer_runners as runners
 from treeweft.application import routes_auth as rauth
@@ -440,7 +441,11 @@ async def startup(app):
 
     await _seed_admin_if_first_start()
 
-    # ── JobStore: resume incomplete jobs from previous run ──────────
+    # ── JobStore/JobGroupStore: initialize before the index-schema check ────
+    # ADR-004 §3 (research R2): the check reads the latest rebuild group
+    # through JobGroupStore, so both stores must exist before it runs. It
+    # must in turn run before the queue starts and before any job below is
+    # (re-)enqueued, so no worker can pick up work before the status is known.
 
     from treeweft.adapters.postgresql.job_store import JobStore
     from treeweft.adapters.postgresql.job_group_store import JobGroupStore
@@ -452,6 +457,12 @@ async def startup(app):
 
     _state._job_group_store = JobGroupStore()
     await _state._job_group_store.init()
+
+    # ── Index-schema stamp check (ADR-004 §3) ────────────────────────────
+    try:
+        await index_guard.run_check()
+    except Exception:
+        logger.exception("Index-schema stamp check failed at startup")
 
     _state._job_queue = PostgresJobQueue()
     await _state._job_queue.start()
@@ -544,8 +555,12 @@ async def startup(app):
     else:
         logger.info("Fleet auto-refresh disabled (FLEET_AUTO_REFRESH_ENABLED=false)")
 
+    # ── Index-status refresh loop (ADR-004 §3) ────────────────────────────
+    index_guard.start_refresh_loop()
+
 
 async def shutdown(app):
+    await index_guard.stop_refresh_loop()
     # Cancel the freshness sampler task cleanly.
     if _state._freshness_sampler_task is not None and not _state._freshness_sampler_task.done():
         _state._freshness_sampler_task.cancel()

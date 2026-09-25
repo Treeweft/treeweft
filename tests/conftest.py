@@ -268,6 +268,22 @@ def mock_llm_httpx(mocker) -> AsyncMock:
 
 
 @pytest.fixture(autouse=True)
+def _index_guard_ok(monkeypatch):
+    """Default index_guard's cached status to `ok` for every unit test.
+
+    Production starts conservative (`reindex_required`, "not yet checked")
+    until `run_check()` runs at startup (ADR-004 §3) — but most existing job
+    tests never run the lifecycle and would otherwise have every job refused
+    by `dispatch_allowed()`'s cached-status check, hitting real stores via
+    its fresh re-check. Tests of the check itself set their own status via
+    monkeypatch, which simply overrides this default for that test.
+    """
+    from treeweft.application import index_guard
+
+    monkeypatch.setattr(index_guard, "_status", index_guard.IndexStatus("ok"))
+
+
+@pytest.fixture(autouse=True)
 def _compatible_indexer(request, monkeypatch):
     """Pre-seed treeweft-mcp's indexer compatibility check as passed.
 

@@ -227,6 +227,33 @@ async def test_status_error_from_a_tool_is_not_reported_as_unreachable(fake_http
     assert result == {"error": "Indexer returned HTTP 409: index requires rebuild"}
 
 
+@pytest.mark.asyncio
+async def test_reindex_required_409_reaches_the_agent_with_the_rebuild_pointer(fake_http, fresh_state):
+    """ADR-004 §3 FR-018: the errors.md 409 body reaches search_code as
+    `detail`, with the rebuild pointer intact and never "unreachable" —
+    exercising Plan 1's existing error mapping, not new MCP code."""
+    from treeweft.application import mcp_server
+
+    script, _ = fake_http
+    body = {
+        "detail": (
+            "Index requires rebuild: vector store (milvus): embedding_model is BAAI/bge-m3, "
+            "configured Qwen/Qwen3-Embedding-0.6B. Run POST /index/rebuild?dry_run=true, then "
+            "POST /index/rebuild (docs/upgrading.md)."
+        ),
+        "reason": "vector store (milvus): embedding_model is BAAI/bge-m3, configured Qwen/Qwen3-Embedding-0.6B",
+        "index_status": "reindex_required",
+        "rebuild": "/index/rebuild",
+    }
+    script["POST"] = _resp(409, body)
+
+    result = await mcp_server.search_code(query="auth", source_id="repoA")
+
+    assert result == {"error": f"Indexer returned HTTP 409: {body['detail']}"}
+    assert "/index/rebuild" in result["error"]
+    assert "unreachable" not in result["error"].lower()
+
+
 def test_every_tool_is_wrapped_and_its_schema_is_unchanged():
     """The decorator must not alter the MCP contract (names, input/output schemas)."""
     from treeweft.application import mcp_server

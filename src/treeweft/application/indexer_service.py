@@ -103,6 +103,7 @@ from treeweft.application import indexer_state as _state
 # reaches only one of them, depending on whether the caller is a route here
 # or a helper there. Qualifying leaves one target.
 from treeweft.application import indexer_authz as authz
+from treeweft.application import index_guard
 
 # Auth / identity endpoints live in routes_auth (stage 4/6).
 from treeweft.application import routes_auth as _routes_auth
@@ -510,6 +511,7 @@ async def health():
         "auth_enabled": os.environ.get("AUTH_ENABLED", "").lower() == "true",
         "version": versions.SOURCE_VERSION,
         "release": versions.product_release(),
+        **index_guard.health_fields(),
     }
 
 
@@ -738,6 +740,9 @@ async def retry_dead_letter_job(job_id: str, request: Request):
         user = await authz._require_authenticated_user(request)
         if user is None or getattr(user, "role", None) != "admin":
             raise HTTPException(403, "Admin role required")
+    gate = await index_guard.require_writable()
+    if gate is not None:
+        return gate
     if _state._job_store is None:
         raise HTTPException(503, "Job store not available")
     job = await _state._job_store.get(job_id)
@@ -777,6 +782,9 @@ def _caller_id(request: Request) -> str | None:
 async def handle_index_file(req: IndexFileRequest, request: Request):
     file_path = os.path.expanduser(req.file_path)
     authz._require_path_in_scope(file_path)
+    gate = await index_guard.require_writable()
+    if gate is not None:
+        return gate
     path = Path(file_path)
     if not path.exists():
         raise HTTPException(404, f"File not found: {file_path}")
@@ -815,6 +823,9 @@ async def handle_index_file(req: IndexFileRequest, request: Request):
 async def handle_index_directory(req: IndexDirectoryRequest, request: Request):
     directory = os.path.expanduser(req.directory)
     authz._require_path_in_scope(directory)
+    gate = await index_guard.require_writable()
+    if gate is not None:
+        return gate
     if not os.path.isdir(directory):
         raise HTTPException(404, f"Directory not found: {directory}")
 
@@ -874,6 +885,9 @@ async def handle_index_repo(req: IndexRepoRequest, request: Request):
 
     if req.path:
         authz._require_path_in_scope(os.path.expanduser(req.path))
+    gate = await index_guard.require_writable()
+    if gate is not None:
+        return gate
     label = req.url or os.path.expanduser(req.path or "")
     source_id = make_source_id(path=req.path, url=req.url, branch=req.branch)
 
@@ -1304,6 +1318,9 @@ async def handle_index_graph(req: IndexGraphRequest, request: Request):
         request, req.source_id, action="index_graph",
         enforced=authz._write_auth_enforced(),
     )
+    gate = await index_guard.require_writable()
+    if gate is not None:
+        return gate
 
     record = await _state._source_repo.get_by_id(req.source_id)
     if record is None:
@@ -1450,6 +1467,9 @@ async def handle_build_community(request: Request):
     apply; admin is the right gate.
     """
     authz._require_admin(request)
+    gate = await index_guard.require_writable()
+    if gate is not None:
+        return gate
 
     if _state._community_build_task is not None and not _state._community_build_task.done():
         return {**_state._community_build_state, "status": "already_running"}
@@ -1660,29 +1680,38 @@ async def handle_search(req: SearchRequest, request: Request):
         # one rather than leaving it on for every caller.
         authz._require_scope(request, "admin")
     exclude = await authz._authorize_scope(request, req.source_id)
-    query_embedding = await embed_query([req.query])
-    result = await graph_search(
-        query_embedding[0],
-        req.query,
-        top_k=req.top_k,
-        language=req.language,
-        path_prefix=req.path_prefix,
-        source_id=req.source_id,
-        exclude_source_ids=exclude,
-        use_hybrid=req.use_hybrid,
-        use_hyde=req.use_hyde,
-        use_summary_vector=req.use_summary_vector,
-        use_graph_scoring=req.use_graph_scoring,
-        rerank_pool=req.rerank_pool,
-        return_pool=req.return_pool,
-        response_mode=req.response_mode,
-        include_community_summaries=req.include_community_summaries,
-        adaptive_topk=req.adaptive_topk,
-        adaptive_topk_gap=req.adaptive_topk_gap,
-        strip_imports=req.strip_imports,
-        query_class_payload=req.query_class_payload,
-        summary_prompt_version=req.summary_prompt_version,
-    )
+    gate = index_guard.require_searchable()
+    if gate is not None:
+        return gate
+    try:
+        query_embedding = await embed_query([req.query])
+        result = await graph_search(
+            query_embedding[0],
+            req.query,
+            top_k=req.top_k,
+            language=req.language,
+            path_prefix=req.path_prefix,
+            source_id=req.source_id,
+            exclude_source_ids=exclude,
+            use_hybrid=req.use_hybrid,
+            use_hyde=req.use_hyde,
+            use_summary_vector=req.use_summary_vector,
+            use_graph_scoring=req.use_graph_scoring,
+            rerank_pool=req.rerank_pool,
+            return_pool=req.return_pool,
+            response_mode=req.response_mode,
+            include_community_summaries=req.include_community_summaries,
+            adaptive_topk=req.adaptive_topk,
+            adaptive_topk_gap=req.adaptive_topk_gap,
+            strip_imports=req.strip_imports,
+            query_class_payload=req.query_class_payload,
+            summary_prompt_version=req.summary_prompt_version,
+        )
+    except Exception as exc:
+        translated = await index_guard.store_error_response(exc)
+        if translated is not None:
+            return translated
+        raise
     await _attach_provenance(result, check_staleness=req.check_staleness)
     return result
 
@@ -1705,9 +1734,18 @@ async def handle_hydrate_chunks(req: HydrateRequest, request: Request):
     # hydrated any hit_id the caller could name — and a hit_id is just a file
     # path and line range, guessable for a repo whose layout they know.
     exclude = await authz._authorize_scope(request, req.source_id, action="hydrate_chunks")
-    chunks = await hydrate_chunks(
-        req.ids, source_id=req.source_id, exclude_source_ids=exclude
-    )
+    gate = index_guard.require_searchable()
+    if gate is not None:
+        return gate
+    try:
+        chunks = await hydrate_chunks(
+            req.ids, source_id=req.source_id, exclude_source_ids=exclude
+        )
+    except Exception as exc:
+        translated = await index_guard.store_error_response(exc)
+        if translated is not None:
+            return translated
+        raise
     return {"chunks": chunks}
 
 
@@ -1719,10 +1757,19 @@ async def handle_find_definition(
     source_id: str | None = None,
 ):
     exclude = await authz._authorize_scope(request, source_id, action="find_definition")
-    entities = await graph_store.find_entities_by_name(
-        name, entity_type=kind, source_id=source_id,
-        exclude_source_ids=exclude,
-    )
+    gate = index_guard.require_searchable()
+    if gate is not None:
+        return gate
+    try:
+        entities = await graph_store.find_entities_by_name(
+            name, entity_type=kind, source_id=source_id,
+            exclude_source_ids=exclude,
+        )
+    except Exception as exc:
+        translated = await index_guard.store_error_response(exc)
+        if translated is not None:
+            return translated
+        raise
     # Entity dicts returned by find_entities_by_name are plain Neo4j/SQLite
     # node properties (dict(r["e"])).  Source membership is modelled as a
     # (:Source)-[:CONTAINS]->(e:Entity) graph relationship, not a property
@@ -1739,22 +1786,31 @@ async def handle_find_callers(
     source_id: str | None = None,
 ):
     exclude = await authz._authorize_scope(request, source_id, action="find_callers")
-    targets = await _resolve_to_entities(
-        name_or_id, kind="Function", source_id=source_id,
-        exclude_source_ids=exclude,
-    )
-    out: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for t in targets:
-        callers = await graph_store.find_callers(
-            t["id"], source_id=source_id, exclude_source_ids=exclude,
+    gate = index_guard.require_searchable()
+    if gate is not None:
+        return gate
+    try:
+        targets = await _resolve_to_entities(
+            name_or_id, kind="Function", source_id=source_id,
+            exclude_source_ids=exclude,
         )
-        for c in callers:
-            key = (c.get("id", ""), c.get("_target_id", ""))
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(c)
+        out: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for t in targets:
+            callers = await graph_store.find_callers(
+                t["id"], source_id=source_id, exclude_source_ids=exclude,
+            )
+            for c in callers:
+                key = (c.get("id", ""), c.get("_target_id", ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(c)
+    except Exception as exc:
+        translated = await index_guard.store_error_response(exc)
+        if translated is not None:
+            return translated
+        raise
     return out
 
 
@@ -1765,25 +1821,34 @@ async def handle_find_references(
     source_id: str | None = None,
 ):
     exclude = await authz._authorize_scope(request, source_id, action="find_references")
-    targets = await _resolve_to_entities(
-        name_or_id, source_id=source_id, exclude_source_ids=exclude,
-    )
-    out: list[dict] = []
-    seen: set[tuple[str, str, str]] = set()
-    for t in targets:
-        refs = await graph_store.find_references(
-            t["id"], source_id=source_id, exclude_source_ids=exclude,
+    gate = index_guard.require_searchable()
+    if gate is not None:
+        return gate
+    try:
+        targets = await _resolve_to_entities(
+            name_or_id, source_id=source_id, exclude_source_ids=exclude,
         )
-        for r in refs:
-            key = (
-                r.get("id", ""),
-                r.get("_rel_type", ""),
-                r.get("_target_id", ""),
+        out: list[dict] = []
+        seen: set[tuple[str, str, str]] = set()
+        for t in targets:
+            refs = await graph_store.find_references(
+                t["id"], source_id=source_id, exclude_source_ids=exclude,
             )
-            if key in seen:
-                continue
-            seen.add(key)
-            out.append(r)
+            for r in refs:
+                key = (
+                    r.get("id", ""),
+                    r.get("_rel_type", ""),
+                    r.get("_target_id", ""),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(r)
+    except Exception as exc:
+        translated = await index_guard.store_error_response(exc)
+        if translated is not None:
+            return translated
+        raise
     return out
 
 
@@ -1791,29 +1856,38 @@ async def handle_find_references(
 async def handle_graph_explore(req: GraphExploreRequest, request: Request):
     _require_valid_response_mode(req.response_mode)
     exclude = await authz._authorize_scope(request, req.source_id, action="graph_explore")
-    query_embedding = await embed_query([req.query])
-    result = await graph_search(
-        query_embedding[0],
-        req.query,
-        top_k=3,
-        traverse_depth=req.depth,
-        language=req.language,
-        path_prefix=req.path_prefix,
-        source_id=req.source_id,
-        exclude_source_ids=exclude,
-        use_hybrid=req.use_hybrid,
-        use_hyde=req.use_hyde,
-        use_summary_vector=req.use_summary_vector,
-        use_graph_scoring=req.use_graph_scoring,
-        rerank_pool=req.rerank_pool,
-        response_mode=req.response_mode,
-        include_community_summaries=req.include_community_summaries,
-        adaptive_topk=req.adaptive_topk,
-        adaptive_topk_gap=req.adaptive_topk_gap,
-        strip_imports=req.strip_imports,
-        query_class_payload=req.query_class_payload,
-        summary_prompt_version=req.summary_prompt_version,
-    )
+    gate = index_guard.require_searchable()
+    if gate is not None:
+        return gate
+    try:
+        query_embedding = await embed_query([req.query])
+        result = await graph_search(
+            query_embedding[0],
+            req.query,
+            top_k=3,
+            traverse_depth=req.depth,
+            language=req.language,
+            path_prefix=req.path_prefix,
+            source_id=req.source_id,
+            exclude_source_ids=exclude,
+            use_hybrid=req.use_hybrid,
+            use_hyde=req.use_hyde,
+            use_summary_vector=req.use_summary_vector,
+            use_graph_scoring=req.use_graph_scoring,
+            rerank_pool=req.rerank_pool,
+            response_mode=req.response_mode,
+            include_community_summaries=req.include_community_summaries,
+            adaptive_topk=req.adaptive_topk,
+            adaptive_topk_gap=req.adaptive_topk_gap,
+            strip_imports=req.strip_imports,
+            query_class_payload=req.query_class_payload,
+            summary_prompt_version=req.summary_prompt_version,
+        )
+    except Exception as exc:
+        translated = await index_guard.store_error_response(exc)
+        if translated is not None:
+            return translated
+        raise
     await _attach_provenance(result, check_staleness=req.check_staleness)
     return result
 
