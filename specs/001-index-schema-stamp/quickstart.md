@@ -83,9 +83,12 @@ health indicator shows "Re-index required", and hovering shows the reason.
 Before starting, confirm the served embedding model and the reranker are the intended ones
 (CLAUDE.md invariant).
 
+0. **Before upgrading** (still on 1.0.0), save the top-10 `file_path`s for 3 fixed `/search`
+   queries (SC-002).
 1. Start the indexer on this branch. `curl -s localhost:8001/health | jq` shows
    `index_schema: 1` and `index_status: ok`. An existing index was adopted: the log shows
-   "adopted … cosine=[…]".
+   "adopted … cosine=[…]". Re-run the 3 queries; the top-10 `file_path`s must be identical to
+   step 0.
 2. Simulate a model change by editing the Milvus property:
    `alter_collection_properties("treeweft_chunks", {"treeweft.embedding_model": "fake/model"})`.
    Then restart the indexer.
@@ -97,7 +100,8 @@ Before starting, confirm the served embedding model and the reranker are the int
 5. `POST /index/rebuild` returns 202 and a `group_id`. `/health` shows `rebuilding` with
    `rebuild_progress`. A search returns results for sources already rebuilt.
 6. When the group completes, `/health` shows `ok`, and a search returns results across all
-   sources.
+   sources. Count `summary_cache` rows with `created_at` at or after the time of step 5. Expect
+   about 0: summaries were reused, and only embeddings were recomputed (SC-005, FR-016).
 
 Simple mode (optional): repeat steps 1–3 with `TREEWEFT_PROFILE=simple`, changing
 `EMBEDDING_MODEL` in the environment instead of editing the store.

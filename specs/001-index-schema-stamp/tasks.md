@@ -378,6 +378,9 @@ still work.
   - the fake embedder records that `embed()` was called and `embed_query()` never was;
   - long rows are never sampled;
   - 2 rows → verified with 2, and 0 rows → treated as "no data";
+  - when all of the first 20 rows are long, `sample_chunks` is called again with
+    `scan_limit=200`; if none of those is short either → `failed("no verifiable chunks")`, which
+    means `reindex_required`, and nothing is stamped;
   - an `httpx.HTTPError`, a `RuntimeError("All embedding backends are unavailable …")` or a
     timeout beyond `INDEX_VERIFY_TIMEOUT_SECONDS` → unavailable;
   - an unstamped graph is adopted only when vector verification passed;
@@ -615,7 +618,10 @@ minimum schema integer and version. The committed snapshot matches the code.
   - **Operator configuration**: the first start after upgrading verifies an existing index by
     re-embedding up to 3 chunks, which needs the embedding service up.
 - [ ] T048 [P] Write `tests/integration/test_index_stamp_milvus.py` (`@pytest.mark.slow`, skipped
-  unless `MILVUS_TEST_URI`). Use a unique collection `itest_stamp_<hex>`. Cover:
+  unless `MILVUS_TEST_URI`). Use a unique collection `itest_stamp_<hex>`, reached by building
+  `MilvusAdapter(collection_name="itest_stamp_<hex>")` (the constructor already accepts
+  `collection_name`) and calling the new methods on that instance. Never use the module-level
+  wrappers here: they address the configured `MILVUS_COLLECTION`. Cover:
   - create with properties;
   - `describe_collection` properties round-trip (this proves Milvus 2.5.4 accepts `treeweft.*`
     keys);
@@ -650,13 +656,18 @@ minimum schema integer and version. The committed snapshot matches the code.
     cache and sources);
   - the known limit: TEI serving a different model under the same `EMBEDDING_MODEL` name is not
     detected once the index is stamped.
+
+  Also add a short cross-reference to `docs/upgrading.md` in `docs/simple-mode.md` (index
+  states apply to LanceDB and SQLite too) and in `docs/fleet-operations.md` (a fleet can hit
+  `reindex_required`; the rebuild re-indexes every fleet source as one job group).
 - [ ] T052 [P] Update `docs/engineering-notes.md` near `:77-81` and `:281`: index states, the
   gate on routes and dispatch, the rebuild, the `INDEX_VERIFY_*` settings, and the rule that new
   index routes must call the guard.
 - [ ] T053 [P] Update the ADR status line and the note in `docs/adr-004-compatibility-versioning.md`
   to record §3 as implemented. Add to `docs/adr-003-prompt-versioning.md` a note that
   summary-prompt changes never bump `INDEX_SCHEMA_VERSION`.
-- [ ] T054 [P] Update the Principle VII transition note in `.specify/memory/constitution.md` to
+- [ ] T054 [P] Run `/speckit-constitution` (CLAUDE.md "Spec Kit first"; do not edit the file by
+  hand) to amend the Principle VII transition note in `.specify/memory/constitution.md` to
   say that the rules are in force as of 1.1.0 (SemVer release tooling since 1.0.0, the index
   stamp since 1.1.0). Bump the constitution version to 1.0.1 (PATCH) and set Last Amended to
   the commit date.
@@ -676,6 +687,13 @@ minimum schema integer and version. The committed snapshot matches the code.
   embedding model and reranker. Record each step's observed `/health` output and HTTP codes for
   the PR.
   Include quickstart §5 (two indexer processes, SC-008).
+  Also record:
+  - **SC-002**: before upgrading, save the top-10 `file_path`s for 3 fixed queries. After
+    adoption, confirm they are identical. Record any difference.
+  - **SC-005 / FR-016**: note the rebuild start time and, after the group completes, count
+    `summary_cache` rows created since then (`SELECT count(*) FROM summary_cache WHERE
+    created_at >= <start as epoch seconds>`; `created_at` is a BIGINT from `int(time.time())`). Expect roughly 0, or only chunks that changed since their last
+    index. Record the count.
 
 ---
 

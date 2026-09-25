@@ -190,6 +190,11 @@ once both versions are raised. Confirm the committed snapshot matches the curren
   result is `reindex_required`.
 - **Fewer than three stored chunks** in an unstamped vector store. Verify with the chunks that
   exist. At least one is required. Zero chunks counts as "no data".
+- **No chunk short enough to verify.** Chunks of 50,000 characters or more are stored
+  truncated, so their stored text no longer matches what was embedded. If up to 200 inspected
+  chunks include none short enough to re-embed, verification fails: the status is
+  `reindex_required` with the reason "no verifiable chunks". Adopting unverified data would
+  break FR-004.
 - **A stored stamp with a newer schema version** than this release knows (a downgrade). The
   result is `reindex_required`, and the reason says the index was built by a newer schema.
 - **Rebuild requested while index jobs are running or queued, or while a rebuild is already in
@@ -241,7 +246,8 @@ once both versions are raised. Confirm the committed snapshot matches the curren
 
 - **FR-006**: The indexer's public health report MUST add `index_schema` (the running
   `INDEX_SCHEMA_VERSION`) and `index_status` (`ok`, `unverified`, `reindex_required` or
-  `rebuilding`). It MUST include `reindex_reason` when `reindex_required`, and `rebuild_progress`
+  `rebuilding`). It MUST include `reindex_reason` when `reindex_required` or `unverified` (for `unverified`,
+  naming what could not be verified), and `rebuild_progress`
   (sources done, sources total) when `rebuilding`. Existing fields keep their meaning, and
   `status` stays `ok` in every index state.
 - **FR-007**: The UI's health indicator MUST show the index status, and the reason when there is
@@ -336,7 +342,10 @@ once both versions are raised. Confirm the committed snapshot matches the curren
 - **Rebuild**: an admin-initiated operation. It recreates and stamps the stores, then re-indexes
   every registered source as one job group. Its progress is that group's progress.
 - **Index-schema snapshot**: the committed record of the index layout as of the last release,
-  used by the contract test to classify changes.
+  used by the contract test to classify changes. The first snapshot is created by this feature
+  and records source version 1.0.0 and schema 1. It includes the stamp's own storage (the Neo4j
+  meta node and the SQLite meta table), which 1.0.0 did not have. Those structures are additive,
+  invalidate no data, and so do not change the schema integer (research R9).
 
 ## Success Criteria *(mandatory)*
 

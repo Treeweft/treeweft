@@ -106,6 +106,9 @@ IV).
    - Milvus: `query(filter="", output_fields=["chunk_text","vector"], limit=20)` and pick 3.
    - LanceDB: `search().limit(20).select([...])`.
    - Chroma: `get(limit=20, include=["documents","embeddings"])`.
+   - If none of the 20 rows is short enough, inspect up to 200 rows, the same way. If there is
+     still none, the result is `failed("no verifiable chunks", …)`, so the status is
+     `reindex_required`. Data is never adopted without a verified sample (FR-004).
 3. **Graph store**: an unstamped graph store with data is adopted only when the vector store's
    verification passed in the same check. If the vector store holds no data, the graph cannot be
    verified, so the result is `reindex_required` (spec edge case).

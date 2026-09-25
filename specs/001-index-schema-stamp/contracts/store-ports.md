@@ -11,12 +11,18 @@ backend module defines every exported name.
 |---|---|---|
 | `async observe_index() -> StoreObservation` | see data-model | Never raises for an unreachable store; it fills `unreachable` instead. |
 | `async write_stamp(stamp: IndexStamp) -> None` | | Merges with existing metadata/properties; never drops unrelated keys. |
-| `async sample_chunks(n: int) -> list[tuple[str, list[float]]]` | `(chunk_text, vector)` | Only rows with `len(chunk_text) < 50000`. |
+| `async sample_chunks(n: int, scan_limit: int = 20) -> list[tuple[str, list[float]]]` | `(chunk_text, vector)` | Only rows with `len(chunk_text) < 50000`, drawn from at most `scan_limit` rows. The guard retries with `scan_limit=200` before failing "no verifiable chunks". |
 | `async drop_index() -> None` | | Drops the collection or table. The next `init_collection()` recreates and stamps it. |
 | `async chunk_count(source_id: str) -> int` | | Optional helper. The dry run uses `source_records.chunk_count` as its source of truth. |
 
 `init_collection()` (existing) MUST stamp a collection it creates, with the current configured
 stamp.
+
+**Naming relative to ADR-004 §3**: the ADR says both ports gain `read_stamp()` and
+`write_stamp()`. On the vector side, `read_stamp()` is part of `observe_index()`, because the
+check needs the stamp together with `exists`, `has_data` and the schema's dimension. It is
+exposed as `observe_index().stamp`. The graph side keeps a standalone `read_stamp()` as well,
+because it has no schema dimension to combine.
 
 ## Graph store (`treeweft.graph_store`): neo4j, sqlite
 
