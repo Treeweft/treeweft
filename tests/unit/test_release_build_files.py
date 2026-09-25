@@ -1,4 +1,5 @@
 """The publish workflow and Dockerfiles carry the ADR-004 release wiring."""
+import fnmatch
 import pathlib
 
 import yaml
@@ -8,6 +9,20 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 def _workflow():
     return yaml.safe_load((ROOT / ".github/workflows/docker-publish.yml").read_text())
+
+
+def test_push_trigger_matches_only_calver_tags():
+    # PyYAML parses the top-level `on:` key as the boolean True, not the string "on".
+    wf = _workflow()
+    on = wf.get("on", wf.get(True))
+    tags = on["push"]["tags"]
+    assert tags == ["v[0-9][0-9][0-9][0-9].*"]
+
+    pattern = tags[0]
+    assert fnmatch.fnmatchcase("v2026.10.1", pattern)
+    assert fnmatch.fnmatchcase("v2026.10.1.1", pattern)
+    assert not fnmatch.fnmatchcase("v1.0.0", pattern)
+    assert not fnmatch.fnmatchcase("v10.2.3", pattern)
 
 
 def test_check_tag_runs_the_script_with_full_tag_history():

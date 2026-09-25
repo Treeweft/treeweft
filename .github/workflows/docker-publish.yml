@@ -2,8 +2,10 @@ name: Docker images
 
 # Builds the Treeweft container images and publishes them to Docker Hub.
 #
-#   * push of a `vYYYY.M.D[.N]` tag -> build + push `YYYY.M.D[.N]`, `YYYY.M`, `latest`
-#     (the commit must also carry the source's SemVer tag `v<pyproject version>`)
+#   * push of a `vYYYY.M.D[.N]` (CalVer) tag -> build + push `YYYY.M.D[.N]`,
+#     `YYYY.M`, `latest` (the commit must also carry the source's SemVer tag
+#     `v<pyproject version>`, but pushing that SemVer tag on its own does NOT
+#     trigger this workflow — only the CalVer tag matches the push filter)
 #   * manual run                    -> build + push `edge` + `sha-<short>` (any ref)
 #   * pull request touching a Dockerfile / this workflow -> build only, no
 #     push, amd64 only, and the CUDA reranker is skipped (its 6 GB base
@@ -24,7 +26,7 @@ name: Docker images
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v[0-9][0-9][0-9][0-9].*"]   # CalVer tags only — the SemVer tag (v1.0.0) does not match
   pull_request:
     paths:
       - "Dockerfile"
