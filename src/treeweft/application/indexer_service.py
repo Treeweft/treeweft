@@ -16,9 +16,11 @@ logger = logging.getLogger(__name__)
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, Response
+from fastapi.responses import JSONResponse
 from git import Repo
 from pydantic import BaseModel, Field
 
+from treeweft.adapters.postgresql import maintenance_lock
 from treeweft.embedder import MAX_BATCH_SIZE, embed, embed_query
 from treeweft.infrastructure import metrics
 from treeweft.infrastructure.config import (  # single source of truth
@@ -1372,9 +1374,9 @@ async def handle_index_graph(req: IndexGraphRequest, request: Request):
 # operator opts in. Mirrors the freshness sampler's task lifecycle.
 
 
-async def _enqueue_source_reindex(src: dict) -> str:
-    """Build + enqueue a re-index job for an existing source, of the SAME kind
-    it was originally indexed as.
+def _build_source_reindex_job(src: dict, group_id: str | None = None) -> dict:
+    """Build (but do not persist or enqueue) a re-index job for an existing
+    source, of the SAME kind it was originally indexed as.
 
     Re-enqueueing every source as a `repo` job is wrong: a file-indexed
     source fails the repo runner's `isdir` check, and a directory-indexed
@@ -1382,8 +1384,9 @@ async def _enqueue_source_reindex(src: dict) -> str:
     back to filesystem shape for legacy rows without it). `runners.dispatch_job` then
     routes the job to the matching runner via its `kind` + `source_path`.
 
-    Used by the fleet auto-refresh loop; the caller owns the
-    one-active-job-per-source guard. Returns the new job_id.
+    Shared by the fleet auto-refresh loop (`_enqueue_source_reindex`) and
+    the index rebuild (ADR-004 §3, `index_guard.rebuild`), which sets
+    `group_id` to its `index-rebuild` job group.
     """
     url = src.get("url") or ""
     path = src.get("path") or ""
@@ -1399,12 +1402,28 @@ async def _enqueue_source_reindex(src: dict) -> str:
     job["source_path"] = "" if url else expanded
     job["source_branch"] = src.get("branch") or ""
     job["created_by"] = src.get("created_by")
+    if group_id is not None:
+        job["group_id"] = group_id
+    return job
+
+
+async def _enqueue_source_reindex(src: dict) -> str:
+    """Build + enqueue a re-index job for an existing source, of the SAME kind
+    it was originally indexed as.
+
+    Used by the fleet auto-refresh loop; the caller owns the
+    one-active-job-per-source guard. Returns the new job_id.
+    """
+    job = _build_source_reindex_job(src)
     await runners._persist_job(job)
     await _state._job_queue.enqueue(job["job_id"])
     return job["job_id"]
 
 
-async def _run_community_backfill():
+async def _run_community_backfill(lock_handle=None):
+    """`lock_handle`: the maintenance lock (ADR-004 §3), held shared for
+    this task's whole run so a rebuild cannot start mid-backfill; released
+    here regardless of outcome."""
 
     started = time.time()
     _state._community_build_state = {
@@ -1444,6 +1463,9 @@ async def _run_community_backfill():
             "error": str(exc),
             "finished_at": time.time(),
         }
+    finally:
+        if lock_handle is not None:
+            await lock_handle.release()
 
 
 @app.post("/build-community", status_code=202)
@@ -1473,7 +1495,16 @@ async def handle_build_community(request: Request):
 
     if _state._community_build_task is not None and not _state._community_build_task.done():
         return {**_state._community_build_state, "status": "already_running"}
-    _state._community_build_task = asyncio.create_task(_run_community_backfill())
+
+    # ADR-004 §3: hold the maintenance lock shared for the backfill's whole
+    # run, so a rebuild cannot start (and drop the graph) mid-backfill.
+    lock_handle = await maintenance_lock.acquire("shared")
+    if lock_handle is None:
+        return JSONResponse(
+            status_code=409,
+            content={"detail": "index rebuild in progress", "index_status": "rebuilding"},
+        )
+    _state._community_build_task = asyncio.create_task(_run_community_backfill(lock_handle))
     return {**_state._community_build_state, "status": "started"}
 
 
@@ -1481,6 +1512,31 @@ async def handle_build_community(request: Request):
 async def handle_build_community_status():
     """Progress of the most recent /build-community backfill."""
     return _state._community_build_state
+
+
+@app.post("/index/rebuild")
+async def handle_index_rebuild(request: Request, dry_run: bool = False):
+    """Recreate the vector and graph stores at the current schema and
+    re-index every registered source (ADR-004 §3, research R7).
+
+    `?dry_run=true` lists what a real call would do and changes nothing.
+    Admin only — this drops and rebuilds the whole index.
+    """
+    authz._require_admin(request)
+    user = getattr(request.state, "user", None)
+    user_id = user.id if user is not None else None
+    try:
+        result = await index_guard.rebuild(dry_run=dry_run, user_id=user_id)
+    except index_guard.RebuildRefused as exc:
+        return JSONResponse(status_code=409, content={"detail": exc.detail, "blockers": exc.blockers})
+    except index_guard.RebuildFailed as exc:
+        return JSONResponse(
+            status_code=503,
+            content={"detail": f"rebuild failed at {exc.step}: {exc.detail}"},
+        )
+    except RuntimeError as exc:
+        return JSONResponse(status_code=503, content={"detail": str(exc)})
+    return JSONResponse(status_code=200 if dry_run else 202, content=result)
 
 
 # ── webhook endpoint ────────────────────────────────────────────────

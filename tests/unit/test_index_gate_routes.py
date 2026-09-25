@@ -170,11 +170,12 @@ class TestPreparing409OnStoreError:
 
 
 READ_PREFIXES = ("/search", "/hydrate", "/find-", "/graph-")
-WRITE_PREFIXES = ("/index-", "/build-community")
+WRITE_PREFIXES = ("/index-", "/index/", "/build-community")
 
 # (method, path) pairs the gate must NOT cover, with why.
 EXEMPT = {
     ("GET", "/build-community"): "status poll only — no store access",
+    ("POST", "/index/rebuild"): "its own conflict/lock semantics — covered by test_index_rebuild.py",
 }
 
 

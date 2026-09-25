@@ -51,6 +51,7 @@ _LEGACY_SCAN_LIMIT_FALLBACK = 200
 # ── Cached state ─────────────────────────────────────────────────────────
 _status = IndexStatus("reindex_required", reason="index status not yet checked")
 _refreshed_at: datetime | None = None
+_last_rebuild_kind = "none"
 _lock = asyncio.Lock()
 _refresh_task: "asyncio.Task | None" = None
 _last_verify_attempt = 0.0
@@ -209,6 +210,16 @@ async def _compute_status(*, verify: bool) -> IndexStatus:
     await _write_stamp_if_needed(graph_check, graph_store.write_stamp, cfg)
 
     rebuild_state = await _rebuild_state_now()
+    global _last_rebuild_kind
+    if rebuild_state.kind != _last_rebuild_kind:
+        # A rebuild started, finished or was elsewhere completed since the
+        # last check: this process's cached community embeddings may be
+        # for a graph that no longer exists (ADR-004 §3 / research R7).
+        from treeweft.application import retrieval
+
+        retrieval.invalidate_graph_caches()
+        _last_rebuild_kind = rebuild_state.kind
+
     return aggregate([vector_check, graph_check], rebuild_state)
 
 
@@ -436,3 +447,149 @@ def refusal_detail(job_id: str) -> str:
     """The refusal text for a job `dispatch_allowed()` just refused.
     Consumes the entry (each job's detail is read at most once)."""
     return _refusal_details.pop(job_id, "Index requires rebuild. See GET /health.")
+
+
+# ── Rebuild (research R7) ─────────────────────────────────────────────────
+
+async def _job_blockers() -> list[str]:
+    from treeweft.application import indexer_state as idx_state
+
+    blockers: list[str] = []
+    if idx_state._job_store is not None:
+        for job_status in (JobStatus.QUEUED, JobStatus.RUNNING):
+            jobs = await idx_state._job_store.list_by_status(job_status)
+            if jobs:
+                blockers.append(f"{len(jobs)} job(s) {job_status.value}")
+    return blockers
+
+
+async def _pre_rebuild_blockers() -> list[str]:
+    """Step 0's blockers: job activity plus the maintenance lock in any
+    mode. Never call this after taking the lock ourselves — use
+    `_job_blockers()` for the step-3 re-check instead."""
+    blockers = await _job_blockers()
+    lock_mode = await maintenance_lock.probe()
+    if lock_mode is not None:
+        blockers.append(f"the maintenance lock is held ({lock_mode})")
+    return blockers
+
+
+class RebuildRefused(Exception):
+    """The real rebuild call was refused before anything was written."""
+
+    def __init__(self, detail: str, blockers: list[str]):
+        super().__init__(detail)
+        self.detail = detail
+        self.blockers = blockers
+
+
+class RebuildFailed(Exception):
+    """A step of the real rebuild raised after stores may have changed."""
+
+    def __init__(self, step: str, detail: str):
+        super().__init__(detail)
+        self.step = step
+        self.detail = detail
+
+
+async def rebuild(dry_run: bool, user_id: str | None = None) -> dict:
+    """`POST /index/rebuild` (ADR-004 §3, research R7). Returns the
+    response body for a dry run or a successful real call. Raises
+    `RebuildRefused` (409, nothing written), `RebuildFailed` (503, a step
+    failed) or `RuntimeError` (503, no Postgres)."""
+    from treeweft.application import indexer_runners as runners
+    from treeweft.application import indexer_service as idx_svc
+    from treeweft.application import indexer_state as idx_state
+    from treeweft.application import retrieval
+
+    if idx_state._job_group_store is None or idx_state._job_store is None or idx_state._job_queue is None:
+        raise RuntimeError("rebuild requires the job database")
+
+    sources = await idx_svc._all_source_dicts()
+    total_chunks = sum(int(s.get("chunk_count") or 0) for s in sources)
+    logger.warning(
+        "event=index_rebuild dry_run=%s user=%s sources=%d total_chunks=%d",
+        dry_run, user_id, len(sources), total_chunks,
+    )
+    source_summaries = [
+        {
+            "id": s["id"],
+            "label": s.get("url") or s.get("path") or s["id"],
+            "kind": s.get("kind") or "repo",
+            "chunk_count": int(s.get("chunk_count") or 0),
+        }
+        for s in sources
+    ]
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "sources": source_summaries,
+            "total_sources": len(sources),
+            "total_chunks": total_chunks,
+            "index_status": status().state,
+            "blockers": await _pre_rebuild_blockers(),
+        }
+
+    # Step 0
+    blockers = await _pre_rebuild_blockers()
+    if blockers:
+        raise RebuildRefused(f"Rebuild refused: {'; '.join(blockers)}", blockers)
+
+    # Step 1
+    handle = await maintenance_lock.acquire("exclusive")
+    if handle is None:
+        raise RebuildRefused("another rebuild or community build is in progress", [])
+
+    # Step 2
+    group_id = await idx_state._job_group_store.create(
+        label="index rebuild", kind="index-rebuild", created_by=user_id, task_count=len(sources),
+    )
+    logger.warning("event=index_rebuild stage=group_created group_id=%s sources=%d", group_id, len(sources))
+
+    # Step 3
+    blockers = await _job_blockers()
+    if blockers:
+        await idx_state._job_group_store.delete(group_id)
+        await handle.release()
+        raise RebuildRefused(f"Rebuild refused: {'; '.join(blockers)}", blockers)
+
+    # Step 4
+    try:
+        await retriever.drop_index()
+        await retriever.init_collection()  # stamps it (research R2)
+        await graph_store.clear_index_data()
+        cfg = configured()
+        await graph_store.write_stamp(
+            IndexStamp(schema=cfg.schema, embedding_model=cfg.embedding_model, vector_dim=cfg.vector_dim)
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("event=index_rebuild stage=recreate_stores_failed group_id=%s", group_id)
+        global _status, _refreshed_at
+        async with _lock:
+            _status = IndexStatus("reindex_required", reason=f"rebuild failed at recreate stores: {exc}")
+            _refreshed_at = _now()
+        await handle.release()
+        raise RebuildFailed("recreate stores", str(exc)) from exc
+
+    retrieval.invalidate_graph_caches()
+    logger.warning("event=index_rebuild stage=stores_recreated group_id=%s", group_id)
+
+    # Step 5
+    for src in sources:
+        job = idx_svc._build_source_reindex_job(src, group_id=group_id)
+        await runners._persist_job(job)
+        await idx_state._job_queue.enqueue(job["job_id"])
+    logger.warning("event=index_rebuild stage=jobs_enqueued group_id=%s jobs=%d", group_id, len(sources))
+
+    # Step 6
+    await handle.release()
+    await refresh()
+
+    return {
+        "dry_run": False,
+        "group_id": group_id,
+        "total_sources": len(sources),
+        "total_chunks_before": total_chunks,
+        "index_status": status().state,
+    }

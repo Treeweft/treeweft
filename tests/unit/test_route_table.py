@@ -100,6 +100,7 @@ class TestKnownRoutesReachTheirHandlers:
         ("/auth/login", "POST"): "auth_login",
         ("/index-graph", "POST"): "handle_index_graph",
         ("/build-community", "POST"): "handle_build_community",
+        ("/index/rebuild", "POST"): "handle_index_rebuild",
     }
 
     @pytest.mark.parametrize("key,handler", sorted(EXPECTED.items()))
