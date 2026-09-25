@@ -39,7 +39,7 @@ because it has no schema dimension to combine.
 
 | Function | Notes |
 |---|---|
-| `maintenance_lock.acquire(mode: "exclusive" \| "shared") -> MaintenanceLockHandle \| None` | Opens a **dedicated** `asyncpg.connect(DATABASE_URL)` connection, not from the pool, and calls `pg_try_advisory_lock` or `pg_try_advisory_lock_shared` on the key `(hashtext('treeweft'), hashtext('index-maintenance'))`. Returns None if the lock is not granted, and closes the connection in that case. `handle.release()` unlocks and closes the connection. |
-| `maintenance_lock.probe() -> "exclusive" \| "shared" \| None` | Reads `pg_locks` through the pool without taking the lock (research R13). |
+| `maintenance_lock.acquire(mode: "exclusive" \| "shared") -> MaintenanceLockHandle \| None` | Opens a **dedicated** `asyncpg.connect(DATABASE_URL)` connection, not from the pool, and calls `pg_try_advisory_lock` or `pg_try_advisory_lock_shared` on the key `(hashtext('treeweft'), hashtext('index-maintenance'))`. `handle.release()` unlocks and closes the connection. Returns **None only when Postgres is present and another holder conflicts**; the connection is closed in that case. With no `DATABASE_URL` or no pool it returns a **no-op handle** (`handle.coordinated is False`; `release()` does nothing) and logs a WARNING once (research R13). |
+| `maintenance_lock.probe() -> "exclusive" \| "shared" \| None` | Reads `pg_locks` through the pool without taking the lock (research R13). Returns None when nothing holds the lock or there is no Postgres. |
 | `JobGroupStore.latest_by_kind(kind) -> JobGroup \| None` | The most recent group of that kind. |
 | `JobGroupStore.delete(group_id) -> None` | Used only to remove the group of an aborted rebuild (R7 step 3). |

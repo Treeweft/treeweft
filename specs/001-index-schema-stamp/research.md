@@ -75,7 +75,7 @@ Milvus integration test (T-level detail in `tasks.md`) is the gate for it.
 - The check's own I/O is bounded: store reads use the adapters' normal timeouts, and legacy
   re-embedding is capped by `INDEX_VERIFY_TIMEOUT_SECONDS` (default 15). If the check cannot
   complete because a store or the embedding service is unreachable, the status is `unverified`
-  with a reason naming what could not be reached. The FR-011 retry loop then covers it, and
+  with a reason naming what could not be reached. The refresh loop (R4) then retries it (FR-011), and
   startup is never blocked or failed by an unreachable backing service. That matches today's
   behaviour: the indexer starts when Milvus is down.
 
@@ -225,9 +225,15 @@ issue.
    must appear in one of the sets or in an explicit exempt list. This keeps the gate from
    silently missing a future endpoint (constitution V).
 
-**Rebuild jobs are allowed**: `writes_allowed()` is true while `index_status` is `ok` or
-`rebuilding`. It is false while `reindex_required` or `unverified`. The rebuild's own jobs only
-start after the stores are recreated and stamped, when the status is already `rebuilding`.
+**Rebuild jobs are allowed**:
+
+- `writes_allowed()` (the cached route gate) is true while the status is `ok`, or `rebuilding`
+  once the stores are recreated. It is false while `reindex_required` or `unverified`, and while
+  `preparing`.
+- The rebuild's own jobs never pass through the routes. They are enqueued internally in R7 step
+  5, and can be popped by any process while the lock is still held. `dispatch_allowed()` lets
+  them through because their `group_id` is the group being prepared (R13).
+- Every other job is refused at dispatch until the lock is released.
 
 **Alternatives considered**: One middleware that matches paths. Rejected: path matching is
 implicit and would also have to understand the webhook router. Explicit calls plus a test are
@@ -262,7 +268,11 @@ requires Postgres; without a pool it returns 503 "rebuild requires the job datab
   - **Step 0. Fast pre-check.** Collect the blockers:
     - jobs `queued` or `running` in any process (`JobStore.list_by_status`, global);
     - the maintenance lock held in any mode;
-    - an incomplete rebuild group.
+    - a rebuild in progress: the lock is held exclusively, or jobs of the latest rebuild group
+      are still `queued` or `running`.
+
+    An `interrupted` group is **not** a blocker. Rebuilding is how an interrupted rebuild is
+    recovered, and the new group becomes the latest one.
 
     If there are any, return 409 listing them. Nothing has been written.
   - **Step 1. Take the maintenance lock exclusively** on a dedicated connection (R13). If that
@@ -463,7 +473,22 @@ stores is a supported topology (`docs/engineering-notes.md:297`), and this featu
   be refused or accepted slightly late. They can never cause a write into an inconsistent
   index:
   - a job enqueued through a stale cache is refused at dispatch;
-  - a search in a process that has not yet seen the rebuild gets 409 for at most one interval.
+  - a search in a process whose cache still says `ok` may reach a store while another process
+    is dropping it. The read routes handle that through `index_guard.store_error_response(exc)`:
+    when a store call raises, it probes the lock, and if the lock is held exclusively it returns
+    the `preparing` 409. Otherwise the error propagates as today. The probe runs only on this
+    error path, so normal searches pay nothing. A reader therefore sees a `preparing` 409 or
+    partial results, never a store error caused by a rebuild.
+- **No Postgres configured** (`DATABASE_URL` unset or the pool unavailable, the degraded mode
+  `connection.py` allows):
+  - Cross-process coordination is impossible, and not needed: the job queue itself requires
+    Postgres, so only one process can be doing index work.
+  - `acquire()` returns a **no-op handle** (`coordinated = False`) and logs a WARNING once. Stamp
+    writes and the community build proceed normally.
+  - `probe()` returns None, so `dispatch_allowed()` relies on the cached stamp state alone.
+  - The rebuild returns 503, because it needs job groups.
+  - `acquire()` returns None **only** when Postgres is present and another process holds the
+    lock in a conflicting mode.
 - **Startup in a new process during a rebuild**: the first `run_check()` probes the lock, sees
   `preparing`, and writes no stamp.
 - **Two processes adopting at the same moment**: both write the same stamp under the shared

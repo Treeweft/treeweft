@@ -52,6 +52,8 @@ indicator.
 
 - Stamps live in each vector and graph store (research R1).
 - Rebuild state reuses the Postgres `job_groups` and `jobs` tables. No migration.
+- Cross-process coordination uses a Postgres session-level advisory lock, which needs no table
+  (research R13).
 
 **Testing**:
 

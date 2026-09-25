@@ -185,19 +185,30 @@ Chroma and SQLite on `tmp_path` are allowed.
     `pool.acquire`) and calls `SELECT pg_try_advisory_lock($1, $2)` with the key
     `(hashtext('treeweft'), hashtext('index-maintenance'))`;
   - `acquire("shared")` calls `pg_try_advisory_lock_shared`;
-  - if the lock is not granted, `acquire` returns None and closes the connection;
+  - with Postgres present and the lock held by another holder, `acquire` returns None and closes
+    the connection;
   - `handle.release()` unlocks and closes the connection;
   - `probe()` reads `pg_locks` through the pool (`locktype = 'advisory' AND classid = $1 AND
     objid = $2 AND granted`) and returns `"exclusive"`, `"shared"` or None;
-  - with no `DATABASE_URL` or pool, `acquire` and `probe` return None, and `probe` logs once
-    at WARNING.
+  - with no `DATABASE_URL` or pool, `acquire` returns a no-op handle (`coordinated is False`,
+    `release()` does nothing), `probe` returns None, and one WARNING is logged per process, not
+    one per call.
 - [ ] T016 Implement `src/treeweft/adapters/postgresql/maintenance_lock.py` (`acquire`,
   `probe`, `MaintenanceLockHandle`), following [contracts/store-ports.md](contracts/store-ports.md)
   "Coordination" and research R13. T015 passes.
+- [ ] T017 [P] Add `latest_by_kind(kind)` and `delete(group_id)` to
+  `src/treeweft/adapters/postgresql/job_group_store.py`, with an asyncpg-mocked unit test in
+  `tests/unit/test_job_group_store.py`:
+  - `latest_by_kind` returns the most recent group of that kind, or None;
+  - `delete` removes exactly one row;
+  - `create(label, kind, created_by, task_count)` stores a preset `task_count` as passed. It
+    already accepts one (`:42-50`).
+
+  This is Foundational because US1's `dispatch_allowed()` (T024) reads the latest rebuild group.
 
 ### Shims
 
-- [ ] T017 Write `tests/unit/test_store_shim_exports.py`:
+- [ ] T018 Write `tests/unit/test_store_shim_exports.py`:
   - for each graph backend module, every name in `graph_store._EXPORTED` is defined;
   - for each vector backend, `observe_index`, `write_stamp`, `sample_chunks` and `drop_index` are
     reachable through `treeweft.retriever` under that `VECTOR_STORE`, using the subprocess-per-env
@@ -223,7 +234,7 @@ still work.
 
 ### Tests for User Story 1 (write first, confirm they fail)
 
-- [ ] T018 [P] [US1] Write `tests/unit/test_index_guard.py` (check and health part), with fake
+- [ ] T019 [P] [US1] Write `tests/unit/test_index_guard.py` (check and health part), with fake
   vector and graph shims injected by monkeypatching `treeweft.retriever` and
   `treeweft.graph_store` attributes. Cover:
   - fresh stores → graph stamped, `ok`;
@@ -240,9 +251,11 @@ still work.
     re-stamped by "another process". Its stamps are re-observed only while it is not `ok`;
   - with `maintenance_lock.probe()` faked as `"exclusive"`, `run_check()` writes no stamp (a
     process starting during another process's rebuild);
+  - with no Postgres (the lock fakes return a no-op handle and `probe()` returns None), fresh
+    stores are stamped and the status is `ok`, never stuck at `rebuilding`;
   - a fresh-store stamp write is made while holding `acquire("shared")`, and is skipped when
     `acquire("shared")` returns None.
-- [ ] T019 [P] [US1] Write `tests/unit/test_index_gate_routes.py`. With the status forced to
+- [ ] T020 [P] [US1] Write `tests/unit/test_index_gate_routes.py`. With the status forced to
   `reindex_required`:
   - `POST /search`, `POST /hydrate-chunks`, `GET /find-definition`, `GET /find-callers`,
     `GET /find-references` and `POST /graph-explore` return 409. The body has the
@@ -252,12 +265,15 @@ still work.
     `POST /build-community` and the job-enqueuing webhook routes return 409, and nothing is
     enqueued.
   - `/health`, `/sources`, `/jobs`, `/job-groups` and the auth routes answer normally.
+  - With the status cached as `ok`, a read route whose fake store raises returns the `preparing`
+    409 when `probe()` says `"exclusive"`. When `probe()` says None, the original error
+    propagates. When the store call succeeds, `probe()` is never called.
   - With auth on and no credentials, gated routes return 401/403, not 409.
   - Route classification: every app route whose path starts with `/search`, `/hydrate`,
     `/find-`, `/graph-`, `/index-`, `/build-community` or `/jobs/{job_id}/retry` is in the read
     set, the write set, or an explicit exempt list with a comment. An unclassified new route
     fails the test.
-- [ ] T020 [P] [US1] Write `tests/unit/test_index_dispatch_gate.py` for
+- [ ] T021 [P] [US1] Write `tests/unit/test_index_dispatch_gate.py` for
   `PostgresJobQueue._run_one`, with the job store faked:
   - **Order**: the job is persisted as `running` **before** `index_guard.dispatch_allowed(job)`
     is awaited. Record the call order.
@@ -271,10 +287,10 @@ still work.
     - the cached stamp state is `reindex_required` or `unverified`.
 
     It allows a job of the rebuild group being prepared.
-- [ ] T021 [P] [US1] Add to `tests/unit/test_mcp_compat.py`: a mocked indexer returning the
+- [ ] T022 [P] [US1] Add to `tests/unit/test_mcp_compat.py`: a mocked indexer returning the
   errors.md 409 body to `search_code` gives `{"error": "Indexer returned HTTP 409: Index requires
   rebuild: …"}` containing `/index/rebuild`. The word "unreachable" never appears.
-- [ ] T022 [P] [US1] Write `ui/src/components/layout/HealthIndicator.test.tsx` (vitest) for
+- [ ] T023 [P] [US1] Write `ui/src/components/layout/HealthIndicator.test.tsx` (vitest) for
   `healthStatus()` and the label:
   - `ok` → healthy;
   - `reindex_required` → error, "Re-index required", with the reason as the title;
@@ -284,19 +300,20 @@ still work.
 
 ### Implementation for User Story 1
 
-- [ ] T023 [US1] Implement `src/treeweft/application/index_guard.py`:
+- [ ] T024 [US1] Implement `src/treeweft/application/index_guard.py`:
   - **State**: a module-level cached `_status: IndexStatus` and an `asyncio.Lock`.
   - **`configured()`** comes from `EMBEDDING_MODEL`, `VECTOR_DIM` and
     `versions.INDEX_SCHEMA_VERSION`.
   - **`async run_check()`**:
     - observe both stores via the shims and `decide_store` each; legacy verification is
-      `not_run` until T033;
+      `not_run` until T034;
     - perform the stamp writes the decisions require, each under
-      `maintenance_lock.acquire("shared")`, skipped and reported as `preparing` if the lock is
-      not granted;
+      `maintenance_lock.acquire("shared")`. `None` means another process holds the lock
+      exclusively: skip the write and report `preparing`. A no-op handle (no Postgres) means
+      write normally;
     - `aggregate`, publish to the cache, and log.
   - **`async refresh()`** re-observes the stamps only while the cached status is not `ok`, then
-    republishes. T040 adds the rebuild state and T034 adds the verification retry.
+    republishes. T040 adds the rebuild state and T035 adds the verification retry.
   - **`start_refresh_loop()` / `stop_refresh_loop()`** call `refresh()` every
     `INDEX_STATUS_REFRESH_SECONDS`.
   - **Cached-view accessors**:
@@ -312,8 +329,8 @@ still work.
   - **Imports**: stores only through `treeweft.retriever` and `treeweft.graph_store`, and
     Postgres only through `adapters/postgresql`.
 
-  T018 passes for its non-legacy cases.
-- [ ] T024 [US1] Reorder `startup()` in `src/treeweft/application/lifecycle.py` as research R2
+  T019 passes for its non-legacy cases.
+- [ ] T025 [US1] Reorder `startup()` in `src/treeweft/application/lifecycle.py` as research R2
   says:
   1. `graph_store.ensure_schema()`;
   2. the embedding proxy (`:413-439`);
@@ -326,31 +343,34 @@ still work.
   `shutdown()` stops the loop. Test in `tests/unit/test_lifecycle_order.py` with a recording
   fake: the check runs after both job stores are initialised, before the queue starts, and
   before any recovered job is enqueued. The loop starts last.
-- [ ] T025 [US1] Merge `index_guard.health_fields()` into `GET /health` in
+- [ ] T026 [US1] Merge `index_guard.health_fields()` into `GET /health` in
   `src/treeweft/application/indexer_service.py:497-513`. Existing fields are unchanged.
-- [ ] T026 [US1] Call `index_guard.require_searchable()` in the six read routes in
+- [ ] T027 [US1] Call `index_guard.require_searchable()` in the six read routes in
   `src/treeweft/application/indexer_service.py` (`/search` 1649, `/hydrate-chunks` 1698,
   `/find-definition` 1714, `/find-callers` 1735, `/find-references` 1761, `/graph-explore` 1790),
-  immediately **after** each route's existing `authz._authorize_scope` call.
-- [ ] T027 [US1] Call `index_guard.require_writable()` after authorization in
+  immediately **after** each route's existing `authz._authorize_scope` call. Wrap each route's
+  store calls so that an exception goes through `index_guard.store_error_response(exc)`: it
+  probes the maintenance lock and, if the lock is held exclusively, returns the `preparing` 409
+  (errors.md). Otherwise it re-raises. Add `store_error_response` to `index_guard.py` here.
+- [ ] T028 [US1] Call `index_guard.require_writable()` after authorization in
   `/index-file` 776, `/index-directory` 814, `/index-repo` 866, `/index-graph` 1283,
   `/jobs/{id}/retry` 729 and `POST /build-community` 1432 in
   `src/treeweft/application/indexer_service.py`, and before each enqueue in
-  `src/treeweft/application/routes_webhook.py` (`:263`, `:316`, `:339`). T019 passes.
-- [ ] T028 [US1] Change `src/treeweft/adapters/queue/postgres_queue.py` `_run_one` to work in
+  `src/treeweft/application/routes_webhook.py` (`:263`, `:316`, `:339`). T020 passes.
+- [ ] T029 [US1] Change `src/treeweft/adapters/queue/postgres_queue.py` `_run_one` to work in
   this order, using the lazy import already used there:
   1. persist the job as `running` and await the commit;
   2. `if not await index_guard.dispatch_allowed(job)`: persist it as `failed` with
      `error = index_guard.refusal_detail()`, do not increment attempts, and return;
   3. otherwise call `dispatch_job` as today.
 
-  T020 passes.
-- [ ] T029 [P] [US1] Extend `ui/src/components/layout/HealthIndicator.tsx`: `HealthResponse` gains
+  T021 passes.
+- [ ] T030 [P] [US1] Extend `ui/src/components/layout/HealthIndicator.tsx`: `HealthResponse` gains
   `index_status?`, `reindex_reason?` and `rebuild_progress?`, and `healthStatus()` and the label
-  follow T022. T022 passes (`cd ui && npm test`), and `npm run build` type-checks.
-- [ ] T030 [US1] Regression proof (constitution II): temporarily remove the guard calls from
-  T026–T028. Confirm T019 and T020 fail, restore the calls, and save the failing output for the
-  PR description. T021 must already pass on the Plan 1 code, which confirms that FR-018 needs no
+  follow T023. T023 passes (`cd ui && npm test`), and `npm run build` type-checks.
+- [ ] T031 [US1] Regression proof (constitution II): temporarily remove the guard calls from
+  T027–T029. Confirm T020 and T021 fail, restore the calls, and save the failing output for the
+  PR description. T022 must already pass on the Plan 1 code, which confirms that FR-018 needs no
   MCP code change.
 
 **Checkpoint**: US1 is complete. A mismatched index is detected, reported and gated.
@@ -371,7 +391,7 @@ still work.
 
 ### Tests for User Story 2 (write first, confirm they fail)
 
-- [ ] T031 [P] [US2] Write `tests/unit/test_legacy_verification.py`:
+- [ ] T032 [P] [US2] Write `tests/unit/test_legacy_verification.py`:
   - the dimension check fails before any embedding;
   - cosine 0.995 on all samples → passed, and 0.98 on one → failed with the values in the
     detail;
@@ -386,7 +406,7 @@ still work.
   - an unstamped graph is adopted only when vector verification passed;
   - an unstamped graph with data and an empty vector store → `reindex_required`;
   - an INFO log line contains the per-sample cosines.
-- [ ] T032 [P] [US2] Add to `tests/unit/test_index_guard.py` (the `unverified` part):
+- [ ] T033 [P] [US2] Add to `tests/unit/test_index_guard.py` (the `unverified` part):
   - with the embedder down at startup: `/search` returns 200, `/index-repo` returns 409 with the
     "Index unverified" `detail`, and no stamp is written;
   - once the fake embedder recovers, the next `/index-repo` call re-runs verification inline,
@@ -398,7 +418,7 @@ still work.
 
 ### Implementation for User Story 2
 
-- [ ] T033 [US2] Implement legacy verification in `src/treeweft/application/index_guard.py`:
+- [ ] T034 [US2] Implement legacy verification in `src/treeweft/application/index_guard.py`:
   - `_verify_vector_store()` compares the dimension (`schema_dim` or the sample length) with
     `VECTOR_DIM`, then runs `sample_chunks(3)` and `embedder.embed(texts)` under
     `asyncio.wait_for(…, INDEX_VERIFY_TIMEOUT_SECONDS)`, then computes cosine ≥ 0.99 per sample;
@@ -407,15 +427,15 @@ still work.
   - it logs the cosines;
   - embedding goes only through the `treeweft.embedder` shim.
 
-  T031 passes.
-- [ ] T034 [US2] Extend `index_guard.refresh()` and `require_writable()` in
+  T032 passes.
+- [ ] T035 [US2] Extend `index_guard.refresh()` and `require_writable()` in
   `src/treeweft/application/index_guard.py`:
   - while the status is `unverified`, `refresh()` retries legacy verification (with embedding)
     at most every `INDEX_VERIFY_INTERVAL_SECONDS`;
   - `require_writable()` runs `run_check()` once inline when the status is `unverified`, then
     decides.
 
-  The loop itself is T023/T024's. T032 passes.
+  The loop itself is T024/T025's. T033 passes.
 
 **Checkpoint**: US1 and US2 are complete. Every existing deployment either adopts its data or
 reports why it can't.
@@ -434,7 +454,7 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
 
 ### Tests for User Story 3 (write first, confirm they fail)
 
-- [ ] T035 [P] [US3] Write `tests/unit/test_index_rebuild.py`, with fake shims and fake
+- [ ] T036 [P] [US3] Write `tests/unit/test_index_rebuild.py`, with fake shims and fake
   `JobStore`/`JobGroupStore`/queue/source repo in `indexer_state`.
 
   Dry run:
@@ -464,8 +484,12 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
   - the `summary_cache` fake is untouched.
 
   Refusals and failures:
-  - a queued or running job, a community build running, or an incomplete rebuild group → 409
-    listing the blockers, with nothing dropped;
+  - a queued or running job, a community build running, or a rebuild in progress (lock held
+    exclusively, or jobs of the latest rebuild group still queued/running) → 409 listing the
+    blockers, with nothing dropped;
+  - **after an interrupted rebuild**: the latest group has 0 of N jobs and the lock is free. The
+    dry run lists **no** blocker, and a real rebuild is accepted, completes, and the status
+    returns to `ok`. An interrupted group never blocks its own recovery;
   - a non-admin gets 403 and an unauthenticated caller 401 (auth on);
   - `drop_index` raising → 503, and the status is `reindex_required` with
     "rebuild failed at drop vector store".
@@ -482,7 +506,7 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
 
   Logging: a WARNING with `event=index_rebuild`, `user`, `dry_run`, `sources` and `total_chunks`
   is emitted for both the dry run and the real call.
-- [ ] T036 [P] [US3] Write `tests/unit/test_index_multiprocess.py`, which covers research R13 and
+- [ ] T037 [P] [US3] Write `tests/unit/test_index_multiprocess.py`, which covers research R13 and
   spec FR-024/SC-008. Use two `index_guard` "processes": two module instances loaded with
   `importlib` so each has its own cache. They share a fake maintenance lock (exclusive or shared
   semantics, released on a simulated connection close) and fake Postgres job and group stores.
@@ -496,18 +520,12 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
     `refresh()`, both A′ (restarted) and B report `reindex_required` "a rebuild was
     interrupted".
   - **B's cache is stale** (`ok`) while A is preparing: B's route accepts an enqueue, and the job
-    then fails at dispatch.
+    then fails at dispatch. B's `/search` against a store A has dropped (the fake raises)
+    returns the `preparing` 409, not a 5xx.
   - **After A completes**: B moves `reindex_required` → `rebuilding` → `ok` across refreshes,
     within one refresh interval of each change.
   - **Community build versus rebuild**, in both orders: the shared holder blocks the exclusive
     acquire (409 blocker), and the exclusive holder blocks the shared acquire (409).
-- [ ] T037 [P] [US3] Add `latest_by_kind(kind)` and `delete(group_id)` to
-  `src/treeweft/adapters/postgresql/job_group_store.py`, with an asyncpg-mocked unit test in
-  `tests/unit/test_job_group_store.py`:
-  - `latest_by_kind` returns the most recent group of that kind, or None;
-  - `delete` removes exactly one row;
-  - `create(label, kind, created_by, task_count)` stores a preset `task_count` as passed. It
-    already accepts one (`:42-50`).
 - [ ] T038 [US3] Make the community build take the maintenance lock in shared mode.
   - In `src/treeweft/application/indexer_service.py` `POST /build-community` (`:1432`) and
     `_run_community_backfill` (`:1390`), acquire the lock with
@@ -538,7 +556,8 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
 - [ ] T041 [US3] Implement `async rebuild(dry_run: bool, user) -> dict` in
   `src/treeweft/application/index_guard.py`:
   - **Dry run**: collect sources (`_state._source_repo.list_all()`) and blockers (global queued
-    and running jobs, `maintenance_lock.probe()`, an incomplete rebuild group). Take no lock and
+    and running jobs, `maintenance_lock.probe()`, a rebuild in progress: the lock is held exclusively, or the
+    latest rebuild group has queued or running jobs. An `interrupted` group is not a blocker). Take no lock and
     write nothing.
   - **Real call**: follow research R7 steps 0–6 exactly, holding the exclusive lock from step 1
     to step 6 on its dedicated connection. Log each stage with `event=index_rebuild`.
@@ -552,9 +571,9 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
   - the handler delegates to `index_guard.rebuild`;
   - it returns 200 for a dry run and 202 for a real call, 409 with blockers, and 503 on a step
     failure;
-  - the route is exempt from `require_writable` (listed in T019's exempt list).
+  - the route is exempt from `require_writable` (listed in T020's exempt list).
 
-  Add the route to `tests/unit/test_route_table.py:96`. T035 passes.
+  Add the route to `tests/unit/test_route_table.py:96`. T036 passes.
 
 **Checkpoint**: US1–US3 are complete. The index can be detected, gated and rebuilt through the API.
 
@@ -701,31 +720,37 @@ minimum schema integer and version. The committed snapshot matches the code.
 
 ### Phase dependencies
 
-- Setup (T001–T002) → Foundational (T003–T017) → US1 → US2 → US3. US4 needs only Foundational
+- Setup (T001–T002) → Foundational (T003–T018) → US1 → US2 → US3. US4 needs only Foundational
   plus T014/T010 (the schema builders), so it can run in parallel with US1–US3. Polish comes last.
-- US2 extends `index_guard.py` from US1 (T023), so it runs after US1.
-- US3 needs US1's guard and status (T023, T025) and US2's aggregate wiring. Run it after US2.
+- US2 extends `index_guard.py` from US1 (T024), so it runs after US1.
+- US3 needs US1's guard and status (T024, T026) and US2's aggregate wiring. Run it after US2.
 
 ### Within phases
 
 - T004 unblocks T005–T014, because they return domain types.
-- The five backend pairs (T005/T006, T007/T008, T009/T010, T011/T012, T013/T014) and the
-  maintenance-lock pair (T015/T016) are independent of each other. T017 needs all the backend
-  pairs.
-- T023 needs T016 (it uses the lock), and comes before T024–T028. T026 and T027 edit the same
-  file (`indexer_service.py`), so they are sequential. T028 and T029 are separate files.
-- US3: T037 (group store) and T016 come before T040 and T041. T038, T039 and T042 all edit
-  `indexer_service.py`, so they are sequential. T039 comes before T041, and T040 before T041
-  before T042. T036 (interleaving tests) is written first and passes only after T038–T042.
-- T044 comes before T045 and T046.
+- In Foundational, these run independently of each other:
+  - the five backend pairs (T005/T006, T007/T008, T009/T010, T011/T012, T013/T014);
+  - the maintenance-lock pair (T015/T016);
+  - the group-store task T017.
+
+  T018 needs all the backend pairs.
+- US1:
+  - T024 (`index_guard`) needs T016 and T017. It comes before T025–T029.
+  - T026, T027 and T028 all edit `indexer_service.py`, so they are sequential.
+  - T029 (queue worker) and T030 (UI) are separate files.
+- US3:
+  - T038, T039 and T042 all edit `indexer_service.py`, so they are sequential.
+  - T039 comes before T041, and T040 before T041 before T042.
+  - T036 and T037 are written first. T037 (the interleaving tests) passes only after T038–T042.
+- US4: T044 comes before T045 and T046.
 
 ### Parallel opportunities
 
 ```text
-Foundational:  T005+T006 | T007+T008 | T009+T010 | T011+T012 | T013+T014 | T015+T016   (six tracks)
-US1 tests:     T018 | T019 | T020 | T021 | T022
-US1 impl:      T028 | T029 alongside T026→T027
-US3 tests:     T035 | T036 | T037
+Foundational:  T005+T006 | T007+T008 | T009+T010 | T011+T012 | T013+T014 | T015+T016 | T017   (seven tracks)
+US1 tests:     T019 | T020 | T021 | T022 | T023
+US1 impl:      T029 | T030 alongside T026→T027→T028
+US3 tests:     T036 | T037
 US4:           T043→T046 alongside US1–US3 once T010/T014 are merged
 Polish:        T048 | T049 | T050 | T051 | T052 | T053 | T054 | T055
 ```
@@ -737,5 +762,5 @@ Polish:        T048 | T049 | T050 | T051 | T052 | T053 | T054 | T055
   `unverified` and refuse index jobs. US1 and US2 are both P1 and ship together.
 - **Increments**: US1+US2 (safe to deploy) → US3 (self-service recovery) → US4 (future-proofing)
   → Polish. A single PR is expected, per ADR-004 Plan 2. Commit after each task or task pair.
-- **Verification**: T030 (regression proof), T056–T058 (quickstart), all reported in the PR
+- **Verification**: T031 (regression proof), T056–T058 (quickstart), all reported in the PR
   under constitution I.
