@@ -1,0 +1,1845 @@
+{
+  "source_version": "1.0.0",
+  "surface": {
+    "DELETE /api-keys/{key_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "key_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "key_id"
+        ],
+        "type": "object"
+      },
+      "response": null
+    },
+    "DELETE /embedding-backends/{backend_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "backend_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "backend_id"
+        ],
+        "type": "object"
+      },
+      "response": null
+    },
+    "DELETE /groups/{group_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "group_id"
+        ],
+        "type": "object"
+      },
+      "response": null
+    },
+    "DELETE /groups/{group_id}/members/{user_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "x-in": "path"
+          },
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "group_id",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": null
+    },
+    "DELETE /jobs/{job_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "DELETE /sources/{source_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "DELETE /sources/{source_id}/grants/{principal_type}/{principal_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "principal_id": {
+            "type": "string",
+            "x-in": "path"
+          },
+          "principal_type": {
+            "type": "string",
+            "x-in": "path"
+          },
+          "source_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "principal_id",
+          "principal_type",
+          "source_id"
+        ],
+        "type": "object"
+      },
+      "response": null
+    },
+    "DELETE /users/{user_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": null
+    },
+    "DELETE /users/{user_id}/tokens/{token_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "token_id": {
+            "type": "string",
+            "x-in": "path"
+          },
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "token_id",
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": null
+    },
+    "GET /api-keys": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /audit/search": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "limit": {
+            "default": 100,
+            "type": "integer",
+            "x-in": "query"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-in": "query"
+          },
+          "user_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-in": "query"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /auth/me": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /build-community": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /embedding-backends": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /find-callers": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "name_or_id": {
+            "type": "string",
+            "x-in": "query"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-in": "query"
+          }
+        },
+        "required": [
+          "name_or_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /find-definition": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-in": "query"
+          },
+          "name": {
+            "type": "string",
+            "x-in": "query"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-in": "query"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /find-references": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "name_or_id": {
+            "type": "string",
+            "x-in": "query"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "x-in": "query"
+          }
+        },
+        "required": [
+          "name_or_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /fleet": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "entities": {
+            "default": false,
+            "type": "boolean",
+            "x-in": "query"
+          },
+          "staleness": {
+            "default": false,
+            "type": "boolean",
+            "x-in": "query"
+          },
+          "summary_only": {
+            "default": false,
+            "type": "boolean",
+            "x-in": "query"
+          }
+        },
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /groups": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /groups/{group_id}/members": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "group_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /health": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /job-groups": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /job-groups/{group_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "group_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /jobs": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /jobs/dead-letter": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /jobs/{job_id}": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /jobs/{job_id}/errors": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "x-in": "path"
+          },
+          "limit": {
+            "default": 1000,
+            "type": "integer",
+            "x-in": "query"
+          },
+          "offset": {
+            "default": 0,
+            "type": "integer",
+            "x-in": "query"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /metrics": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /sources": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /sources/{source_id}/grants": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /sources/{source_id}/staleness": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /status": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /users": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "GET /users/{user_id}/tokens": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "PATCH /groups/{group_id}": {
+      "body": {
+        "properties": {
+          "all_access": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "all_access"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "group_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "PATCH /users/{user_id}": {
+      "body": {
+        "properties": {
+          "all_access": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "all_access"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /api-keys": {
+      "body": {
+        "properties": {
+          "all_access": {
+            "default": false,
+            "type": "boolean"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /auth/login": {
+      "body": {
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /auth/logout": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": null
+    },
+    "POST /build-community": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /embedding-backends": {
+      "body": {
+        "properties": {
+          "klass": {
+            "type": "string"
+          },
+          "url": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "klass"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /graph-explore": {
+      "body": {
+        "properties": {
+          "adaptive_topk": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "adaptive_topk_gap": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "check_staleness": {
+            "default": false,
+            "type": "boolean"
+          },
+          "depth": {
+            "default": 1,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "include_community_summaries": {
+            "default": true,
+            "type": "boolean"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path_prefix": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "query": {
+            "maxLength": 8192,
+            "type": "string"
+          },
+          "query_class_payload": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rerank_pool": {
+            "anyOf": [
+              {
+                "maximum": 500.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "response_mode": {
+            "default": "full",
+            "type": "string"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "strip_imports": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary_prompt_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "use_graph_scoring": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "use_hybrid": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "use_hyde": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "use_summary_vector": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /groups": {
+      "body": {
+        "properties": {
+          "all_access": {
+            "default": false,
+            "type": "boolean"
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /groups/{group_id}/members": {
+      "body": {
+        "properties": {
+          "user_id": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {
+          "group_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "group_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /hydrate-chunks": {
+      "body": {
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 200,
+            "type": "array"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "ids"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /index-directory": {
+      "body": {
+        "properties": {
+          "auto_preflight": {
+            "default": true,
+            "type": "boolean"
+          },
+          "directory": {
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "type": "boolean"
+          },
+          "pattern": {
+            "default": "**/*",
+            "type": "string"
+          },
+          "skip_graph": {
+            "default": false,
+            "type": "boolean"
+          },
+          "skip_patterns": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "directory"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "recommendations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "source_id"
+        ],
+        "type": "object"
+      }
+    },
+    "POST /index-file": {
+      "body": {
+        "properties": {
+          "file_path": {
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "type": "boolean"
+          },
+          "skip_graph": {
+            "default": false,
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "file_path"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "recommendations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "source_id"
+        ],
+        "type": "object"
+      }
+    },
+    "POST /index-graph": {
+      "body": {
+        "properties": {
+          "source_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "recommendations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "source_id"
+        ],
+        "type": "object"
+      }
+    },
+    "POST /index-repo": {
+      "body": {
+        "properties": {
+          "auto_preflight": {
+            "default": true,
+            "type": "boolean"
+          },
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "force": {
+            "default": false,
+            "type": "boolean"
+          },
+          "group_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "skip_graph": {
+            "default": false,
+            "type": "boolean"
+          },
+          "skip_patterns": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {
+        "properties": {
+          "job_id": {
+            "type": "string"
+          },
+          "recommendations": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "source_id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "warnings": {
+            "anyOf": [
+              {
+                "items": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "job_id",
+          "status",
+          "source_id"
+        ],
+        "type": "object"
+      }
+    },
+    "POST /job-groups": {
+      "body": {
+        "properties": {
+          "kind": {
+            "default": "fleet",
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /jobs/{job_id}/retry": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "job_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "job_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /preflight": {
+      "body": {
+        "properties": {
+          "branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "concurrency": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /search": {
+      "body": {
+        "properties": {
+          "adaptive_topk": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "adaptive_topk_gap": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "check_staleness": {
+            "default": false,
+            "type": "boolean"
+          },
+          "cross_repo": {
+            "default": false,
+            "type": "boolean"
+          },
+          "include_community_summaries": {
+            "default": true,
+            "type": "boolean"
+          },
+          "language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "path_prefix": {
+            "anyOf": [
+              {
+                "maxLength": 4096,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "query": {
+            "maxLength": 8192,
+            "type": "string"
+          },
+          "query_class_payload": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rerank_pool": {
+            "anyOf": [
+              {
+                "maximum": 500.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "response_mode": {
+            "default": "full",
+            "type": "string"
+          },
+          "return_pool": {
+            "default": false,
+            "type": "boolean"
+          },
+          "source_id": {
+            "anyOf": [
+              {
+                "maxLength": 256,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "strip_imports": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "summary_prompt_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "top_k": {
+            "default": 10,
+            "maximum": 200.0,
+            "minimum": 1.0,
+            "type": "integer"
+          },
+          "use_graph_scoring": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "use_hybrid": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "use_hyde": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "use_summary_vector": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /sources/{source_id}/grants": {
+      "body": {
+        "properties": {
+          "effect": {
+            "default": "allow",
+            "pattern": "^(allow|deny)$",
+            "type": "string"
+          },
+          "principal_id": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "principal_type": {
+            "pattern": "^(user|group)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "principal_type",
+          "principal_id"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {
+          "source_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "source_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /users": {
+      "body": {
+        "properties": {
+          "email": {
+            "default": "",
+            "type": "string"
+          },
+          "role": {
+            "default": "user",
+            "type": "string"
+          },
+          "username": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "username"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /users/{user_id}/rotate-key": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /users/{user_id}/set-password": {
+      "body": {
+        "properties": {
+          "current_password": {
+            "default": "",
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": null
+    },
+    "POST /users/{user_id}/tokens": {
+      "body": {
+        "properties": {
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "POST /webhook": {
+      "body": null,
+      "body_required": false,
+      "params": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "response": {}
+    },
+    "PUT /users/{user_id}/role": {
+      "body": {
+        "properties": {
+          "role": {
+            "pattern": "^(admin|user)$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role"
+        ],
+        "type": "object"
+      },
+      "body_required": true,
+      "params": {
+        "properties": {
+          "user_id": {
+            "type": "string",
+            "x-in": "path"
+          }
+        },
+        "required": [
+          "user_id"
+        ],
+        "type": "object"
+      },
+      "response": {}
+    }
+  }
+}

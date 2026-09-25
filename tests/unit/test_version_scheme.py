@@ -1,19 +1,13 @@
-"""Treeweft versions are CalVer: the release date, ``YYYY.M.D``.
+"""Treeweft's source version is SemVer (ADR-004).
 
-Rules (docs/docker-images.md, "Versioning"):
-
-- no zero padding (``2026.9.2``, never ``2026.09.02``) so the PEP 440
-  normalised version and the git tag are the same string;
-- a same-day re-release appends a counter: ``2026.9.22.1``;
-- the git tag is the version with a ``v`` prefix and must equal
-  ``pyproject.toml`` — the publish workflow refuses a mismatch.
+- `pyproject.toml` carries MAJOR.MINOR.PATCH, starting at 1.0.0;
+- product releases (git tag vYYYY.M.D, image tags) are CalVer and live only
+  in tags — see scripts/check_release_tags.py and docs/docker-images.md.
 """
-import datetime as _dt
 import pathlib
-import re
 import tomllib
 
-CALVER = re.compile(r"^(?P<y>\d{4})\.(?P<m>[1-9]|1[0-2])\.(?P<d>[1-9]|[12]\d|3[01])(?:\.(?P<n>[1-9]\d*))?$")
+from treeweft.versions import parse_semver
 
 _PYPROJECT = pathlib.Path(__file__).resolve().parents[2] / "pyproject.toml"
 
@@ -23,22 +17,11 @@ def _project_version() -> str:
         return tomllib.load(fh)["project"]["version"]
 
 
-def test_pyproject_version_is_calver():
+def test_pyproject_version_is_semver():
     version = _project_version()
-    assert CALVER.match(version), f"{version!r} is not YYYY.M.D[.N] CalVer"
+    parse_semver(version)  # raises ValueError for non-SemVer and CalVer-era versions
 
 
-def test_pyproject_version_is_a_real_date():
-    m = CALVER.match(_project_version())
-    assert m is not None
-    _dt.date(int(m["y"]), int(m["m"]), int(m["d"]))  # raises on e.g. 2026.2.30
-
-
-def test_calver_shape_examples():
-    assert CALVER.match("2026.9.22")
-    assert CALVER.match("2026.9.22.1")
-    assert CALVER.match("2026.10.1")
-    assert not CALVER.match("2026.09.22"), "zero padding is not allowed"
-    assert not CALVER.match("0.4.0")
-    assert not CALVER.match("v2026.9.22"), "the v prefix belongs to the git tag only"
-    assert not CALVER.match("2026.9.22.0"), "the same-day counter starts at 1"
+def test_semver_is_at_least_1_0_0():
+    major = int(_project_version().split(".")[0])
+    assert major >= 1, "ADR-004: the first SemVer release is 1.0.0"

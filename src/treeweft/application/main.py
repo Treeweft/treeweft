@@ -9,6 +9,7 @@ from mcp.server.sse import SseServerTransport
 from pydantic import BaseModel
 from starlette.routing import Mount
 
+from treeweft import versions
 from treeweft.infrastructure.tracing import init_tracer
 from treeweft.mcp_server import mcp, search_code
 
@@ -38,7 +39,7 @@ async def lifespan(app: FastAPI):
     yield  # no teardown needed — indexer manages its own connections
 
 
-app = FastAPI(title="Treeweft MCP Server", lifespan=lifespan)
+app = FastAPI(title="Treeweft MCP Server", version=versions.SOURCE_VERSION, lifespan=lifespan)
 
 # ── MCP transport security ─────────────────────────────────────────
 # The MCP spec makes Origin validation a MUST for HTTP transports: a browser on
@@ -77,7 +78,11 @@ class SearchRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "version": versions.SOURCE_VERSION,
+        "release": versions.product_release(),
+    }
 
 
 @app.post("/search")

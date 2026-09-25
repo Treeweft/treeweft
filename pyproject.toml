@@ -1,6 +1,6 @@
 [project]
 name = "treeweft"
-version = "2026.9.23"
+version = "1.0.0"
 description = "Treeweft - GraphRAG code search with tree-sitter indexing"
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -104,6 +104,7 @@ markers = [
     "domain: Pure domain logic, no I/O dependencies",
     "adapter: Tests that mock out-of-process dependencies (TEI, Milvus, Neo4j)",
     "slow: Tests that call docker services (integration)",
+    "real_compat_check: run the real treeweft-mcp/indexer compatibility check (other tests pre-seed it as compatible)",
 ]
 
 [dependency-groups]

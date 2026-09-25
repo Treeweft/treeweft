@@ -59,6 +59,7 @@ more than the title:
 |---|---|---|
 | [simple-mode.md](simple-mode.md) | Feature doc | The no-GPU evaluation profile: embedded LanceDB and SQLite, one API key for embeddings and summaries, a CPU reranker, and only Postgres in Docker. Includes the measured local-versus-cloud reranker comparison. |
 | [docker-images.md](docker-images.md) | Feature doc | The four published Docker Hub images, their platforms, the CalVer tag scheme, how to pull a release, and how a maintainer cuts one. |
+| [upgrading.md](upgrading.md) | Runbook | Which version you are running, what "Incompatible indexer" means, and what to read before upgrading. |
 | [result-provenance.md](result-provenance.md) | Feature doc | The provenance fields on every search hit, the citation grammar, the top-level `sources` map, and staleness checking against the current commit. |
 | [authz.md](authz.md) | Feature doc | How Treeweft decides who may read which repository: local login and tokens, groups and grants, the decision precedence, and the data flow from an MCP client to the stores. |
 | [incremental-indexing.md](incremental-indexing.md) | Feature doc | How a GitHub or Gitea push webhook becomes a changed-files job, retries and dead-lettering, backpressure, and the two load-test harnesses. |
@@ -85,7 +86,7 @@ more than the title:
 | [adr-001-cost-aware-embedding-proxy.md](adr-001-cost-aware-embedding-proxy.md) | Rule | Why embedding requests are balanced by token cost in-process rather than by connection count in a proxy, and why oversized chunks are pinned to CPU. |
 | [adr-002-no-langchain-langgraph.md](adr-002-no-langchain-langgraph.md) | Rule | Why Treeweft does not adopt LangChain or LangGraph, and the one narrow case in which LangGraph could be reconsidered. |
 | [adr-003-prompt-versioning.md](adr-003-prompt-versioning.md) | Proposal | How LLM prompts would become an immutable versioned registry with admin pins, so a new summary prompt costs a background summary-only refresh instead of a re-index. Proposed; not implemented. |
-| [adr-004-compatibility-versioning.md](adr-004-compatibility-versioning.md) | Proposal | Why published images stay CalVer while the source moves to SemVer, how the MCP client detects an incompatible indexer, and how a stamped index schema turns a surprise re-index into a reported, admin-driven rebuild. Proposed; not implemented. |
+| [adr-004-compatibility-versioning.md](adr-004-compatibility-versioning.md) | Rule | Why published images stay CalVer while the source moves to SemVer, how the MCP client detects an incompatible indexer, and how a stamped index schema turns a surprise re-index into a reported, admin-driven rebuild. §3 (index stamp, rebuild) not yet implemented. |
 
 ## Historical
 
@@ -122,6 +123,7 @@ find, never a number, so they don't drift when results are refreshed.
 :hidden:
 
 simple-mode
+upgrading
 migrating-from-treeloom
 docker-images
 engineering-notes

@@ -265,3 +265,20 @@ def mock_llm_httpx(mocker) -> AsyncMock:
         return_value=mock_client,
     )
     return mock_client
+
+
+@pytest.fixture(autouse=True)
+def _compatible_indexer(request, monkeypatch):
+    """Pre-seed treeweft-mcp's indexer compatibility check as passed.
+
+    MCP tool tests replace httpx.AsyncClient with fakes that know nothing about
+    GET /health, so the real check would fail every one of them. Tests of the
+    check itself opt out with @pytest.mark.real_compat_check.
+    """
+    if request.node.get_closest_marker("real_compat_check"):
+        return
+    from treeweft.application import mcp_compat
+
+    state = mcp_compat.CompatState(ttl=float("inf"))
+    state.mark_ok()
+    monkeypatch.setattr(mcp_compat, "STATE", state)

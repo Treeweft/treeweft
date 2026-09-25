@@ -1,12 +1,16 @@
 import asyncio
+import functools
+import inspect
 import logging
 import os
 import re
+import typing
 
 import httpx
 from mcp.server.fastmcp import Context, FastMCP
 from pydantic import ValidationError
 
+from treeweft.application import mcp_compat
 from treeweft.config import require_env
 from treeweft.domain.shared import (
     ChunkHit,
@@ -62,6 +66,28 @@ values to scope subsequent searches.
 """,
 )
 INDEXER_URL = require_env("INDEXER_URL")
+
+
+def _requires_compatible_indexer(fn):
+    """Run the lazy treeweft-mcp/indexer major-version check before the tool (ADR-004 §2).
+
+    functools.wraps keeps the signature FastMCP builds the tool schema from, so
+    the MCP contract is unchanged (tests/unit/test_mcp_compat.py checks this).
+    """
+    returns_list = typing.get_origin(inspect.signature(fn).return_annotation) is list
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        error = await mcp_compat.compat_error(INDEXER_URL)
+        if error is not None:
+            return [{"error": error}] if returns_list else {"error": error}
+        return await fn(*args, **kwargs)
+
+    return wrapper
+
+
+def _indexer_error(exc: httpx.HTTPError) -> str:
+    return mcp_compat.describe_http_error(exc)
 
 
 # ── helpers ──────────────────────────────────────────────────────
@@ -401,6 +427,7 @@ def _search_response_to_markdown(d: dict) -> str:
     "with a job_id; poll get_index_job to track progress. Set force=true to re-index even "
     "if this file is already indexed and unchanged (otherwise the call no-ops to the prior job)."
 )
+@_requires_compatible_indexer
 async def index_file(file_path: str, force: bool = False, ctx: Context | None = None) -> dict:
     """Proxies to POST /index-file. Returns plain dict for MCP serialization."""
     try:
@@ -419,7 +446,7 @@ async def index_file(file_path: str, force: bool = False, ctx: Context | None = 
                 "status_url": f"{INDEXER_URL}/jobs/{data['job_id']}",
             }
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -427,6 +454,7 @@ async def index_file(file_path: str, force: bool = False, ctx: Context | None = 
     "a job_id; poll get_index_job to track progress. Set force=true to re-index even if the "
     "directory is already indexed and unchanged (otherwise the call no-ops to the prior job)."
 )
+@_requires_compatible_indexer
 async def index_directory(directory: str, pattern: str = "**/*", force: bool = False, ctx: Context | None = None) -> dict:
     """Proxies to POST /index-directory."""
     try:
@@ -445,7 +473,7 @@ async def index_directory(directory: str, pattern: str = "**/*", force: bool = F
                 "status_url": f"{INDEXER_URL}/jobs/{data['job_id']}",
             }
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -455,6 +483,7 @@ async def index_directory(directory: str, pattern: str = "**/*", force: bool = F
     "By default an already-indexed, unchanged source no-ops to its prior job — set force=true "
     "to force a full re-index."
 )
+@_requires_compatible_indexer
 async def index_repo(
     path: str | None = None,
     url: str | None = None,
@@ -479,7 +508,7 @@ async def index_repo(
                 "status_url": f"{INDEXER_URL}/jobs/{data['job_id']}",
             }
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -490,6 +519,7 @@ async def index_repo(
     "re-extracts; safe to re-run. Returns immediately with a job_id; poll get_index_job. "
     "Get source_id from list_indexed_sources."
 )
+@_requires_compatible_indexer
 async def index_graph(source_id: str, ctx: Context | None = None) -> dict:
     """Proxies to POST /index-graph."""
     try:
@@ -508,7 +538,7 @@ async def index_graph(source_id: str, ctx: Context | None = None) -> dict:
                 "status_url": f"{INDEXER_URL}/jobs/{data['job_id']}",
             }
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -523,6 +553,7 @@ async def index_graph(source_id: str, ctx: Context | None = None) -> dict:
     "through the shared queue — this kicks them off and returns; poll "
     "list_index_jobs(status='running') to track."
 )
+@_requires_compatible_indexer
 async def rebuild_all_graphs(only_missing: bool = False, ctx: Context | None = None) -> dict:
     """List sources and enqueue a graph job for each (all sources by default)."""
     try:
@@ -534,7 +565,7 @@ async def rebuild_all_graphs(only_missing: bool = False, ctx: Context | None = N
             resp.raise_for_status()
             sources = resp.json()
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
     results: list[dict] = []
     enqueued = 0
@@ -579,6 +610,7 @@ async def rebuild_all_graphs(only_missing: bool = False, ctx: Context | None = N
 
 
 @mcp.tool(description="Get the current state of an index job (queued/running/done/failed).")
+@_requires_compatible_indexer
 async def get_index_job(job_id: str, ctx: Context | None = None) -> dict:
     """Proxies to GET /jobs/{job_id}."""
     try:
@@ -590,13 +622,14 @@ async def get_index_job(job_id: str, ctx: Context | None = None) -> dict:
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
     description="Block until an index job reaches done/failed/cancelled, or until timeout_s "
     "elapses. Polls server-side. Use this when you want a synchronous index call."
 )
+@_requires_compatible_indexer
 async def wait_for_index_job(job_id: str, timeout_s: int = 60, ctx: Context | None = None) -> dict:
     """Poll GET /jobs/{job_id} until terminal state or timeout."""
     deadline = asyncio.get_event_loop().time() + timeout_s
@@ -615,13 +648,14 @@ async def wait_for_index_job(job_id: str, timeout_s: int = 60, ctx: Context | No
                     return data
                 await asyncio.sleep(1.0)
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 # ── source registry tools ────────────────────────────────────────
 
 
 @mcp.tool(description="List all indexed sources (repos, directories, files) with their stats.")
+@_requires_compatible_indexer
 async def list_indexed_sources(ctx: Context | None = None) -> list[dict]:
     """Proxies to GET /sources."""
     try:
@@ -633,13 +667,14 @@ async def list_indexed_sources(ctx: Context | None = None) -> list[dict]:
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError as exc:
-        return [{"error": f"Indexer unreachable: {exc}"}]
+        return [{"error": _indexer_error(exc)}]
 
 
 @mcp.tool(
     description="Remove an indexed source. Drops its Milvus chunks and Neo4j entities "
     "(but preserves entities still referenced by other sources)."
 )
+@_requires_compatible_indexer
 async def remove_indexed_source(source_id: str, ctx: Context | None = None) -> dict:
     """Proxies to DELETE /sources/{source_id}."""
     try:
@@ -651,7 +686,7 @@ async def remove_indexed_source(source_id: str, ctx: Context | None = None) -> d
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -660,6 +695,7 @@ async def remove_indexed_source(source_id: str, ctx: Context | None = None) -> d
     "processed_files / total_files, errors, current_file, and timing. Useful for "
     "answering 'is treeweft busy?' or 'what happened to my last index job?'."
 )
+@_requires_compatible_indexer
 async def list_index_jobs(status: str | None = None, ctx: Context | None = None) -> list[dict]:
     """Proxies to GET /jobs. Optional status filter applied client-side."""
     try:
@@ -671,7 +707,7 @@ async def list_index_jobs(status: str | None = None, ctx: Context | None = None)
             resp.raise_for_status()
             jobs = resp.json()
     except httpx.HTTPError as exc:
-        return [{"error": f"Indexer unreachable: {exc}"}]
+        return [{"error": _indexer_error(exc)}]
     if status:
         jobs = [j for j in jobs if j.get("status") == status]
     return jobs
@@ -684,6 +720,7 @@ async def list_index_jobs(status: str | None = None, ctx: Context | None = None)
     "occurred_at. Useful for 'which files failed?' and 'why?' without "
     "grepping process logs."
 )
+@_requires_compatible_indexer
 async def list_job_errors(
     job_id: str, limit: int = 1000, offset: int = 0, ctx: Context | None = None
 ) -> dict:
@@ -698,7 +735,7 @@ async def list_job_errors(
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -708,6 +745,7 @@ async def list_job_errors(
     "`{indexed_sha, current_sha, is_stale}` — `is_stale` is null for "
     "non-git inputs."
 )
+@_requires_compatible_indexer
 async def source_staleness(source_id: str, ctx: Context | None = None) -> dict:
     """Proxies to GET /sources/{source_id}/staleness."""
     try:
@@ -719,7 +757,7 @@ async def source_staleness(source_id: str, ctx: Context | None = None) -> dict:
             resp.raise_for_status()
             return resp.json()
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 # ── search tools (with scope filters) ────────────────────────────
@@ -748,6 +786,7 @@ async def source_staleness(source_id: str, ctx: Context | None = None) -> dict:
     "Returns compact markdown by default (~20% fewer tokens); pass "
     "response_format='json' to get the structured dict instead (for programmatic callers)."
 )
+@_requires_compatible_indexer
 async def search_code(
     query: str,
     top_k: int = 5,
@@ -804,7 +843,7 @@ async def search_code(
                 return _search_response_to_markdown(out)
             return out
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -815,6 +854,7 @@ async def search_code(
     "indexed chunk(s), reconstructing merged ranges. Returns compact markdown by default; pass "
     "response_format='json' for the structured dict."
 )
+@_requires_compatible_indexer
 async def hydrate_chunks(
     ids: list[str],
     source_id: str | None = None,
@@ -836,7 +876,7 @@ async def hydrate_chunks(
                 return _search_response_to_markdown(out)
             return out
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -853,6 +893,7 @@ async def hydrate_chunks(
     "tokens); pass response_format='json' to get the structured dict instead (for programmatic "
     "callers)."
 )
+@_requires_compatible_indexer
 async def search_code_enhanced(
     query: str,
     top_k: int = 5,
@@ -909,7 +950,7 @@ async def search_code_enhanced(
                 return _search_response_to_markdown(out)
             return out
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -918,6 +959,7 @@ async def search_code_enhanced(
     "X'). Same as `search_code` but with top_k=5 and an optional file_path filter applied "
     "server-side — useful for narrowing to a single file you already know is relevant."
 )
+@_requires_compatible_indexer
 async def explain_code(
     query: str,
     file_path: str | None = None,
@@ -970,7 +1012,7 @@ async def explain_code(
             sr = _parse_search_response(raw)
             return _search_response_to_dict(sr)
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
@@ -979,6 +1021,7 @@ async def explain_code(
     "entities related to the query and traverses their connections (callers, callees, imports, "
     "inheritance) up to `depth` hops. For 'find the code that does X', use `search_code` instead."
 )
+@_requires_compatible_indexer
 async def graph_explore(
     query: str,
     depth: int = 1,
@@ -1015,7 +1058,7 @@ async def graph_explore(
             sr = _parse_search_response(resp.json())
             return _search_response_to_dict(sr)
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 # ── symbol-level graph tools ─────────────────────────────────────
@@ -1026,6 +1069,7 @@ async def graph_explore(
     "Returns all matches across files (let the caller disambiguate). Optional `kind` filter "
     "('Class' or 'Function') and `source_id` to scope to one indexed source."
 )
+@_requires_compatible_indexer
 async def find_definition(
     name: str,
     kind: str | None = None,
@@ -1049,13 +1093,14 @@ async def find_definition(
             entities = resp.json()
             return [_neighbor_to_dict(_parse_neighbor(e)) for e in entities]
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
     description="Find callers of a function/method. Accepts either a name (auto-resolves; "
     "returns callers across all matches with target_id set) or a full entity id."
 )
+@_requires_compatible_indexer
 async def find_callers(
     name_or_id: str, source_id: str | None = None, ctx: Context | None = None
 ) -> list[dict]:
@@ -1074,13 +1119,14 @@ async def find_callers(
             callers = resp.json()
             return [_neighbor_to_dict(_parse_neighbor(c)) for c in callers]
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}
 
 
 @mcp.tool(
     description="Find all references (any incoming relationship — CALLS, INHERITS, IMPORTS, "
     "DEFINES) to a symbol. Accepts a name or a full entity id."
 )
+@_requires_compatible_indexer
 async def find_references(
     name_or_id: str, source_id: str | None = None, ctx: Context | None = None
 ) -> list[dict]:
@@ -1099,4 +1145,4 @@ async def find_references(
             refs = resp.json()
             return [_neighbor_to_dict(_parse_neighbor(r)) for r in refs]
     except httpx.HTTPError as exc:
-        return {"error": f"Indexer unreachable: {exc}"}
+        return {"error": _indexer_error(exc)}

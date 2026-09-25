@@ -29,5 +29,10 @@ RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 ENV PYTHONPATH=/app/src
 ENV RUST_MIN_STACK=8388608
 
+# CalVer product release, set by the publish workflow; empty for local builds.
+# Declared late so a new release doesn't invalidate the dependency layers.
+ARG TREEWEFT_RELEASE=""
+ENV TREEWEFT_RELEASE=$TREEWEFT_RELEASE
+
 EXPOSE 8001
 CMD ["uvicorn", "treeweft.indexer_service:app", "--host", "0.0.0.0", "--port", "8001"]

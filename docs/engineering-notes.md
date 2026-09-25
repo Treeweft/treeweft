@@ -74,6 +74,12 @@ There are two FastAPI apps and they are not interchangeable:
 - `treeweft/main.py` (HTTP+SSE transport, opt-in, deprecated upstream) — wraps the MCP server over SSE. The default transport is stdio via `application/mcp_stdio.py`, which serves MCP clients directly (no FastAPI app, no port, one process per client, spawned by the client itself). **The MCP server is a pure HTTP proxy**: every tool calls the indexer via `INDEXER_URL` (its only service env var); it imports no Milvus/Neo4j/TEI client code.
 - `treeweft/indexer_service.py` (port 8001, on host) — owns all filesystem reads, chunking, embedding, Milvus inserts, Neo4j writes, AND all retrieval (`/search`, `/graph-explore`).
 
+- `GET /health` reports `version` (source SemVer from `treeweft.versions`: the
+  checkout's `pyproject.toml`, else installed metadata) and `release`
+  (`TREEWEFT_RELEASE`, baked into published images; `null` from source).
+  `treeweft-mcp` compares the major versions before its first indexer call
+  (`application/mcp_compat.py`).
+
 
 ## Common dev tasks
 

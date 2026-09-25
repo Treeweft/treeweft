@@ -1,12 +1,13 @@
 # ADR-004: SemVer Source, CalVer Product, and a Stamped Index Schema
 
-- Status: Proposed
+- Status: Accepted (§1, §2, §4 and the release/docs parts of §5 implemented in 1.0.0; §3 pending)
 - Date: 2026-09-24
 - Owner: release process / indexer / MCP server
 
 > An ADR records a decision at a point in time. The Context below describes
-> the code as it was on the date above. This record is **Proposed**: nothing
-> in it is implemented yet.
+> the code as it was on the date above. This record is **Accepted**. §1, §2,
+> §4 and the release/docs parts of §5 are implemented in 1.0.0; §3 (the index
+> stamp, reindex-required mode and rebuild) is not yet implemented.
 
 ## Context
 
