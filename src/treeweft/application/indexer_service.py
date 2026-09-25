@@ -51,6 +51,7 @@ from treeweft.sources import make_source_id
 from treeweft import graph_store
 from treeweft import community
 from treeweft import llm
+from treeweft import versions
 
 # Webhook adapters and domain
 from treeweft.domain.webhook import WebhookPayload, Provider, detect_provider
@@ -89,7 +90,7 @@ async def _lifespan(app: FastAPI):
         await _lc.shutdown(app)
 
 
-app = FastAPI(title="Treeweft Indexer", lifespan=_lifespan)
+app = FastAPI(title="Treeweft Indexer", version=versions.SOURCE_VERSION, lifespan=_lifespan)
 
 # Shared mutable state — see that module on why it is used via the module
 # object rather than by importing the names.
@@ -507,6 +508,8 @@ async def health():
         "status": "ok",
         "database": "connected" if pool else "unavailable",
         "auth_enabled": os.environ.get("AUTH_ENABLED", "").lower() == "true",
+        "version": versions.SOURCE_VERSION,
+        "release": versions.product_release(),
     }
 
 
