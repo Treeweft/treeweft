@@ -53,6 +53,7 @@ result (R3): `passed`, `failed(check_name, detail)`, `unavailable(detail)` or `n
 | data, no stamp, verification `passed` | `ok` | write the stamp (adopt as schema 1) |
 | data, no stamp, verification `failed` | `reindex_required` | none; reason names the check |
 | data, no stamp, verification `unavailable` | `unverified` | none |
+| data, no stamp, verification `not_run` | `unverified` | none (never adopt without verifying) |
 | graph: data, no stamp, vector store has no data | `reindex_required` | none; "graph cannot be verified without vector data" |
 
 Reason format for one mismatch (FR-005):

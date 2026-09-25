@@ -120,7 +120,7 @@ src/treeweft/
 │   │                                   #   start/stop retry loop
 │   ├── indexer_service.py              # /health fields; guard calls on read + write routes; POST /index/rebuild
 │   ├── routes_webhook.py               # require_writable on job-enqueuing routes
-│   └── indexer_runners.py              # dispatch_job gate → job failed, not retried
+│   └── (adapters/queue/postgres_queue.py) # _run_one gate before dispatch_job → job failed, not retried
 ├── retriever.py                        # export observe_index, write_stamp, sample_chunks, drop_index
 ├── graph_store.py                      # _EXPORTED += observe_index, read_stamp, write_stamp, clear_index_data
 ├── adapters/

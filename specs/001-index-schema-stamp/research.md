@@ -170,9 +170,11 @@ as seen by this process. Simple mode may run without Postgres.
    - No route in the indexer uses `Depends` today, and `_authorize_scope` cannot be the gate: it
      returns early when auth is off and also guards write routes. Explicit calls follow the
      existing style and are enforced by a route-table test (next point).
-2. **Execution choke point (defence in depth).** `indexer_runners.dispatch_job` checks
-   `index_guard.writes_allowed()` before running any kind. A job reaching it while writes are
-   refused is marked `failed` with the reason and is not retried. This covers every path the HTTP
+2. **Execution choke point (defence in depth).** The queue worker
+   (`adapters/queue/postgres_queue.py` `_run_one`) checks `index_guard.writes_allowed()` just
+   before `dispatch_job`. A job reaching it while writes are refused is marked `failed` with the
+   reason, the same path an undispatchable job takes today (`:132-140`). Attempts are not
+   incremented, so the job is not retried. This covers every path the HTTP
    layer cannot see: fleet auto-refresh (`_enqueue_source_reindex`), restart recovery, and jobs
    queued before a status change.
 3. **A route-table test.** It asserts that every route in the read set calls
