@@ -7,6 +7,11 @@ Added, Fixed.
 
 ## Unreleased
 
+### Breaking
+
+- `treeweft-mcp` 1.x refuses an indexer older than 1.0.0; after pulling,
+  restart or upgrade the indexer too.
+
 ### Added
 
 - The source is versioned with SemVer, starting at 1.0.0. Published images keep CalVer.

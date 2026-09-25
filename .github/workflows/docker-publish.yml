@@ -48,8 +48,9 @@ env:
 
 jobs:
   check-tag:
-    # Only on release tags: fail loud before any image is built if the tag
-    # is not `vYYYY.M.D[.N]` or does not match pyproject.toml.
+    # Only on release tags: fail loud before any image is built if the tag is
+    # not CalVer, the commit lacks its SemVer tag, or a major bump lands
+    # mid-month.
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:

@@ -8,6 +8,7 @@ the next call. No environment variables and no I/O at import.
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
 from typing import Callable
@@ -15,6 +16,8 @@ from typing import Callable
 import httpx
 
 from treeweft.versions import SOURCE_VERSION, parse_semver
+
+logger = logging.getLogger(__name__)
 
 CACHE_TTL_SECONDS = 300.0
 
@@ -74,6 +77,10 @@ async def compat_error(indexer_url: str, state: CompatState | None = None) -> st
     except (httpx.HTTPError, ValueError):
         return None
     if not isinstance(health, dict):
+        logger.warning(
+            "treeweft-mcp: %s/health returned a non-object body; skipping the compatibility check",
+            indexer_url,
+        )
         return None
     error = incompatibility(health)
     if error is None:
@@ -91,5 +98,5 @@ def describe_http_error(exc: httpx.HTTPError) -> str:
             detail = None
         if detail is None:
             detail = resp.text[:300]
-        return f"Indexer returned HTTP {resp.status_code}: {detail}"
+        return f"Indexer returned HTTP {resp.status_code}: {str(detail)[:300]}"
     return f"Indexer unreachable: {exc}"

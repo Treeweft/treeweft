@@ -16,6 +16,10 @@ def repo(tmp_path, monkeypatch):
     for var, value in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"),
                        ("GIT_COMMITTER_NAME", "t"), ("GIT_COMMITTER_EMAIL", "t@t")):
         monkeypatch.setenv(var, value)
+    # Hermetic against the developer's own git config: a global commit.gpgsign
+    # or tag.gpgSign would otherwise fail these commits/tags in CI or locally.
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     return tmp_path
 

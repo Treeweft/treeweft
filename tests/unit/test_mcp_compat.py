@@ -1,5 +1,6 @@
 """treeweft-mcp detects an incompatible indexer lazily, per call (ADR-004 §2)."""
 import asyncio
+import logging
 
 import httpx
 import pytest
@@ -136,13 +137,18 @@ async def test_unreachable_or_failing_health_is_not_an_error_and_not_cached(fake
 
 
 @pytest.mark.asyncio
-async def test_non_object_health_is_not_cached_and_not_an_error(fake_http):
+async def test_non_object_health_is_not_cached_and_not_an_error(fake_http, caplog):
     script, calls = fake_http
     script["GET"] = _resp(200, ["not", "an", "object"])
     state = mcp_compat.CompatState(clock=_Clock())
 
-    assert await mcp_compat.compat_error("http://indexer", state) is None
+    with caplog.at_level(logging.WARNING, logger="treeweft.application.mcp_compat"):
+        assert await mcp_compat.compat_error("http://indexer", state) is None
     assert not state.is_fresh()
+    assert any(
+        "non-object body; skipping the compatibility check" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 # ── describe_http_error() ──────────────────────────────────────────
@@ -161,6 +167,16 @@ def test_status_error_without_json_uses_the_body_text():
 
 def test_connection_error_is_unreachable():
     assert mcp_compat.describe_http_error(httpx.ConnectError("refused")) == "Indexer unreachable: refused"
+
+
+def test_status_error_detail_is_bounded():
+    # A FastAPI 422 `detail` is a list of per-field validation errors that can
+    # echo arbitrarily large input; the message must stay bounded.
+    long_detail = [{"loc": ["body", "query"], "msg": "x" * 50, "type": "value_error"} for _ in range(20)]
+    resp = _resp(422, {"detail": long_detail})
+    exc = httpx.HTTPStatusError("unprocessable", request=resp.request, response=resp)
+    message = mcp_compat.describe_http_error(exc)
+    assert len(message) <= len("Indexer returned HTTP 422: ") + 300
 
 
 # ── wired into the MCP tools ───────────────────────────────────────

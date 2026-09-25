@@ -36,6 +36,12 @@ Treeweft has two version lines (ADR-004):
   MCP tools or the index schema; MINOR means additions; PATCH means fixes.
   `tests/unit/test_contracts.py` enforces the bump against the snapshots in
   `contracts/`.
+- **A feature PR that changes the API or MCP tool surface bumps
+  `pyproject.toml` itself.** `tests/unit/test_contracts.py` fails until it
+  does, naming the minimum version required. The release PR does not decide
+  the version; it only regenerates the contract snapshots (see "Cutting a
+  release" below) and sets the version itself only when no feature PR
+  already bumped it.
 - **Every release commit carries both tags:** `v<SemVer>` first, then
   `v<CalVer>`, which triggers the publish workflow. The workflow's `check-tag`
   job (`scripts/check_release_tags.py`) refuses a malformed CalVer tag or a
@@ -114,12 +120,14 @@ gh variable set DOCKERHUB_NAMESPACE --repo treeweft/treeweft --body treeweft
 
 Cutting a release:
 
-1. **Release PR.** Set `version` in `pyproject.toml` to the SemVer the release
-   needs; `tests/unit/test_contracts.py` says which. Run `uv lock` and
-   `python scripts/update_contracts.py` to record the new contract snapshots.
-   Move the `## Unreleased` entries in `CHANGELOG.md` under a new
-   `## <SemVer> — <CalVer>` heading. A release with a MAJOR bump must be the
-   first release of its month.
+1. **Release PR.** A feature PR that changed the API or MCP tool surface
+   already bumped `version` in `pyproject.toml` — `tests/unit/test_contracts.py`
+   fails until it does, naming the minimum version. The release PR sets the
+   version itself only if no feature PR already did. Either way, run `uv lock`
+   and `python scripts/update_contracts.py` to record the new contract
+   snapshots, and move the `## Unreleased` entries in `CHANGELOG.md` under a
+   new `## <SemVer> — <CalVer>` heading. A release with a MAJOR bump must be
+   the first release of its month.
 2. **Merge**, then tag the merge commit twice, SemVer first:
 
        git tag v1.2.0 && git push origin v1.2.0
