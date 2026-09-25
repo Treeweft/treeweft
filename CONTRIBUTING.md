@@ -25,7 +25,6 @@ Running the full stack locally is described in the README (Quick Start).
 - **Retrieval changes need evidence**: anything that could move search
   quality gets a benchmark run (`python -m treeweft.benchmark run`) —
   see docs/benchmark-eval.md for the workflow.
-- **Commits**: conventional-commit style (`feat:`, `fix:`, `chore:`, ...).
 
 ## Reporting bugs
 

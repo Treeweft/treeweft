@@ -47,8 +47,11 @@ chroma_data/
 logs/
 anticipate-socialmedia-*.md
 
-# Local agent/tooling state (not project artifacts)
-.claude/
+# Local agent/tooling state (not project artifacts). Shared agent skills
+# (e.g. Spec Kit's .claude/skills/speckit-*) are the exception and are committed;
+# `.claude/*` rather than `.claude/` so the negation below can re-include them.
+.claude/*
+!.claude/skills/
 .superpowers/
 .deepeval/
 .env.bak.*
