@@ -1,6 +1,6 @@
 [project]
 name = "treeweft"
-version = "1.0.0"
+version = "1.1.0"
 description = "Treeweft - GraphRAG code search with tree-sitter indexing"
 readme = "README.md"
 license = { file = "LICENSE" }
