@@ -18,6 +18,14 @@ def main() -> None:
         path = contracts.write_snapshot(name, surface, versions.SOURCE_VERSION)
         print(f"wrote {path} at {versions.SOURCE_VERSION}")
 
+    path = contracts.write_snapshot(
+        "index_schema",
+        contracts.index_schema_surface(),
+        versions.SOURCE_VERSION,
+        extra={"index_schema": versions.INDEX_SCHEMA_VERSION},
+    )
+    print(f"wrote {path} at {versions.SOURCE_VERSION} (index_schema={versions.INDEX_SCHEMA_VERSION})")
+
 
 if __name__ == "__main__":
     main()
