@@ -246,10 +246,28 @@ class MilvusAdapter(VectorStorePort):
                 dim = field.get("params", {}).get("dim")
                 if dim is not None:
                     dim = int(dim)
+        stamp = _stamp_from_properties(desc.get("properties"), dim)
         has_data = int(stats.get("row_count", 0) or 0) > 0
+        if not has_data and stamp is None:
+            # get_collection_stats()["row_count"] only counts flushed/sealed
+            # segments and can read 0 for rows that are inserted but not yet
+            # auto-flushed (confirmed live against Milvus 2.5.4). Trusting it
+            # alone here would let real, unstamped legacy data slip past the
+            # ADR-004 legacy-adoption check unverified. A stats-agreeing
+            # `has_data=True` never reaches this branch, so the extra query
+            # only runs for stores that are actually empty or ambiguous.
+            has_data = bool(
+                await self._execute_with_reconnect(
+                    MilvusClient.query,
+                    self.collection_name,
+                    filter="",
+                    output_fields=["id"],
+                    limit=1,
+                )
+            )
         return StoreObservation(
             store="vector", backend="milvus", exists=True, has_data=has_data,
-            stamp=_stamp_from_properties(desc.get("properties"), dim), schema_dim=dim,
+            stamp=stamp, schema_dim=dim,
         )
 
     async def write_stamp(self, stamp: IndexStamp) -> None:

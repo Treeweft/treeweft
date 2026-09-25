@@ -116,6 +116,53 @@ class TestObserveIndex:
             obs = await adapter.observe_index()
         assert obs.stamp == STAMP
 
+    async def test_zero_row_count_confirmed_empty_by_query_when_unstamped(self, mock_client):
+        """get_collection_stats()['row_count'] only reflects flushed segments
+        (confirmed live against Milvus 2.5.4 in tests/integration) — an
+        unstamped store reporting 0 must be double-checked with a direct
+        query before legacy adoption trusts 'no data'."""
+        from treeweft.adapters.milvus import vector_store as vs
+        adapter = _make_adapter(mock_client)
+        describe = {"fields": [{"name": "vector", "params": {"dim": 1024}}], "properties": {}}
+        with patch.object(vs.MilvusClient, "has_collection", MagicMock(return_value=True)), \
+             patch.object(vs.MilvusClient, "describe_collection", MagicMock(return_value=describe)), \
+             patch.object(vs.MilvusClient, "get_collection_stats", MagicMock(return_value={"row_count": 0})), \
+             patch.object(vs.MilvusClient, "query", MagicMock(return_value=[])) as query:
+            obs = await adapter.observe_index()
+        assert obs.has_data is False
+        query.assert_called_once()
+        _, kwargs = query.call_args
+        assert kwargs["limit"] == 1
+
+    async def test_zero_row_count_but_unflushed_rows_found_by_query(self, mock_client):
+        from treeweft.adapters.milvus import vector_store as vs
+        adapter = _make_adapter(mock_client)
+        describe = {"fields": [{"name": "vector", "params": {"dim": 1024}}], "properties": {}}
+        with patch.object(vs.MilvusClient, "has_collection", MagicMock(return_value=True)), \
+             patch.object(vs.MilvusClient, "describe_collection", MagicMock(return_value=describe)), \
+             patch.object(vs.MilvusClient, "get_collection_stats", MagicMock(return_value={"row_count": 0})), \
+             patch.object(vs.MilvusClient, "query", MagicMock(return_value=[{"id": 1}])):
+            obs = await adapter.observe_index()
+        assert obs.has_data is True
+
+    async def test_zero_row_count_with_stamp_skips_confirmation_query(self, mock_client):
+        """Once a stamp exists, has_data no longer decides fresh-vs-legacy
+        adoption (domain/index_stamp.py decide_store), so the extra query
+        would be pure waste."""
+        from treeweft.adapters.milvus import vector_store as vs
+        adapter = _make_adapter(mock_client)
+        describe = {
+            "fields": [{"name": "vector", "params": {"dim": 1024}}],
+            "properties": {"treeweft.index_schema": "1", "treeweft.embedding_model": "Qwen/Qwen3-Embedding-0.6B"},
+        }
+        with patch.object(vs.MilvusClient, "has_collection", MagicMock(return_value=True)), \
+             patch.object(vs.MilvusClient, "describe_collection", MagicMock(return_value=describe)), \
+             patch.object(vs.MilvusClient, "get_collection_stats", MagicMock(return_value={"row_count": 0})), \
+             patch.object(vs.MilvusClient, "query", MagicMock(return_value=[{"id": 1}])) as query:
+            obs = await adapter.observe_index()
+        assert obs.has_data is False
+        query.assert_not_called()
+
     async def test_client_error_sets_unreachable_and_does_not_raise(self, mock_client):
         from treeweft.adapters.milvus import vector_store as vs
         adapter = _make_adapter(mock_client)

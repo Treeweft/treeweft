@@ -127,6 +127,43 @@ class TestSampleChunksOverRealRows:
         obs = await adapter.observe_index()
         assert obs.has_data is True
 
+    async def test_has_data_true_immediately_after_insert_before_flush(self, adapter):
+        """Reproduces the staleness this observe_index() must defend
+        against: get_collection_stats()['row_count'] only counts
+        flushed/sealed segments and can read 0 right after an insert (a real
+        Milvus 2.5.4 behavior, confirmed live), which would otherwise let an
+        unstamped legacy store with real data slip past verification as
+        'fresh, no data'. Builds the collection directly via the raw client,
+        with no `treeweft.*` properties, matching every pre-1.0.0 deployment
+        (adapter.init_collection() always stamps at creation, so it can't
+        produce this state)."""
+        from treeweft.adapters.milvus.vector_store import INDEX_PARAMS, build_collection_schema
+
+        mc = adapter._get_client()
+        schema = build_collection_schema(DIM)
+        index_params = mc.prepare_index_params()
+        for spec in INDEX_PARAMS:
+            index_params.add_index(**spec)
+        mc.create_collection(collection_name=COLL, schema=schema, index_params=index_params)
+
+        stats_before_insert = mc.get_collection_stats(COLL)
+        assert int(stats_before_insert.get("row_count", 0) or 0) == 0
+
+        await adapter.insert(
+            [{"text": "x", "file_path": "/a.py", "language": "python",
+              "start_line": 1, "end_line": 1, "source_id": "s1"}],
+            [[0.1, 0.2, 0.3, 0.4]],
+        )
+        stats_immediately_after = mc.get_collection_stats(COLL)
+        assert int(stats_immediately_after.get("row_count", 0) or 0) == 0, (
+            "if Milvus starts reporting row_count immediately, the staleness "
+            "this test guards against no longer exists and it should be revisited"
+        )
+
+        obs = await adapter.observe_index()
+        assert obs.stamp is None
+        assert obs.has_data is True
+
 
 class TestDropIndex:
     async def test_drop_removes_the_collection(self, adapter):
