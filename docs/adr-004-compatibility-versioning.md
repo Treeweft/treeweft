@@ -1,13 +1,19 @@
 # ADR-004: SemVer Source, CalVer Product, and a Stamped Index Schema
 
-- Status: Accepted (§1, §2, §4 and the release/docs parts of §5 implemented in 1.0.0; §3 pending)
+- Status: Accepted and fully implemented (§1, §2 and the release/docs parts of §5 in 1.0.0; §3, §4's index-schema snapshot and the remaining §5 docs in 1.1.0)
 - Date: 2026-09-24
 - Owner: release process / indexer / MCP server
 
 > An ADR records a decision at a point in time. The Context below describes
-> the code as it was on the date above. This record is **Accepted**. §1, §2,
-> §4 and the release/docs parts of §5 are implemented in 1.0.0; §3 (the index
-> stamp, reindex-required mode and rebuild) is not yet implemented.
+> the code as it was on the date above. This record is **Accepted** and
+> fully implemented. §1, §2 and the release/docs parts of §5 shipped in
+> 1.0.0; §3 (the index stamp, reindex-required mode and rebuild), §4's
+> `contracts/index_schema.json` snapshot, and the rest of §5 shipped in
+> 1.1.0. §3's design extends beyond what this record specifies to cover
+> several indexer processes sharing one Postgres (a supported deployment
+> topology this record did not originally address) via a Postgres
+> session-level advisory lock; see `specs/001-index-schema-stamp/`
+> (research R13) for that design.
 
 ## Context
 

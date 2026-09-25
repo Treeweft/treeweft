@@ -240,3 +240,14 @@ graph + asyncio lock, embedded LanceDB) is **single-writer** by design — it ha
 no Postgres queue and no cross-process worker pool. Use the full stack (Postgres
 queue + Milvus + Neo4j) for fleet-scale deployments. See
 [simple-mode.md](simple-mode.md).
+
+## 5. Index-schema mismatches on a fleet
+
+If `GET /health`'s `index_status` shows `reindex_required` (a changed
+embedding model, dimension, or schema — see `docs/upgrading.md`, "The index
+schema stamp"), every bulk-onboarding and health-rollup call above still
+works: sources, jobs and job groups are unaffected. Only search and index
+jobs are refused, fleet-wide, until an admin runs `POST /index/rebuild`. The
+rebuild re-indexes **every** registered source as a single job group — the
+same manifest-driven re-indexing this doc describes in §1, just triggered
+once for the whole fleet rather than per source.

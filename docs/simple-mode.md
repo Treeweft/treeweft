@@ -415,6 +415,14 @@ reach a container or another host, turn auth on at the same time.
    `mcp-server` container needs `host.docker.internal` traffic to keep
    reaching it too.
 
+## Index schema stamp (ADR-004 §3)
+
+Simple mode's stores (embedded LanceDB, embedded SQLite graph) are stamped
+and checked exactly like the full stack's Milvus/Neo4j — `index_status` in
+`GET /health`, the `reindex_required`/`unverified`/`rebuilding` states, and
+`POST /index/rebuild`, all behave the same regardless of backend. See
+`docs/upgrading.md`, "The index schema stamp".
+
 ## Upgrading to the full stack
 
 The Postgres volume (`postgres-data`) is shared with the full

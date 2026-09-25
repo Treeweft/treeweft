@@ -373,6 +373,12 @@ Both questions raised when this was drafted were settled on 2026-09-24:
 2. **Moving a pin supports a dry run** (`?dry_run=true`), and the operator UI
    always shows it as a confirmation step (see §4).
 
+A summary-prompt version change (`PROMPT_VERSION`) never bumps
+`INDEX_SCHEMA_VERSION` and never causes `reindex_required` — it is
+versioned and refreshed entirely through this record's own
+`summary_prompt_version` mechanism, orthogonal to the vector/graph index
+schema ADR-004 §3 stamps and checks (`src/treeweft/domain/index_stamp.py`).
+
 ## References
 
 - `src/treeweft/adapters/llm_api/llm_adapter.py`: `PROMPT_VERSION`, the prompt
