@@ -3,16 +3,17 @@ name: Docker images
 # Builds the Treeweft container images and publishes them to Docker Hub.
 #
 #   * push of a `vYYYY.M.D[.N]` tag -> build + push `YYYY.M.D[.N]`, `YYYY.M`, `latest`
+#     (the commit must also carry the source's SemVer tag `v<pyproject version>`)
 #   * manual run                    -> build + push `edge` + `sha-<short>` (any ref)
 #   * pull request touching a Dockerfile / this workflow -> build only, no
 #     push, amd64 only, and the CUDA reranker is skipped (its 6 GB base
 #     dominates PR build time and its Dockerfile rarely changes); a newer
 #     push to the same PR cancels the previous build.
 #
-# Versions are CalVer (docs/docker-images.md, "Versioning"): the release
-# date without zero padding, an optional `.N` for a same-day re-release, and
-# the git tag is that version with a `v` prefix. The `check-tag` job refuses
-# a tag that is not CalVer-shaped or does not equal pyproject.toml's version.
+# Versions (docs/docker-images.md, "Versioning"; ADR-004): images are CalVer,
+# the source is SemVer. Each release commit carries both tags; the CalVer tag
+# triggers this workflow. `check-tag` (scripts/check_release_tags.py) refuses a
+# malformed CalVer tag, a missing SemVer tag, and a major bump mid-month.
 #
 # Repository settings required for the push paths:
 #   secrets.DOCKERHUB_USERNAME  Docker Hub account (or org member) login
@@ -53,22 +54,12 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v7
-      - name: Tag is CalVer and equals pyproject version
+        with:
+          fetch-depth: 0   # tags and history: the month rule compares earlier releases
+      - name: Release tags are consistent (CalVer shape, SemVer tag, month rule)
         env:
           TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          calver='^v[0-9]{4}\.([1-9]|1[0-2])\.([1-9]|[12][0-9]|3[01])(\.[1-9][0-9]*)?$'
-          if ! [[ "$TAG" =~ $calver ]]; then
-            echo "::error::tag '$TAG' is not CalVer (expected vYYYY.M.D or vYYYY.M.D.N, no zero padding)"
-            exit 1
-          fi
-          pyver=$(sed -nE 's/^version = "([^"]+)"/\1/p' pyproject.toml | head -1)
-          if [[ "v$pyver" != "$TAG" ]]; then
-            echo "::error::tag '$TAG' does not match pyproject.toml version '$pyver' — bump pyproject first"
-            exit 1
-          fi
-          echo "tag $TAG matches pyproject version $pyver"
+        run: python3 scripts/check_release_tags.py "$TAG"
 
   build:
     name: ${{ matrix.image }}
@@ -136,6 +127,19 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Release versions
+        id: versions
+        if: env.SKIP != 'true'
+        run: |
+          set -euo pipefail
+          src=$(python3 -c 'import tomllib;print(tomllib.load(open("pyproject.toml","rb"))["project"]["version"])')
+          echo "source=$src" >> "$GITHUB_OUTPUT"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "release=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "release=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Image metadata
         id: meta
         if: env.SKIP != 'true'
@@ -156,6 +160,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=treeweft-${{ matrix.image }}
             org.opencontainers.image.vendor=Treeweft
+            treeweft.source-version=${{ steps.versions.outputs.source }}
 
       - name: Build and push
         if: env.SKIP != 'true'
@@ -167,6 +172,8 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            TREEWEFT_RELEASE=${{ steps.versions.outputs.release }}
           # PR builds read both caches but write only their own scope, so an
           # amd64-only PR export never replaces the release scope's arm64
           # layers (which would make the next release build arm64 cold).

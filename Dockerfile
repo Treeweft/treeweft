@@ -19,8 +19,15 @@ RUN pip install --no-cache-dir \
     'uvicorn[standard]>=0.32' \
     'pyyaml>=6.0'
 
+# pyproject.toml carries the source SemVer (treeweft.versions reads it; this
+# image does not pip-install the package, so there is no package metadata).
+COPY pyproject.toml ./
 COPY src/ src/
 ENV PYTHONPATH=/app/src
+
+# CalVer product release, set by the publish workflow; empty for local builds.
+ARG TREEWEFT_RELEASE=""
+ENV TREEWEFT_RELEASE=$TREEWEFT_RELEASE
 
 EXPOSE 8000
 CMD ["uvicorn", "treeweft.main:app", "--host", "0.0.0.0", "--port", "8000"]
