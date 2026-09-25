@@ -1535,7 +1535,8 @@ async def handle_index_rebuild(request: Request, dry_run: bool = False):
             content={"detail": f"rebuild failed at {exc.step}: {exc.detail}"},
         )
     except RuntimeError as exc:
-        return JSONResponse(status_code=503, content={"detail": str(exc)})
+        logger.exception("Index rebuild failed with runtime error")
+        return JSONResponse(status_code=503, content={"detail": "Index rebuild failed due to an internal error."})
     return JSONResponse(status_code=200 if dry_run else 202, content=result)
 
 
