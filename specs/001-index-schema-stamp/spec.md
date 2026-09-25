@@ -292,19 +292,6 @@ once both versions are raised. Confirm the committed snapshot matches the curren
   affected, and each stage of the real rebuild. The indexer has no admin audit trail to reuse
   (research R8).
 
-**Several indexer processes**
-
-- **FR-024**: Everything in this specification MUST hold when several indexer processes share
-  one Postgres, one job queue and one set of stores.
-  - A rebuild, community build or stamp write in one process MUST be coordinated with every
-    other process.
-  - No process may run an index job outside the rebuild while the stores are being dropped or
-    recreated.
-  - Each process's reported `index_status` MUST converge to the shared state within
-    `INDEX_STATUS_REFRESH_SECONDS` (default 5).
-  - A holder that dies MUST NOT leave the other processes blocked or reporting `ok` over an
-    incomplete index.
-
 **MCP**
 
 - **FR-018**: `treeweft-mcp` tools MUST pass the indexer's reindex-required conflict to the
@@ -331,6 +318,19 @@ once both versions are raised. Confirm the committed snapshot matches the curren
   Principle VII transition note MUST be updated per Plan 1's hand-off. ADR-003 MUST note that
   summary-prompt changes never bump `INDEX_SCHEMA_VERSION`, if it does not already say so. The
   engineering notes MUST describe the new states.
+
+**Several indexer processes**
+
+- **FR-024**: Everything in this specification MUST hold when several indexer processes share
+  one Postgres, one job queue and one set of stores.
+  - A rebuild, community build or stamp write in one process MUST be coordinated with every
+    other process.
+  - No process may run an index job outside the rebuild while the stores are being dropped or
+    recreated.
+  - Each process's reported `index_status` MUST converge to the shared state within
+    `INDEX_STATUS_REFRESH_SECONDS` (default 5).
+  - A holder that dies MUST NOT leave the other processes blocked or reporting `ok` over an
+    incomplete index.
 
 ### Key Entities
 
@@ -368,11 +368,11 @@ once both versions are raised. Confirm the committed snapshot matches the curren
 - **SC-006**: Any synthetic change in the classifier test table fails the contract test with a
   message naming the change and the required minimum versions. The unit suite stays
   service-free.
+- **SC-007**: Container health checks report healthy in every index state, with zero restarts
+  caused by `reindex_required` or `rebuilding`.
 - **SC-008**: With two indexer processes, a rebuild started through one of them runs zero
   foreign index jobs while the stores are recreated, and both processes report `ok` within 5
   seconds of the rebuild group completing.
-- **SC-007**: Container health checks report healthy in every index state, with zero restarts
-  caused by `reindex_required` or `rebuilding`.
 
 ## Assumptions
 

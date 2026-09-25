@@ -519,6 +519,10 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
     it again";
   - zero sources → an empty group, and the status is `ok` immediately.
 
+  Stamps (analysis finding M2): after a real rebuild, both fake stores carry the new stamp
+  (`INDEX_SCHEMA_VERSION`, the configured model and dimension), and the fake lock records **no**
+  `acquire("shared")` call between steps 1 and 6.
+
   Logging: a WARNING with `event=index_rebuild`, `user`, `dry_run`, `sources` and `total_chunks`
   is emitted for both the dry run and the real call.
 - [ ] T037 [P] [US3] Write `tests/unit/test_index_multiprocess.py`, which covers research R13 and
@@ -581,6 +585,10 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
     write nothing.
   - **Real call**: follow research R7 steps 0–6 exactly, holding the exclusive lock from step 1
     to step 6 on its dedicated connection. Log each stage with `event=index_rebuild`.
+  - **Stamps**: in step 4, write both stamps directly through the store functions:
+    `init_collection()` for the vector store, and `graph_store.write_stamp()` for the graph.
+    Never go through `run_check()` or any path that calls `maintenance_lock.acquire("shared")`,
+    which would conflict with the exclusive lock the rebuild holds (research R13).
   - **Failure**: on a failure after step 2, release the lock. The group is left incomplete, so
     every process derives `interrupted`. Set this process's status to `reindex_required` with
     "rebuild failed at <step>" and raise for a 503.

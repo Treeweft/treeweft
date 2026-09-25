@@ -456,6 +456,15 @@ stores is a supported topology (`docs/engineering-notes.md:297`), and this featu
   | `POST /build-community` backfill | shared (`pg_try_advisory_lock_shared`) | its whole run |
   | Stamp writes by `run_check()` (fresh stamp or adoption) | shared, for the write only | the write only |
 
+  **Only `run_check()`'s stamp writes take the shared lock.**
+  - The rebuild writes the vector stamp (through `init_collection()`) and the graph stamp
+    (through the shim's `write_stamp()`) **directly**, while it holds the exclusive lock.
+  - It never goes through a helper that acquires the lock. Postgres treats a shared request from
+    a second connection as conflicting with the rebuild's own exclusive lock, so the write would
+    be skipped and the rebuild would leave an unstamped graph.
+  - `init_collection()` in the job runners stamps a collection it creates without locking,
+    exactly as before.
+
   - A process that cannot get the shared lock skips its stamp write and reports `preparing`
     (another process is rebuilding). It never stamps over a rebuild in progress.
   - Community build refuses with 409 while the lock is held exclusively.
