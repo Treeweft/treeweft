@@ -15,6 +15,11 @@ from treeweft.config import require_env
 from treeweft.infrastructure.tracing import get_tracer
 
 from treeweft.domain.graph import is_valid_rel_type, require_valid_rel_type
+from treeweft.domain.index_stamp import IndexStamp, StoreObservation, parse_stamp
+
+# ADR-004 §3 index stamp: the (:TreeweftMeta {id: _META_ID}) node. CLAUDE.md
+# invariant — never delete this node from clear_all()/clear_index_data().
+_META_ID = "index"
 
 logger = logging.getLogger(__name__)
 _tracer = get_tracer("treeweft.neo4j")
@@ -182,6 +187,9 @@ _SCHEMA_STATEMENTS = (
     "FOR (c:Community) REQUIRE c.id IS UNIQUE",
     "CREATE INDEX entity_file_path IF NOT EXISTS FOR (e:Entity) ON (e.file_path)",
     "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
+    # ADR-004 §3 index stamp.
+    "CREATE CONSTRAINT treeweft_meta_id_unique IF NOT EXISTS "
+    "FOR (m:TreeweftMeta) REQUIRE m.id IS UNIQUE",
 )
 
 
@@ -196,6 +204,91 @@ async def ensure_schema():
         for stmt in _SCHEMA_STATEMENTS:
             await (await session.run(stmt)).consume()
     logger.info("neo4j schema ensured (%d statements)", len(_SCHEMA_STATEMENTS))
+
+
+# ── Index stamp (ADR-004 §3) ─────────────────────────────────────────────────
+
+_STAMP_RETURN = (
+    "RETURN m.index_schema AS index_schema, m.embedding_model AS embedding_model, "
+    "m.vector_dim AS vector_dim"
+)
+
+
+async def _read_stamp_row() -> dict | None:
+    async with _get_session() as session:
+        result = await session.run(
+            f"MATCH (m:TreeweftMeta {{id: $id}}) {_STAMP_RETURN}", id=_META_ID
+        )
+        records = await result.fetch(1)
+    if not records:
+        return None
+    return {k: records[0][k] for k in records[0].keys()}
+
+
+@_retry_on_disconnect
+async def read_stamp() -> IndexStamp | None:
+    stamp = parse_stamp(await _read_stamp_row())
+    return stamp if isinstance(stamp, IndexStamp) else None
+
+
+@_retry_on_disconnect
+async def write_stamp(stamp: IndexStamp) -> None:
+    async with _get_session() as session:
+        await (
+            await session.run(
+                "MERGE (m:TreeweftMeta {id: $id}) "
+                "SET m.index_schema = $schema, m.embedding_model = $embedding_model, "
+                "m.vector_dim = $vector_dim, m.stamped_at = timestamp()",
+                id=_META_ID,
+                schema=stamp.schema,
+                embedding_model=stamp.embedding_model,
+                vector_dim=stamp.vector_dim,
+            )
+        ).consume()
+
+
+async def observe_index() -> StoreObservation:
+    """Never raises: an unreachable graph is reported, not propagated, so the
+    index-status check degrades to `unverified` instead of failing outright."""
+    try:
+        async with _get_session() as session:
+            result = await session.run("MATCH (e:Entity) RETURN 1 LIMIT 1")
+            has_data = bool(await result.fetch(1))
+        raw = await _read_stamp_row()
+    except Exception as exc:  # noqa: BLE001 — deliberately broad: any failure means "unreachable"
+        return StoreObservation(
+            store="graph", backend="neo4j", exists=True, has_data=False, stamp=None,
+            unreachable=str(exc),
+        )
+    return StoreObservation(
+        store="graph", backend="neo4j", exists=True, has_data=has_data, stamp=parse_stamp(raw)
+    )
+
+
+_CLEAR_INDEX_DATA_QUERY_TEMPLATE = (
+    "MATCH (n) WHERE NOT n:TreeweftMeta{prefix_clause} "
+    "CALL {{ WITH n DETACH DELETE n }} IN TRANSACTIONS OF 10000 ROWS"
+)
+
+
+@_retry_on_disconnect
+async def _clear_index_data(scope_prefix: str | None = None) -> None:
+    """Delete every Entity/Community/Source (etc.) except :TreeweftMeta.
+
+    `scope_prefix` is for integration tests only (research R12): it restricts
+    the delete to nodes whose `id` starts with the given prefix, so a test
+    never has to run an unscoped clear against a shared database. The public
+    `clear_index_data()` always passes None.
+    """
+    prefix_clause = " AND n.id STARTS WITH $prefix" if scope_prefix is not None else ""
+    query = _CLEAR_INDEX_DATA_QUERY_TEMPLATE.format(prefix_clause=prefix_clause)
+    params = {"prefix": scope_prefix} if scope_prefix is not None else {}
+    async with _get_session() as session:
+        await (await session.run(query, **params)).consume()
+
+
+async def clear_index_data() -> None:
+    await _clear_index_data(None)
 
 
 @_retry_on_disconnect
@@ -835,7 +928,7 @@ async def get_entities_by_community(community_id: int) -> list[dict]:
 @_retry_on_disconnect
 async def clear_all():
     async with _get_session() as session:
-        await session.run("MATCH (n) DETACH DELETE n")
+        await session.run("MATCH (n) WHERE NOT n:TreeweftMeta DETACH DELETE n")
 
 
 @_retry_on_disconnect

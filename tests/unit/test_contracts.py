@@ -129,6 +129,80 @@ def test_required_bump():
     assert c.required_bump([c.Change("additive", "a", "b"), c.Change("breaking", "c", "d")]) == "major"
 
 
+# ── index schema (ADR-004 §3/§4) ──
+
+BASE_INDEX_SURFACE = {
+    "milvus": {"fields": [{"name": "vector", "dtype": "FLOAT_VECTOR"}], "index_params": []},
+    "lancedb": {"fields": [{"name": "vector", "type": "fixed_size_list<item: float>[<VECTOR_DIM>]"}]},
+    "chromadb": {"stamp_metadata_keys": ["treeweft.index_schema"]},
+    "neo4j": {"schema_statements": ["CREATE CONSTRAINT entity_id_unique IF NOT EXISTS ..."]},
+    "sqlite": {"schema_statements": ["CREATE TABLE entities (...)"]},
+}
+
+
+def _mutate(surface, backend, **overrides):
+    import copy
+    mutated = copy.deepcopy(surface)
+    mutated[backend] = {**mutated[backend], **overrides}
+    return mutated
+
+
+@pytest.mark.parametrize("backend,overrides,label", [
+    ("milvus", {"fields": [{"name": "vector", "dtype": "FLOAT_VECTOR"}, {"name": "new_field", "dtype": "INT64"}]}, "field added"),
+    ("milvus", {"fields": []}, "field removed"),
+    ("milvus", {"fields": [{"name": "vector", "dtype": "FLOAT16_VECTOR"}]}, "field retyped"),
+    ("milvus", {"index_params": [{"field_name": "vector", "index_type": "IVF_FLAT"}]}, "index param changed"),
+    ("neo4j", {"schema_statements": []}, "constraint removed"),
+    ("sqlite", {"schema_statements": ["CREATE TABLE entities (...)", "CREATE TABLE new_table (...)"]}, "column/table added"),
+    ("lancedb", {"fields": [{"name": "vector", "type": "fixed_size_list<item: double>[<VECTOR_DIM>]"}]}, "lancedb schema changed"),
+])
+def test_any_index_schema_difference_is_index_breaking(backend, overrides, label):
+    new = _mutate(BASE_INDEX_SURFACE, backend, **overrides)
+    changes = c.diff_index(BASE_INDEX_SURFACE, new)
+    assert changes, label
+    assert all(ch.kind == "index-breaking" for ch in changes)
+    assert any(ch.where == backend for ch in changes)
+
+
+def test_identical_index_surfaces_have_no_changes():
+    assert c.diff_index(BASE_INDEX_SURFACE, BASE_INDEX_SURFACE) == []
+
+
+@pytest.mark.parametrize("recorded_schema,current_schema,released,current,ok", [
+    (1, 1, "1.0.0", "1.1.0", False),   # schema unchanged, no index diff should call this, but even so: major not bumped
+    (1, 2, "1.0.0", "1.1.0", False),   # schema bumped, major not bumped
+    (1, 1, "1.0.0", "2.0.0", False),   # major bumped, schema not bumped
+    (1, 2, "1.0.0", "2.0.0", True),    # both bumped
+])
+def test_index_version_error(recorded_schema, current_schema, released, current, ok):
+    error = c.index_version_error(recorded_schema, current_schema, released, current)
+    assert (error is None) is ok
+    if error:
+        assert str(recorded_schema) in error
+
+
+def test_index_schema_surface_has_no_leaked_vector_dim():
+    surface = c.index_schema_surface()
+    dumped = str(surface)
+    assert "<VECTOR_DIM>" in dumped
+    import os
+    configured_dim = os.environ.get("VECTOR_DIM")
+    if configured_dim and configured_dim != "999999997":
+        assert configured_dim not in dumped
+
+
+def test_the_committed_index_snapshot_matches_the_code():
+    snapshot = c.load_snapshot("index_schema")
+    current = c.index_schema_surface()
+    changes = c.diff_index(snapshot["surface"], current)
+    assert not changes, (
+        "\n".join(f"  {ch}" for ch in changes)
+        + "\nBump INDEX_SCHEMA_VERSION and the SemVer major, and regenerate "
+        "contracts/index_schema.json only in a release PR."
+    )
+    assert snapshot.get("index_schema") == versions.INDEX_SCHEMA_VERSION or snapshot["source_version"] == "1.0.0"
+
+
 # ── the real check against the committed snapshots ──
 
 def test_current_surface_is_deterministic():

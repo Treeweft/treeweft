@@ -23,6 +23,7 @@ from pydantic import BaseModel
 from treeweft import graph_store
 from treeweft.adapters.webhook.gitea import GiteaAdapter
 from treeweft.adapters.webhook.github import GitHubAdapter
+from treeweft.application import index_guard
 from treeweft.application import indexer_state as _state
 from treeweft.application import indexer_runners as runners
 from treeweft.domain.webhook import WebhookPayload, Provider, detect_provider
@@ -230,6 +231,10 @@ async def handle_webhook(request: Request):
             break
 
     source_id = make_source_id(url=repo_url, branch=branch)
+
+    gate = await index_guard.require_writable()
+    if gate is not None:
+        return gate
 
     if existing_source is None:
         # 6. Not indexed yet — create full index job. Guard against a

@@ -13,3 +13,4 @@ yarn-error.log*
 
 # TypeScript incremental build cache
 *.tsbuildinfo
+.vitest

@@ -33,6 +33,7 @@ from typing import Any
 import aiosqlite
 
 from treeweft.domain.graph import is_valid_rel_type, require_valid_rel_type
+from treeweft.domain.index_stamp import IndexStamp, StoreObservation, parse_stamp
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +101,17 @@ _SCHEMA_STATEMENTS = (
         embedding TEXT
     )
     """,
+    # ADR-004 §3 index stamp: what built this store's data. CLAUDE.md invariant —
+    # never delete this row from clear_all()/clear_index_data().
+    """
+    CREATE TABLE IF NOT EXISTS treeweft_meta (
+        id TEXT PRIMARY KEY CHECK (id = 'index'),
+        index_schema INTEGER NOT NULL,
+        embedding_model TEXT NOT NULL,
+        vector_dim INTEGER NOT NULL,
+        stamped_at INTEGER NOT NULL
+    )
+    """,
 )
 
 _ENTITY_COLS = (
@@ -159,6 +171,54 @@ async def ensure_schema():
             await conn.execute(stmt)
         await conn.commit()
     logger.info("sqlite graph schema ensured at %s", GRAPH_DB_PATH)
+
+
+# ── Index stamp (ADR-004 §3) ─────────────────────────────────────────────────
+
+async def read_stamp() -> IndexStamp | None:
+    conn = await _get_conn()
+    cur = await conn.execute(
+        "SELECT index_schema, embedding_model, vector_dim FROM treeweft_meta WHERE id = 'index'"
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    stamp = parse_stamp(dict(row))
+    # SQLite columns are typed, so a well-formed row always parses cleanly;
+    # observe_index() is what surfaces UnreadableStamp for a corrupted row.
+    return stamp if isinstance(stamp, IndexStamp) else None
+
+
+async def write_stamp(stamp: IndexStamp) -> None:
+    conn = await _get_conn()
+    async with _lock():
+        await conn.execute(
+            """
+            INSERT INTO treeweft_meta (id, index_schema, embedding_model, vector_dim, stamped_at)
+            VALUES ('index', ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                index_schema = excluded.index_schema,
+                embedding_model = excluded.embedding_model,
+                vector_dim = excluded.vector_dim,
+                stamped_at = excluded.stamped_at
+            """,
+            (stamp.schema, stamp.embedding_model, stamp.vector_dim, _now_ms() // 1000),
+        )
+        await conn.commit()
+
+
+async def observe_index() -> StoreObservation:
+    conn = await _get_conn()
+    cur = await conn.execute("SELECT 1 FROM entities LIMIT 1")
+    has_data = await cur.fetchone() is not None
+    cur = await conn.execute(
+        "SELECT index_schema, embedding_model, vector_dim FROM treeweft_meta WHERE id = 'index'"
+    )
+    row = await cur.fetchone()
+    stamp = parse_stamp(dict(row)) if row is not None else None
+    return StoreObservation(
+        store="graph", backend="sqlite", exists=True, has_data=has_data, stamp=stamp
+    )
 
 
 _ENTITY_UPSERT = """
@@ -744,6 +804,11 @@ async def clear_all():
                       "sources", "communities"):
             await conn.execute(f"DELETE FROM {table}")
         await conn.commit()
+
+
+async def clear_index_data() -> None:
+    """Delete everything a rebuild must recreate — never the stamp itself."""
+    await clear_all()
 
 
 async def delete_file_entities(file_path: str):

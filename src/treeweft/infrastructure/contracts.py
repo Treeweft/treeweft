@@ -29,7 +29,7 @@ _HANDLED = {"type", "properties", "required", "enum", "items", "default"}
 
 @dataclass(frozen=True)
 class Change:
-    kind: str  # "breaking" | "additive"
+    kind: str  # "breaking" | "additive" | "index-breaking" (ADR-004 §4)
     where: str
     what: str
 
@@ -238,8 +238,143 @@ def load_snapshot(name: str) -> dict:
     return json.loads((CONTRACTS_DIR / f"{name}.json").read_text())
 
 
-def write_snapshot(name: str, surface: dict, version: str) -> Path:
+def write_snapshot(name: str, surface: dict, version: str, extra: dict | None = None) -> Path:
     CONTRACTS_DIR.mkdir(exist_ok=True)
     path = CONTRACTS_DIR / f"{name}.json"
-    path.write_text(json.dumps({"source_version": version, "surface": surface}, indent=2, sort_keys=True) + "\n")
+    body = {"source_version": version, "surface": surface, **(extra or {})}
+    path.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
     return path
+
+
+# ── Index-schema surface (ADR-004 §4, research R9) ──────────────────────────
+# A committed snapshot of the vector- and graph-store schemas as of the last
+# release, used to classify a schema-changing PR as "index-breaking" before
+# it ships. Every difference here — however small — invalidates persisted
+# index data (constitution VII), so `diff_index` never calls anything
+# additive.
+
+_DIM_PLACEHOLDER = "<VECTOR_DIM>"
+_PROBE_DIM = 999999997  # an unlikely-to-collide stand-in, always replaced below
+
+
+def _milvus_index_surface(dim: int) -> dict:
+    from treeweft.adapters.milvus.vector_store import INDEX_PARAMS, build_collection_schema
+
+    schema = build_collection_schema(dim)
+    fields = []
+    for f in schema.fields:
+        entry: dict = {
+            "name": f.name,
+            "dtype": f.dtype.name,
+            "is_primary": bool(f.is_primary),
+            "auto_id": bool(f.auto_id),
+        }
+        params = dict(getattr(f, "params", None) or {})
+        if "dim" in params:
+            params["dim"] = _DIM_PLACEHOLDER
+        if params:
+            entry["params"] = params
+        max_length = getattr(f, "max_length", None)
+        if max_length is not None:
+            entry["max_length"] = max_length
+        fields.append(entry)
+    functions = [
+        {
+            "name": fn.name,
+            "type": fn.type.name,
+            "input_fields": list(fn.input_field_names),
+            "output_fields": list(fn.output_field_names),
+        }
+        for fn in schema.functions
+    ]
+    return {
+        "fields": fields,
+        "functions": functions,
+        "index_params": [dict(spec) for spec in INDEX_PARAMS],
+        "stamp_properties": ["treeweft.index_schema", "treeweft.embedding_model"],
+    }
+
+
+def _lancedb_index_surface(dim: int) -> dict:
+    from treeweft.adapters.lancedb.vector_store import FTS_COLUMN, _schema
+
+    schema = _schema(dim)
+    fields = [
+        {
+            "name": f.name,
+            "type": str(f.type).replace(str(dim), _DIM_PLACEHOLDER),
+            "nullable": bool(f.nullable),
+        }
+        for f in schema
+    ]
+    return {
+        "fields": fields,
+        "fts_column": FTS_COLUMN,
+        "stamp_field_metadata_on": "vector",
+        "stamp_keys": ["treeweft.index_schema", "treeweft.embedding_model"],
+    }
+
+
+def _chromadb_index_surface() -> dict:
+    from treeweft.adapters.chromadb import vector_store as chroma
+
+    return {
+        "stamp_metadata_keys": [
+            chroma._STAMP_SCHEMA_KEY,
+            chroma._STAMP_MODEL_KEY,
+            chroma._STAMP_DIM_KEY,
+        ],
+    }
+
+
+def _neo4j_index_surface() -> dict:
+    from treeweft.adapters.neo4j import graph_store as neo4j
+
+    return {"schema_statements": list(neo4j._SCHEMA_STATEMENTS), "meta_node_label": "TreeweftMeta"}
+
+
+def _sqlite_index_surface() -> dict:
+    from treeweft.adapters.sqlite import graph_store as sqlite
+
+    return {"schema_statements": list(sqlite._SCHEMA_STATEMENTS), "meta_table": "treeweft_meta"}
+
+
+def index_schema_surface() -> dict:
+    """The current index schema across every backend, with every dimension
+    replaced by a fixed placeholder so `.env`'s `VECTOR_DIM` never leaks
+    into the snapshot. Imports every adapter lazily, inside this function —
+    `infrastructure.contracts` must stay off the startup path (CLAUDE.md:
+    never import the Milvus/Neo4j adapters from startup-path code)."""
+    return {
+        "milvus": _milvus_index_surface(_PROBE_DIM),
+        "lancedb": _lancedb_index_surface(_PROBE_DIM),
+        "chromadb": _chromadb_index_surface(),
+        "neo4j": _neo4j_index_surface(),
+        "sqlite": _sqlite_index_surface(),
+    }
+
+
+def diff_index(old: dict, new: dict) -> list[Change]:
+    """Any difference in the index schema is index-breaking (ADR-004 §4) —
+    it can invalidate persisted data, so there is no "additive" case."""
+    changes: list[Change] = []
+    for backend in sorted(set(old) | set(new)):
+        o, n = old.get(backend), new.get(backend)
+        if o != n:
+            changes.append(Change("index-breaking", backend, "index schema changed"))
+    return changes
+
+
+def index_version_error(recorded_schema: int, current_schema: int, released: str, current: str) -> str | None:
+    """ADR-004 §4: an index-schema change needs both `INDEX_SCHEMA_VERSION`
+    raised and the SemVer major bumped over the last release."""
+    r_major = parse_semver(released)[0]
+    c_major = parse_semver(current)[0]
+    schema_ok = current_schema > recorded_schema
+    major_ok = c_major > r_major
+    if schema_ok and major_ok:
+        return None
+    return (
+        f"INDEX_SCHEMA_VERSION must exceed {recorded_schema} and the major must exceed "
+        f"{r_major} (at least {r_major + 1}.0.0)"
+    )

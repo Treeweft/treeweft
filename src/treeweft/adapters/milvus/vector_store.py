@@ -13,7 +13,9 @@ from pymilvus import (
 )
 
 from treeweft.config import require_env
+from treeweft.domain.index_stamp import IndexStamp, StoreObservation, parse_stamp
 from treeweft.domain.indexing import VectorStorePort
+from treeweft.versions import INDEX_SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,7 @@ MILVUS_URI = os.environ.get(
 )
 COLLECTION_NAME = os.environ.get("MILVUS_COLLECTION", "treeweft_chunks")
 VECTOR_DIM = int(require_env("VECTOR_DIM"))
+EMBEDDING_MODEL = require_env("EMBEDDING_MODEL")
 RRF_K = int(os.environ.get("RRF_K", "60"))
 
 _client: MilvusClient | None = None
@@ -37,6 +40,78 @@ def _get_client() -> MilvusClient:
     if _client is None:
         _client = MilvusClient(MILVUS_URI)
     return _client
+
+
+# ── Collection schema (research R9: extracted to module level so
+# infrastructure.contracts.index_schema_surface() can build it with no
+# service running) ───────────────────────────────────────────────────────
+
+# HNSW/COSINE on both dense fields; BM25 on the sparse field. Any change here
+# is index-breaking (contracts/index_schema.json) and requires an
+# INDEX_SCHEMA_VERSION + SemVer major bump (ADR-004 §4).
+INDEX_PARAMS: tuple[dict, ...] = (
+    {"field_name": "vector", "index_type": "HNSW", "metric_type": "COSINE",
+     "params": {"M": 16, "efConstruction": 200}},
+    {"field_name": "summary_vector", "index_type": "HNSW", "metric_type": "COSINE",
+     "params": {"M": 16, "efConstruction": 200}},
+    {"field_name": "sparse_vector", "index_type": "SPARSE_INVERTED_INDEX", "metric_type": "BM25",
+     "params": {"bm25_k1": 1.2, "bm25_b": 0.75}},
+)
+
+
+def build_collection_schema(dim: int) -> CollectionSchema:
+    fields = [
+        FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
+        FieldSchema(
+            name="chunk_text",
+            dtype=DataType.VARCHAR,
+            max_length=65535,
+            enable_analyzer=True,
+        ),
+        FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=dim),
+        FieldSchema(
+            name="summary_vector",
+            dtype=DataType.FLOAT_VECTOR,
+            dim=dim,
+        ),
+        FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
+        FieldSchema(name="file_path", dtype=DataType.VARCHAR, max_length=2048),
+        FieldSchema(name="language", dtype=DataType.VARCHAR, max_length=64),
+        FieldSchema(name="start_line", dtype=DataType.INT64),
+        FieldSchema(name="end_line", dtype=DataType.INT64),
+        FieldSchema(name="source_id", dtype=DataType.VARCHAR, max_length=128),
+    ]
+    schema = CollectionSchema(fields=fields, enable_dynamic_field=True)
+    schema.add_function(
+        Function(
+            name="bm25_chunk_text",
+            function_type=FunctionType.BM25,
+            input_field_names=["chunk_text"],
+            output_field_names=["sparse_vector"],
+        )
+    )
+    return schema
+
+
+# ── Index stamp (ADR-004 §3): Milvus collection properties ─────────────────
+
+_STAMP_SCHEMA_KEY = "treeweft.index_schema"
+_STAMP_MODEL_KEY = "treeweft.embedding_model"
+
+
+def _stamp_properties(stamp: IndexStamp) -> dict[str, str]:
+    return {_STAMP_SCHEMA_KEY: str(stamp.schema), _STAMP_MODEL_KEY: stamp.embedding_model}
+
+
+def _stamp_from_properties(properties: dict | None, dim: int | None):
+    if not properties or _STAMP_SCHEMA_KEY not in properties:
+        return None
+    raw = {
+        "index_schema": properties.get(_STAMP_SCHEMA_KEY),
+        "embedding_model": properties.get(_STAMP_MODEL_KEY),
+        "vector_dim": dim,
+    }
+    return parse_stamp(raw)  # IndexStamp, or UnreadableStamp if malformed
 
 
 class MilvusAdapter(VectorStorePort):
@@ -127,68 +202,103 @@ class MilvusAdapter(VectorStorePort):
     # ------------------------------------------------------------------
 
     async def init_collection(self):
-        """Create the Milvus collection with the treeweft schema if it does not exist."""
+        """Create the Milvus collection with the treeweft schema if it does not exist.
+
+        Stamps it (ADR-004 §3) at creation, so every path that can bring a
+        collection into existence — every job runner, and the rebuild — ends
+        up stamped in one place.
+        """
         if await self._execute_with_reconnect(MilvusClient.has_collection, self.collection_name):
             return
 
-        fields = [
-            FieldSchema(name="id", dtype=DataType.INT64, is_primary=True, auto_id=True),
-            FieldSchema(
-                name="chunk_text",
-                dtype=DataType.VARCHAR,
-                max_length=65535,
-                enable_analyzer=True,
-            ),
-            FieldSchema(name="vector", dtype=DataType.FLOAT_VECTOR, dim=self.vector_dim),
-            FieldSchema(
-                name="summary_vector",
-                dtype=DataType.FLOAT_VECTOR,
-                dim=self.vector_dim,
-            ),
-            FieldSchema(name="sparse_vector", dtype=DataType.SPARSE_FLOAT_VECTOR),
-            FieldSchema(name="file_path", dtype=DataType.VARCHAR, max_length=2048),
-            FieldSchema(name="language", dtype=DataType.VARCHAR, max_length=64),
-            FieldSchema(name="start_line", dtype=DataType.INT64),
-            FieldSchema(name="end_line", dtype=DataType.INT64),
-            FieldSchema(name="source_id", dtype=DataType.VARCHAR, max_length=128),
-        ]
-        schema = CollectionSchema(fields=fields, enable_dynamic_field=True)
-        schema.add_function(
-            Function(
-                name="bm25_chunk_text",
-                function_type=FunctionType.BM25,
-                input_field_names=["chunk_text"],
-                output_field_names=["sparse_vector"],
-            )
-        )
+        schema = build_collection_schema(self.vector_dim)
 
         mc = self._get_client()
         index_params = mc.prepare_index_params()
-        index_params.add_index(
-            field_name="vector",
-            index_type="HNSW",
-            metric_type="COSINE",
-            params={"M": 16, "efConstruction": 200},
-        )
-        index_params.add_index(
-            field_name="summary_vector",
-            index_type="HNSW",
-            metric_type="COSINE",
-            params={"M": 16, "efConstruction": 200},
-        )
-        index_params.add_index(
-            field_name="sparse_vector",
-            index_type="SPARSE_INVERTED_INDEX",
-            metric_type="BM25",
-            params={"bm25_k1": 1.2, "bm25_b": 0.75},
-        )
+        for spec in INDEX_PARAMS:
+            index_params.add_index(**spec)
 
+        stamp = IndexStamp(schema=INDEX_SCHEMA_VERSION, embedding_model=EMBEDDING_MODEL, vector_dim=self.vector_dim)
         await self._execute_with_reconnect(
             MilvusClient.create_collection,
             collection_name=self.collection_name,
             schema=schema,
             index_params=index_params,
+            properties=_stamp_properties(stamp),
         )
+
+    async def observe_index(self) -> StoreObservation:
+        """Never raises: an unreachable Milvus is reported, not propagated."""
+        try:
+            exists = await self._execute_with_reconnect(MilvusClient.has_collection, self.collection_name)
+        except Exception as exc:  # noqa: BLE001
+            return StoreObservation(store="vector", backend="milvus", exists=True, has_data=False, stamp=None, unreachable=str(exc))
+        if not exists:
+            return StoreObservation(store="vector", backend="milvus", exists=False, has_data=False, stamp=None)
+        try:
+            desc = await self._execute_with_reconnect(MilvusClient.describe_collection, self.collection_name)
+            stats = await self._execute_with_reconnect(MilvusClient.get_collection_stats, self.collection_name)
+        except Exception as exc:  # noqa: BLE001
+            return StoreObservation(store="vector", backend="milvus", exists=True, has_data=False, stamp=None, unreachable=str(exc))
+        dim = None
+        for field in desc.get("fields", []) or []:
+            if field.get("name") == "vector":
+                dim = field.get("params", {}).get("dim")
+                if dim is not None:
+                    dim = int(dim)
+        stamp = _stamp_from_properties(desc.get("properties"), dim)
+        has_data = int(stats.get("row_count", 0) or 0) > 0
+        if not has_data and stamp is None:
+            # get_collection_stats()["row_count"] only counts flushed/sealed
+            # segments and can read 0 for rows that are inserted but not yet
+            # auto-flushed (confirmed live against Milvus 2.5.4). Trusting it
+            # alone here would let real, unstamped legacy data slip past the
+            # ADR-004 legacy-adoption check unverified. A stats-agreeing
+            # `has_data=True` never reaches this branch, so the extra query
+            # only runs for stores that are actually empty or ambiguous.
+            has_data = bool(
+                await self._execute_with_reconnect(
+                    MilvusClient.query,
+                    self.collection_name,
+                    filter="",
+                    output_fields=["id"],
+                    limit=1,
+                )
+            )
+        return StoreObservation(
+            store="vector", backend="milvus", exists=True, has_data=has_data,
+            stamp=stamp, schema_dim=dim,
+        )
+
+    async def write_stamp(self, stamp: IndexStamp) -> None:
+        await self._execute_with_reconnect(
+            MilvusClient.alter_collection_properties,
+            self.collection_name,
+            _stamp_properties(stamp),
+        )
+
+    async def sample_chunks(self, n: int, scan_limit: int = 20) -> list[tuple[str, list[float]]]:
+        """Up to `n` (text, vector) pairs from rows shorter than 50 000
+        characters, scanning at most `scan_limit` rows (research R3)."""
+        rows = await self._execute_with_reconnect(
+            MilvusClient.query,
+            self.collection_name,
+            filter="",
+            output_fields=["chunk_text", "vector"],
+            limit=scan_limit,
+        )
+        out: list[tuple[str, list[float]]] = []
+        for row in rows:
+            text = row.get("chunk_text") or ""
+            if len(text) >= 50000:
+                continue
+            out.append((text, list(row.get("vector") or [])))
+            if len(out) >= n:
+                break
+        return out
+
+    async def drop_index(self) -> None:
+        await self._execute_with_reconnect(MilvusClient.drop_collection, self.collection_name)
 
     async def insert(
         self,
@@ -504,6 +614,22 @@ def _get_adapter() -> MilvusAdapter:
 
 async def init_collection():
     return await _get_adapter().init_collection()
+
+
+async def observe_index() -> StoreObservation:
+    return await _get_adapter().observe_index()
+
+
+async def write_stamp(stamp: IndexStamp) -> None:
+    return await _get_adapter().write_stamp(stamp)
+
+
+async def sample_chunks(n: int, scan_limit: int = 20) -> list[tuple[str, list[float]]]:
+    return await _get_adapter().sample_chunks(n, scan_limit=scan_limit)
+
+
+async def drop_index() -> None:
+    return await _get_adapter().drop_index()
 
 
 async def insert_chunks(

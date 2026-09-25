@@ -26,9 +26,13 @@ _store = os.environ.get("VECTOR_STORE", "milvus")
 if _store == "chromadb":
     from treeweft.adapters.chromadb.vector_store import (  # noqa: F401
         delete_chunks_by_source,
+        drop_index,
         init_collection,
         insert_chunks,
+        observe_index,
+        sample_chunks,
         search,
+        write_stamp,
     )
 
     def hybrid_search(
@@ -67,11 +71,15 @@ elif _store == "lancedb":
     from treeweft.adapters.lancedb.vector_store import (  # noqa: F401
         delete_chunks_by_file,
         delete_chunks_by_source,
+        drop_index,
         hybrid_search,
         init_collection,
         insert_chunks,
         list_indexed_paths,
+        observe_index,
+        sample_chunks,
         search,
+        write_stamp,
     )
 else:
     from treeweft.adapters.milvus.vector_store import (  # noqa: F401
@@ -79,12 +87,16 @@ else:
         _get_client,
         delete_chunks_by_file,
         delete_chunks_by_source,
+        drop_index,
         get_chunk_bodies,
         hybrid_search,
         init_collection,
         insert_chunks,
         list_indexed_paths,
+        observe_index,
+        sample_chunks,
         search,
+        write_stamp,
     )
 
 # Store-agnostic orchestration — same entry points for every backend.

@@ -95,6 +95,32 @@ class JobGroupStore:
             )
             return [self._row_to_group(r) for r in rows]
 
+    async def latest_by_kind(self, kind: str) -> JobGroup | None:
+        """The most recently created group of `kind`, or None.
+
+        Used by index_guard to find the latest `index-rebuild` group
+        (ADR-004 §3).
+        """
+        pool = await get_pool()
+        if pool is None:
+            raise RuntimeError("JobGroupStore.latest_by_kind: Postgres pool unavailable")
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM job_groups WHERE kind = $1 ORDER BY created_at DESC LIMIT 1",
+                kind,
+            )
+            return self._row_to_group(row) if row else None
+
+    async def delete(self, group_id: str) -> None:
+        """Remove one group. Used only to delete an aborted rebuild's group
+        (research R7 step 3) before its lock is released, so the abort
+        never reads back as an `interrupted` rebuild."""
+        pool = await get_pool()
+        if pool is None:
+            raise RuntimeError("JobGroupStore.delete: Postgres pool unavailable")
+        async with pool.acquire() as conn:
+            await conn.execute("DELETE FROM job_groups WHERE id = $1", group_id)
+
     async def increment_task_count(self, group_id: str, by: int = 1) -> int:
         """Atomically add `by` to a group's task_count; return the new value.
 

@@ -1,0 +1,227 @@
+{
+  "index_schema": 1,
+  "source_version": "1.0.0",
+  "surface": {
+    "chromadb": {
+      "stamp_metadata_keys": [
+        "treeweft.index_schema",
+        "treeweft.embedding_model",
+        "treeweft.vector_dim"
+      ]
+    },
+    "lancedb": {
+      "fields": [
+        {
+          "name": "id",
+          "nullable": true,
+          "type": "string"
+        },
+        {
+          "name": "vector",
+          "nullable": true,
+          "type": "fixed_size_list<item: float>[<VECTOR_DIM>]"
+        },
+        {
+          "name": "summary_vector",
+          "nullable": true,
+          "type": "fixed_size_list<item: float>[<VECTOR_DIM>]"
+        },
+        {
+          "name": "chunk_text",
+          "nullable": true,
+          "type": "string"
+        },
+        {
+          "name": "file_path",
+          "nullable": true,
+          "type": "string"
+        },
+        {
+          "name": "language",
+          "nullable": true,
+          "type": "string"
+        },
+        {
+          "name": "start_line",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "end_line",
+          "nullable": true,
+          "type": "int64"
+        },
+        {
+          "name": "source_id",
+          "nullable": true,
+          "type": "string"
+        }
+      ],
+      "fts_column": "chunk_text",
+      "stamp_field_metadata_on": "vector",
+      "stamp_keys": [
+        "treeweft.index_schema",
+        "treeweft.embedding_model"
+      ]
+    },
+    "milvus": {
+      "fields": [
+        {
+          "auto_id": true,
+          "dtype": "INT64",
+          "is_primary": true,
+          "name": "id"
+        },
+        {
+          "auto_id": false,
+          "dtype": "VARCHAR",
+          "is_primary": false,
+          "max_length": 65535,
+          "name": "chunk_text",
+          "params": {
+            "enable_analyzer": true,
+            "max_length": 65535
+          }
+        },
+        {
+          "auto_id": false,
+          "dtype": "FLOAT_VECTOR",
+          "is_primary": false,
+          "name": "vector",
+          "params": {
+            "dim": "<VECTOR_DIM>"
+          }
+        },
+        {
+          "auto_id": false,
+          "dtype": "FLOAT_VECTOR",
+          "is_primary": false,
+          "name": "summary_vector",
+          "params": {
+            "dim": "<VECTOR_DIM>"
+          }
+        },
+        {
+          "auto_id": false,
+          "dtype": "SPARSE_FLOAT_VECTOR",
+          "is_primary": false,
+          "name": "sparse_vector"
+        },
+        {
+          "auto_id": false,
+          "dtype": "VARCHAR",
+          "is_primary": false,
+          "max_length": 2048,
+          "name": "file_path",
+          "params": {
+            "max_length": 2048
+          }
+        },
+        {
+          "auto_id": false,
+          "dtype": "VARCHAR",
+          "is_primary": false,
+          "max_length": 64,
+          "name": "language",
+          "params": {
+            "max_length": 64
+          }
+        },
+        {
+          "auto_id": false,
+          "dtype": "INT64",
+          "is_primary": false,
+          "name": "start_line"
+        },
+        {
+          "auto_id": false,
+          "dtype": "INT64",
+          "is_primary": false,
+          "name": "end_line"
+        },
+        {
+          "auto_id": false,
+          "dtype": "VARCHAR",
+          "is_primary": false,
+          "max_length": 128,
+          "name": "source_id",
+          "params": {
+            "max_length": 128
+          }
+        }
+      ],
+      "functions": [
+        {
+          "input_fields": [
+            "chunk_text"
+          ],
+          "name": "bm25_chunk_text",
+          "output_fields": [
+            "sparse_vector"
+          ],
+          "type": "BM25"
+        }
+      ],
+      "index_params": [
+        {
+          "field_name": "vector",
+          "index_type": "HNSW",
+          "metric_type": "COSINE",
+          "params": {
+            "M": 16,
+            "efConstruction": 200
+          }
+        },
+        {
+          "field_name": "summary_vector",
+          "index_type": "HNSW",
+          "metric_type": "COSINE",
+          "params": {
+            "M": 16,
+            "efConstruction": 200
+          }
+        },
+        {
+          "field_name": "sparse_vector",
+          "index_type": "SPARSE_INVERTED_INDEX",
+          "metric_type": "BM25",
+          "params": {
+            "bm25_b": 0.75,
+            "bm25_k1": 1.2
+          }
+        }
+      ],
+      "stamp_properties": [
+        "treeweft.index_schema",
+        "treeweft.embedding_model"
+      ]
+    },
+    "neo4j": {
+      "meta_node_label": "TreeweftMeta",
+      "schema_statements": [
+        "CREATE CONSTRAINT entity_id_unique IF NOT EXISTS FOR (e:Entity) REQUIRE e.id IS UNIQUE",
+        "CREATE CONSTRAINT source_id_unique IF NOT EXISTS FOR (s:Source) REQUIRE s.id IS UNIQUE",
+        "CREATE CONSTRAINT community_id_unique IF NOT EXISTS FOR (c:Community) REQUIRE c.id IS UNIQUE",
+        "CREATE INDEX entity_file_path IF NOT EXISTS FOR (e:Entity) ON (e.file_path)",
+        "CREATE INDEX entity_name IF NOT EXISTS FOR (e:Entity) ON (e.name)",
+        "CREATE CONSTRAINT treeweft_meta_id_unique IF NOT EXISTS FOR (m:TreeweftMeta) REQUIRE m.id IS UNIQUE"
+      ]
+    },
+    "sqlite": {
+      "meta_table": "treeweft_meta",
+      "schema_statements": [
+        "\n    CREATE TABLE IF NOT EXISTS entities (\n        id TEXT PRIMARY KEY,\n        type TEXT,\n        name TEXT,\n        file_path TEXT,\n        start_line INTEGER,\n        end_line INTEGER,\n        signature TEXT,\n        language TEXT,\n        community_id TEXT,\n        centrality REAL,\n        updated_at INTEGER\n    )\n    ",
+        "CREATE INDEX IF NOT EXISTS entities_file_path ON entities(file_path)",
+        "CREATE INDEX IF NOT EXISTS entities_name ON entities(name)",
+        "CREATE INDEX IF NOT EXISTS entities_community ON entities(community_id)",
+        "\n    CREATE TABLE IF NOT EXISTS relationships (\n        source_id TEXT NOT NULL,\n        target_id TEXT NOT NULL,\n        type TEXT NOT NULL,\n        updated_at INTEGER,\n        PRIMARY KEY (source_id, target_id, type)\n    )\n    ",
+        "CREATE INDEX IF NOT EXISTS relationships_target ON relationships(target_id)",
+        "\n    CREATE TABLE IF NOT EXISTS sources (\n        id TEXT PRIMARY KEY,\n        path TEXT,\n        url TEXT,\n        branch TEXT,\n        indexed_at INTEGER,\n        file_count INTEGER,\n        chunk_count INTEGER,\n        commit_sha TEXT,\n        updated_at INTEGER\n    )\n    ",
+        "\n    CREATE TABLE IF NOT EXISTS source_entities (\n        source_id TEXT NOT NULL,\n        entity_id TEXT NOT NULL,\n        PRIMARY KEY (source_id, entity_id)\n    )\n    ",
+        "CREATE INDEX IF NOT EXISTS source_entities_entity ON source_entities(entity_id)",
+        "\n    CREATE TABLE IF NOT EXISTS communities (\n        id TEXT PRIMARY KEY,\n        summary TEXT,\n        embedding TEXT\n    )\n    ",
+        "\n    CREATE TABLE IF NOT EXISTS treeweft_meta (\n        id TEXT PRIMARY KEY CHECK (id = 'index'),\n        index_schema INTEGER NOT NULL,\n        embedding_model TEXT NOT NULL,\n        vector_dim INTEGER NOT NULL,\n        stamped_at INTEGER NOT NULL\n    )\n    "
+      ]
+    }
+  }
+}

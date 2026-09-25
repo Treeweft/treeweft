@@ -27,6 +27,8 @@ import uuid
 from pathlib import Path
 
 from treeweft.config import require_env
+from treeweft.domain.index_stamp import IndexStamp, StoreObservation, parse_stamp
+from treeweft.versions import INDEX_SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +37,19 @@ LANCEDB_PATH = os.environ.get(
 )
 TABLE_NAME = os.environ.get("LANCEDB_TABLE", "treeweft_chunks")
 VECTOR_DIM = int(require_env("VECTOR_DIM"))
+EMBEDDING_MODEL = require_env("EMBEDDING_MODEL")
 RRF_K = int(os.environ.get("RRF_K", "60"))
 
 MAX_TEXT_LEN = 50000
+FTS_COLUMN = "chunk_text"
+
+# ADR-004 §3 index stamp: field metadata on the vector column, the only
+# LanceDB mechanism that survives add/delete/FTS/optimize/reopen AND can be
+# applied to a table created before the stamp existed (research R1) — a
+# table's own top-level schema metadata can be set at create_table() but not
+# changed afterwards in lancedb 0.33.
+_STAMP_SCHEMA_KEY = "treeweft.index_schema"
+_STAMP_MODEL_KEY = "treeweft.embedding_model"
 
 SEARCH_OUTPUT_FIELDS = [
     "id",
@@ -64,15 +76,16 @@ def _connect():
     return _db
 
 
-def _schema():
+def _schema(dim: int | None = None):
     import pyarrow as pa
 
+    dim = VECTOR_DIM if dim is None else dim
     return pa.schema(
         [
             pa.field("id", pa.string()),
-            pa.field("vector", pa.list_(pa.float32(), VECTOR_DIM)),
+            pa.field("vector", pa.list_(pa.float32(), dim)),
             pa.field(
-                "summary_vector", pa.list_(pa.float32(), VECTOR_DIM), nullable=True
+                "summary_vector", pa.list_(pa.float32(), dim), nullable=True
             ),
             pa.field("chunk_text", pa.string()),
             pa.field("file_path", pa.string()),
@@ -82,6 +95,29 @@ def _schema():
             pa.field("source_id", pa.string()),
         ]
     )
+
+
+def _current_stamp_metadata(tbl) -> dict[str, str]:
+    """The vector field's existing metadata as str→str, or {} if none.
+
+    lancedb 0.33 hands metadata back as bytes→bytes but only accepts
+    str→str on the way in (`replace_field_metadata`), so every read here
+    decodes it for round-tripping through a write.
+    """
+    raw = dict(tbl.schema.field("vector").metadata or {})
+    out: dict[str, str] = {}
+    for k, v in raw.items():
+        key = k.decode() if isinstance(k, bytes) else k
+        val = v.decode() if isinstance(v, bytes) else v
+        out[key] = val
+    return out
+
+
+def _stamp_field_metadata(tbl, stamp: IndexStamp) -> None:
+    merged = _current_stamp_metadata(tbl)
+    merged[_STAMP_SCHEMA_KEY] = str(stamp.schema)
+    merged[_STAMP_MODEL_KEY] = stamp.embedding_model
+    tbl.replace_field_metadata("vector", merged)
 
 
 def _get_table():
@@ -105,6 +141,9 @@ def _get_table():
                 )
         else:
             tbl = db.create_table(TABLE_NAME, schema=_schema())
+            _stamp_field_metadata(
+                tbl, IndexStamp(schema=INDEX_SCHEMA_VERSION, embedding_model=EMBEDDING_MODEL, vector_dim=VECTOR_DIM)
+            )
         has_fts = any(
             idx.columns == ["chunk_text"] for idx in tbl.list_indices()
         )
@@ -327,3 +366,87 @@ async def list_indexed_paths(source_id: str) -> set[str]:
         return {r["file_path"] for r in rows if r.get("file_path")}
 
     return await asyncio.to_thread(_scan)
+
+
+# ── Index stamp (ADR-004 §3) ─────────────────────────────────────────────────
+
+def _stamp_from_metadata(tbl):
+    meta = _current_stamp_metadata(tbl)
+    if _STAMP_SCHEMA_KEY not in meta or _STAMP_MODEL_KEY not in meta:
+        return None
+    raw = {
+        "index_schema": meta[_STAMP_SCHEMA_KEY],
+        "embedding_model": meta[_STAMP_MODEL_KEY],
+        # The dimension is authoritative from the field type itself, never a
+        # stored key (data-model.md, IndexStamp "vector_dim" rule).
+        "vector_dim": tbl.schema.field("vector").type.list_size,
+    }
+    return parse_stamp(raw)  # IndexStamp, or UnreadableStamp if malformed
+
+
+async def observe_index() -> StoreObservation:
+    def _observe() -> StoreObservation:
+        db = _connect()
+        if TABLE_NAME not in db.list_tables().tables:
+            return StoreObservation(store="vector", backend="lancedb", exists=False, has_data=False, stamp=None)
+        tbl = db.open_table(TABLE_NAME)
+        has_data = tbl.count_rows() > 0
+        dim = tbl.schema.field("vector").type.list_size
+        return StoreObservation(
+            store="vector", backend="lancedb", exists=True, has_data=has_data,
+            stamp=_stamp_from_metadata(tbl), schema_dim=dim,
+        )
+
+    try:
+        return await asyncio.to_thread(_observe)
+    except Exception as exc:  # noqa: BLE001 — any failure means "unreachable"
+        return StoreObservation(store="vector", backend="lancedb", exists=True, has_data=False, stamp=None, unreachable=str(exc))
+
+
+async def write_stamp(stamp: IndexStamp) -> None:
+    def _write():
+        tbl = _get_table()
+        _stamp_field_metadata(tbl, stamp)
+
+    await asyncio.to_thread(_write)
+
+
+async def sample_chunks(n: int, scan_limit: int = 20) -> list[tuple[str, list[float]]]:
+    """Up to `n` (text, vector) pairs from rows shorter than MAX_TEXT_LEN,
+    scanning at most `scan_limit` rows (research R3)."""
+
+    def _sample() -> list[tuple[str, list[float]]]:
+        tbl = _get_table()
+        total = tbl.count_rows()
+        if not total:
+            return []
+        rows = (
+            tbl.search(None)
+            .select(["chunk_text", "vector"])
+            .limit(min(scan_limit, total))
+            .to_list()
+        )
+        out = []
+        for row in rows:
+            text = row.get("chunk_text") or ""
+            if len(text) >= MAX_TEXT_LEN:
+                continue
+            out.append((text, list(row["vector"])))
+            if len(out) >= n:
+                break
+        return out
+
+    return await asyncio.to_thread(_sample)
+
+
+async def drop_index() -> None:
+    global _table
+
+    def _drop():
+        db = _connect()
+        if TABLE_NAME in db.list_tables().tables:
+            db.drop_table(TABLE_NAME)
+
+    await asyncio.to_thread(_drop)
+    with _lock:
+        _table = None

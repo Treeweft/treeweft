@@ -79,6 +79,39 @@ There are two FastAPI apps and they are not interchangeable:
   (`TREEWEFT_RELEASE`, baked into published images; `null` from source).
   `treeweft-mcp` compares the major versions before its first indexer call
   (`application/mcp_compat.py`).
+- **Index schema stamp (ADR-004 §3, `application/index_guard.py`)**. Every
+  vector store (Milvus, LanceDB, ChromaDB) and graph store (Neo4j, SQLite)
+  records what built its data: `INDEX_SCHEMA_VERSION` (`treeweft.versions`,
+  currently 1), the configured embedding model, and the vector dimension
+  (read from the store's own schema for Milvus/LanceDB, from the stamp
+  itself for Chroma/Neo4j/SQLite — see `domain/index_stamp.py`). At startup,
+  after `graph_store.ensure_schema()` and before the job queue starts
+  (`application/lifecycle.py`), and every `INDEX_STATUS_REFRESH_SECONDS`
+  (default 5) after, the indexer compares each store's stamp with its
+  configuration and caches the worst result as `index_status` in
+  `GET /health`: `ok`, `unverified` (pre-1.1.0 data awaiting the
+  re-embedding check, retried every `INDEX_VERIFY_INTERVAL_SECONDS`,
+  default 60), `reindex_required` (a real mismatch), or `rebuilding`. See
+  `docs/upgrading.md`, "The index schema stamp", for the operator view.
+  **Gating**: `index_guard.require_searchable()`/`require_writable()` gate
+  `/search`, `/hydrate-chunks`, `/find-*`, `/graph-explore` and every route
+  that enqueues an index job or starts `/build-community` — **any new
+  route under those prefixes must call the matching guard**, enforced by
+  `tests/unit/test_index_gate_routes.py`'s route-classification check. The
+  queue worker (`adapters/queue/postgres_queue.py`) additionally calls the
+  authoritative, cross-process `index_guard.dispatch_allowed(job)` just
+  before dispatch — this is what actually stops a write into a store
+  another indexer process is mid-rebuild on; the cached `/health` view can
+  lag by up to `INDEX_STATUS_REFRESH_SECONDS`.
+- **Rebuild** (`POST /index/rebuild`, admin only, `?dry_run=true` to
+  preview). Drops and recreates the vector collection and the graph data
+  (sparing the stamp) at the current schema, then re-indexes every
+  registered source as one `job_groups` row (`kind="index-rebuild"`).
+  Coordinated across indexer processes by a Postgres session-level
+  advisory lock (`adapters/postgresql/maintenance_lock.py`) — exclusive
+  for a rebuild, shared for a `/build-community` backfill, so the two
+  never run concurrently and no worker writes into stores being dropped.
+  See `docs/upgrading.md` for the operator sequence.
 
 
 ## Common dev tasks
@@ -278,7 +311,7 @@ quality-per-1k-tokens, and treeweft win-rates).
 - **Neo4j driver is 6.x async** — use `result.fetch(n)` with an integer, not bare `fetch()`.
 - **Don't mount `/home` into Docker** — use `host.docker.internal` (already set up via `extra_hosts: host-gateway`). The host indexer covers filesystem access.
 - **`store_graph` uses `MERGE` for both source and target** so external import targets auto-create as `ExternalModule`. Don't switch to `MATCH`. **This also applies to the `Source` node in the entity-upsert block** (`MERGE (s:Source {id: $source_id}) WITH s UNWIND $entities …`): the `Source` node is only enriched with properties by `upsert_source()` in `_finalize_job` — which runs *after* every file is processed — so a `MATCH (s:Source …)` here finds nothing mid-job and silently drops every `Entity`, leaving `find_definition`/graph traversal globally empty. The relationship pass would still `MERGE` bare `Entity` nodes (id only, no `name`/`file_path`), so the failure is invisible to chunk counts and `errors`.
-- **Milvus collection has an explicit schema** with `vector` (dense code), `summary_vector` (dense LLM summary, nullable), `sparse_vector` (server-side BM25 from `chunk_text`). `init_collection()` is idempotent (`has_collection` check). Schema-changing edits require dropping the collection and re-indexing every source.
+- **Milvus collection has an explicit schema** with `vector` (dense code), `summary_vector` (dense LLM summary — zero-filled on insert when absent, NOT a real nullable column despite the field name), `sparse_vector` (server-side BM25 from `chunk_text`). `init_collection()` is idempotent (`has_collection` check) and stamps a collection it creates with `treeweft.index_schema`/`treeweft.embedding_model` collection properties (ADR-004 §3). Schema-changing edits require dropping the collection and re-indexing every source, and must also bump `INDEX_SCHEMA_VERSION` and regenerate `contracts/index_schema.json` (checked by `tests/unit/test_contracts.py`).
 - **LLM is required at startup** (fail-loud via `require_env`): `LLM_URL` + `LLM_MODEL`. Used for HyDE query expansion and per-chunk summary generation. Falls back silently to no-HyDE / no-summary if the LLM is unreachable at runtime — both indexing and search still work without it.
 - **Hybrid search via Milvus `hybrid_search`** combines dense `vector`, optional dense `summary_vector`, optional dense HyDE-vector, and sparse BM25 via `RRFRanker(k=RRF_K)`. Toggle off per-call with `use_hybrid=False`.
 - **Graph RESCORING is ON by default; the neighbor/community PAYLOAD is always on. Payload-without-rescoring is a first-class OPT-IN mode.** The graph layer adds value in two independent ways: (1) the neighbor + community-summary PAYLOAD fed to the agent — always returned by `graph_search` regardless of any flag — and (2) post-rerank RESCORING that fuses community-summary cosine + entity centrality + name-in-query into `final_score` via weights `GRAPH_ALPHA/BETA/GAMMA/DELTA`. **The value of (2) is reranker-dependent.** Ablation D3 (`docs/benchmark-findings.md`) showed (2) adds ~0 over a **strong** reranker (Cohere `rerank-v4.0-pro`) — there, `use_graph_scoring=false` ties/beats it and is cheaper. But a later retrieval re-validation under the **production** reranker (`Qwen3-Reranker-0.6B` on `:8086`) found (2) still materially lifts rank-1 — guava symbol-free **recall@1 0.16→0.49, MRR 0.448→0.621** (featbit unchanged, PowerToys neutral) — because a weaker reranker leaves room for graph symbol-promotion to fix rank-1. So rescoring **stays ON by default** (`USE_GRAPH_SCORING=1`); set `USE_GRAPH_SCORING=0` (payload-only) **only with a Cohere-class reranker**, where it's redundant and cheaper. Toggle per-request via `use_graph_scoring=true|false` on `/search` (and the `search_code`/`search_code_enhanced`/`graph_explore` MCP tools). `use_graph_scoring=false` does NOT suppress the payload anywhere; only the rescore branch in `application/retrieval.graph_search` is gated by it (`--vector-only` in the agentic benchmark is the lean mode that *also* drops the payload client-side). Benchmark CLI: `run --no-graph` / `--no-graph-scoring` turn rescoring off; `--graph-scoring` pins it on (the default). Community-summary embeddings + centrality (consumed ONLY by rescoring) are written to Neo4j by `community.run_post_index_signals()` at the end of every index job. The MCP-process community embedding cache is lazy and never invalidated within process — restart the MCP server to refresh.

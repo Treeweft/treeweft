@@ -59,3 +59,8 @@ def product_release() -> str | None:
 
 SOURCE_VERSION = _read_source_version()
 SOURCE_MAJOR = parse_semver(SOURCE_VERSION)[0]
+
+# The index schema integer (ADR-004 §3). Stamped into each data store together
+# with the embedding model and dimension, and checked at startup. Bumping it
+# requires a SemVer MAJOR bump; a summary-prompt change (ADR-003) never bumps it.
+INDEX_SCHEMA_VERSION = 1

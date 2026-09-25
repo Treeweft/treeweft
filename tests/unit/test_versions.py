@@ -77,3 +77,8 @@ def test_product_release_is_none_from_source(monkeypatch, value):
     else:
         monkeypatch.setenv("TREEWEFT_RELEASE", value)
     assert versions.product_release() is None
+
+
+def test_index_schema_version_is_a_positive_int():
+    assert isinstance(versions.INDEX_SCHEMA_VERSION, int)
+    assert versions.INDEX_SCHEMA_VERSION >= 1

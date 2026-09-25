@@ -113,8 +113,9 @@ content it indexes and the callers it serves must be treated as potentially host
 - Postgres schema changes MUST ship as a new numbered migration; applied migrations are never
   edited.
 
-Transition: these rules take effect as ADR-004 is implemented. Until the release tooling
-supports SemVer, releases follow the CalVer-only procedure in `docs/docker-images.md`.
+ADR-004 is fully implemented as of 1.1.0: the SemVer release tooling (tags, contract snapshots)
+has been in force since 1.0.0 (2026-09-24), and the index schema stamp, reindex-required mode
+and the rebuild have been in force since 1.1.0.
 
 Rationale: a date tells operators when a release was cut, but only a compatibility version can
 tell software whether two components can talk, or tell an operator that an upgrade forces a
@@ -162,4 +163,4 @@ Compliance: every Spec Kit plan MUST pass its "Constitution Check" gate, and any
 exception MUST be recorded in that plan's complexity tracking. Reviewers check pull requests
 against these principles.
 
-**Version**: 1.0.0 | **Ratified**: 2026-09-24 | **Last Amended**: 2026-09-24
+**Version**: 1.0.1 | **Ratified**: 2026-09-24 | **Last Amended**: 2026-09-25

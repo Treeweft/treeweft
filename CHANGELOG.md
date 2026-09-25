@@ -7,6 +7,36 @@ Added, Fixed.
 
 ## Unreleased
 
+### Added
+
+- The index schema stamp (ADR-004 §3): every vector store (Milvus,
+  LanceDB, ChromaDB) and graph store (Neo4j, SQLite) records what built
+  its data — the schema integer, the embedding model and the vector
+  dimension. `GET /health` gains `index_schema` and `index_status` (`ok`,
+  `unverified`, `reindex_required` or `rebuilding`, with `reindex_reason`
+  and `rebuild_progress` as they apply). While the index is
+  `reindex_required`, the search, hydrate-chunks, find-\* and
+  graph-explore endpoints, and any index job, are refused with a 409
+  naming the mismatch; `treeweft-mcp` passes that reason to the agent
+  instead of reporting the indexer as unreachable.
+- `POST /index/rebuild` (admin only, `?dry_run=true` to preview): drops
+  and recreates the vector and graph stores at the current schema and
+  re-indexes every registered source as one job group. Progress is
+  visible in `GET /health` and `GET /job-groups/{id}`.
+- `INDEX_VERIFY_INTERVAL_SECONDS`, `INDEX_VERIFY_TIMEOUT_SECONDS` and
+  `INDEX_STATUS_REFRESH_SECONDS` settings (see `.env.example`).
+- `contracts/index_schema.json`: a committed snapshot of the index
+  schema, checked by CI so a schema-changing PR must bump
+  `INDEX_SCHEMA_VERSION` and the SemVer major.
+
+### Operator configuration
+
+- The first start after upgrading verifies an existing (pre-1.1.0) index
+  by re-embedding up to 3 sampled chunks against the configured embedding
+  model; this needs the embedding service reachable. Until it succeeds,
+  the index reports `unverified`: search keeps working, but new index
+  jobs are refused. See `docs/upgrading.md`.
+
 ## 1.0.0 — 2026.9.24
 
 ### Breaking

@@ -115,6 +115,7 @@ class PostgresJobQueue(JobQueue):
         from treeweft.application import indexer_service as idx
         # Job state lives in indexer_state now; reached through the module so
         # the startup rebinding is visible here.
+        from treeweft.application import index_guard
         from treeweft.application import indexer_state as idx_state
         from treeweft.application import indexer_runners as idx_runners
         from treeweft.domain.jobs import JobStatus
@@ -127,6 +128,23 @@ class PostgresJobQueue(JobQueue):
         job = await idx_state._job_store.get(job_id)
         if job is None:
             logger.warning("Worker %d: claimed job_id=%s not in JobStore; skipping", worker_id, job_id)
+            return
+
+        # ADR-004 §3 (research R5 §2): persist `running` BEFORE the
+        # authoritative dispatch_allowed() check, so a concurrent rebuild's
+        # blocker re-check is guaranteed to see this job if it started first.
+        jd = job.to_dict()
+        jd["status"] = "running"
+        await idx_runners._persist_job(jd)
+
+        if not await index_guard.dispatch_allowed(job):
+            jd["status"] = "failed"
+            jd["error"] = index_guard.refusal_detail(job.id)
+            jd["finished_at"] = time.time()
+            await idx_runners._persist_job(jd)
+            logger.warning(
+                "Worker %d: job %s refused by index_guard (kind=%s)", worker_id, job_id, job.kind
+            )
             return
 
         coro = idx_runners.dispatch_job(job)
