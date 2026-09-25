@@ -11,6 +11,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   and partial outcomes. "Done" means *verified*, not "should work" — if you can't
   verify, say so explicitly and explain why.
 
+## Development workflow: Spec Kit first
+
+Use Spec Kit (`.claude/skills/speckit-*`, governed by `.specify/memory/constitution.md`) for
+feature work. Superpowers skills may be used **only in support of a Spec Kit step, or where no
+Spec Kit skill covers the job** — never in place of one.
+
+| Stage | Use (Spec Kit) | Not (Superpowers equivalent) |
+|---|---|---|
+| Principles | `/speckit-constitution` | — |
+| Specify / design a feature | `/speckit-specify`, then `/speckit-clarify` | `brainstorming` |
+| Implementation plan | `/speckit-plan` (+ `/speckit-checklist`) | `writing-plans` |
+| Task breakdown | `/speckit-tasks` (+ `/speckit-analyze`, `/speckit-taskstoissues`) | — |
+| Execute | `/speckit-implement` (+ `/speckit-converge`) | `executing-plans`, `subagent-driven-development` |
+
+Superpowers skills remain available where Spec Kit has no equivalent, or inside a Spec Kit step:
+`systematic-debugging`, `test-driven-development`, `verification-before-completion`,
+`requesting-code-review` / `receiving-code-review`, `finishing-a-development-branch`,
+`using-git-worktrees`, `dispatching-parallel-agents`. Specs live in `specs/NNN-name/`; architectural
+decisions are still recorded as ADRs in `docs/` (constitution, "Development Workflow").
+
 ## What this is
 
 Treeweft is a GraphRAG system for code search: tree-sitter parsing, chonkie chunking, HuggingFace TEI embeddings, Milvus vectors, a Neo4j code graph, and an MCP server (stdio by default). The reference material that used to live here — how to run the stack, index repos, benchmark, the job queue, fleet ops, auth, tracing — is in `docs/engineering-notes.md` (start there) and the topic docs under `docs/`. Local `treeweft-*` skills cover the same ground by topic.
