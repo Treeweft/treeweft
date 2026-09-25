@@ -5,10 +5,12 @@ Fakes the vector and graph store shims by monkeypatching attributes on the
 index_guard imports — index_guard calls through those same objects, so the
 patch is visible to it. No real store, no real Postgres.
 """
+import asyncio
+
 import pytest
 from fastapi.testclient import TestClient
 
-from treeweft import graph_store, retriever
+from treeweft import embedder, graph_store, retriever
 from treeweft.adapters.postgresql import maintenance_lock
 from treeweft.application import index_guard as ig
 from treeweft.application.indexer_service import app
@@ -19,6 +21,10 @@ pytestmark = pytest.mark.asyncio
 MODEL = "Qwen/Qwen3-Embedding-0.6B"
 DIM = 1024
 MATCHING_STAMP = IndexStamp(schema=1, embedding_model=MODEL, vector_dim=DIM)
+
+
+async def _one_short_sample(dim=DIM):
+    return [("short chunk", [1.0] + [0.0] * (dim - 1))]
 
 
 class FakeVectorStore:
@@ -251,3 +257,144 @@ class TestNoPostgresStampsNormally:
         monkeypatch.setattr(maintenance_lock, "acquire", _acquire)
         await ig.run_check()
         assert gs.written_stamps == []
+
+
+class TestUnverified:
+    """Existing (pre-1.0.0) data, embedder down: `/search` works, index jobs
+    are refused, and no stamp is written until verification actually runs
+    (ADR-004 §3 FR-011)."""
+
+    async def test_embedder_down_is_unverified_search_allowed_jobs_refused(self, monkeypatch):
+        vs = FakeVectorStore(exists=True, has_data=True, stamp=None, schema_dim=DIM)
+        gs = FakeGraphStore(exists=True, has_data=True, stamp=None)
+        _install(vs, gs, monkeypatch)
+
+        async def _down(texts):
+            raise ConnectionRefusedError("embedding service down")
+
+        monkeypatch.setattr(retriever, "sample_chunks", lambda n, scan_limit=20: _one_short_sample())
+        monkeypatch.setattr(embedder, "embed", _down)
+
+        status = await ig.run_check()
+        assert status.state == "unverified"
+        assert vs.written_stamps == []
+        assert gs.written_stamps == []
+        assert ig.require_searchable() is None  # /search still works
+
+        gate = await ig.require_writable()
+        assert gate is not None
+        assert gate.status_code == 409
+        import json
+        body = json.loads(gate.body)
+        assert body["index_status"] == "unverified"
+        assert "Index unverified" in body["detail"]
+
+    async def test_embedder_recovers_inline_recheck_stamps_and_allows(self, monkeypatch):
+        vs = FakeVectorStore(exists=True, has_data=True, stamp=None, schema_dim=DIM)
+        gs = FakeGraphStore(exists=True, has_data=True, stamp=None)
+        _install(vs, gs, monkeypatch)
+
+        down = {"value": True}
+
+        async def _maybe_down(texts):
+            if down["value"]:
+                raise ConnectionRefusedError("embedding service down")
+            return [[1.0, 0.0]] * len(texts)
+
+        monkeypatch.setattr(retriever, "sample_chunks", lambda n, scan_limit=20: _one_short_sample(dim=2))
+        monkeypatch.setattr(embedder, "embed", _maybe_down)
+
+        await ig.run_check()
+        assert ig.status().state == "unverified"
+
+        down["value"] = False
+        gate = await ig.require_writable()  # the inline re-check (FR-011)
+        assert gate is None  # now allowed
+        assert ig.status().state == "ok"
+        assert gs.written_stamps == [ig.IndexStamp(1, MODEL, DIM)]
+
+    async def test_refresh_loop_moves_unverified_to_ok_once_intervals_elapse(self, monkeypatch):
+        vs = FakeVectorStore(exists=True, has_data=True, stamp=None, schema_dim=DIM)
+        gs = FakeGraphStore(exists=True, has_data=True, stamp=None)
+        _install(vs, gs, monkeypatch)
+        monkeypatch.setenv("INDEX_VERIFY_INTERVAL_SECONDS", "0.01")
+        monkeypatch.setattr(retriever, "sample_chunks", lambda n, scan_limit=20: _one_short_sample(dim=2))
+
+        async def _down(texts):
+            raise ConnectionRefusedError("embedding service down")
+
+        monkeypatch.setattr(embedder, "embed", _down)
+        await ig.run_check()
+        assert ig.status().state == "unverified"
+
+        async def _ok(texts):
+            return [[1.0, 0.0]] * len(texts)
+
+        monkeypatch.setattr(embedder, "embed", _ok)
+        await asyncio.sleep(0.02)  # let the retry interval elapse
+        await ig.refresh()
+        assert ig.status().state == "ok"
+
+    async def test_refresh_loop_moves_unverified_to_reindex_required_when_verification_fails(self, monkeypatch):
+        vs = FakeVectorStore(exists=True, has_data=True, stamp=None, schema_dim=DIM)
+        gs = FakeGraphStore(exists=True, has_data=True, stamp=None)
+        _install(vs, gs, monkeypatch)
+        monkeypatch.setenv("INDEX_VERIFY_INTERVAL_SECONDS", "0.01")
+        monkeypatch.setattr(retriever, "sample_chunks", lambda n, scan_limit=20: _one_short_sample(dim=2))
+
+        async def _down(texts):
+            raise ConnectionRefusedError("embedding service down")
+
+        monkeypatch.setattr(embedder, "embed", _down)
+        await ig.run_check()
+        assert ig.status().state == "unverified"
+
+        async def _wrong(texts):
+            return [[0.0, 1.0]] * len(texts)  # orthogonal to the stored vector
+
+        monkeypatch.setattr(embedder, "embed", _wrong)
+        await asyncio.sleep(0.02)  # let the retry interval elapse
+        await ig.refresh()
+        assert ig.status().state == "reindex_required"
+
+    async def test_refresh_is_idle_when_status_is_ok(self, monkeypatch):
+        vs = FakeVectorStore(exists=True, has_data=True, stamp=MATCHING_STAMP, schema_dim=DIM)
+        gs = FakeGraphStore(exists=True, has_data=True, stamp=MATCHING_STAMP)
+        _install(vs, gs, monkeypatch)
+        await ig.run_check()
+        assert ig.status().state == "ok"
+
+        call_count = {"n": 0}
+
+        async def _tracked(n, scan_limit=20):
+            call_count["n"] += 1
+            return []
+
+        monkeypatch.setattr(retriever, "sample_chunks", _tracked)
+        await ig.refresh()
+        assert call_count["n"] == 0
+
+    async def test_concurrent_require_writable_serializes_through_the_lock(self, monkeypatch):
+        vs = FakeVectorStore(exists=True, has_data=True, stamp=None, schema_dim=DIM)
+        gs = FakeGraphStore(exists=True, has_data=True, stamp=None)
+        _install(vs, gs, monkeypatch)
+        monkeypatch.setattr(ig, "_status", ig.IndexStatus("unverified", reason="not yet verified"))
+
+        active = {"n": 0}
+        max_concurrent = {"n": 0}
+
+        async def _slow_sample(n, scan_limit=20):
+            active["n"] += 1
+            max_concurrent["n"] = max(max_concurrent["n"], active["n"])
+            await asyncio.sleep(0.01)
+            active["n"] -= 1
+            return [("short", [1.0, 0.0, 0.0, 0.0])]
+
+        async def _ok(texts):
+            return [[1.0, 0.0, 0.0, 0.0]]
+
+        monkeypatch.setattr(retriever, "sample_chunks", _slow_sample)
+        monkeypatch.setattr(embedder, "embed", _ok)
+
+        await asyncio.gather(ig.require_writable(), ig.require_writable())
+        assert max_concurrent["n"] == 1  # never two checks running at once
