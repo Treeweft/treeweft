@@ -208,11 +208,20 @@ issue.
    (`adapters/queue/postgres_queue.py` `_run_one`) does two things, in this order:
    1. **Persists the job as `running`**, and waits for that write to commit.
    2. **Calls `await index_guard.dispatch_allowed(job)`**. This reads the shared state (R13)
-      rather than the cache. It refuses when:
-      - the maintenance lock is held exclusively and the job is not part of the rebuild group
-        currently being prepared;
-      - the latest rebuild was interrupted;
-      - this process's stamp check says `reindex_required` or `unverified`.
+      rather than the cache. The rules are applied in order:
+      1. **A rebuild-group job is always allowed.** If the job's `group_id` is the latest
+         `index-rebuild` group and that group is not `interrupted`, allow it. The rebuilder
+         stamped the stores before enqueueing it (R7 steps 4–5), so no process's cached status
+         can be a reason to refuse it.
+      2. **Refuse** if the maintenance lock is held exclusively (another job's rebuild is
+         preparing).
+      3. **Refuse** if the latest rebuild was `interrupted`.
+      4. If this process's **cached** status is `reindex_required` or `unverified`, do not trust
+         it alone. **Re-observe the stamps directly** (no embedding, under the check lock) and
+         refuse only if that fresh check still says `reindex_required` or `unverified`. A cache
+         that is up to 5 s stale just after a rebuild therefore never fails a legitimate job.
+         The fresh result also updates the cache.
+      5. Otherwise allow.
 
    A refused job is marked `failed` with the reason, the same path an undispatchable job takes
    today (`:132-140`). Attempts are not incremented, so the job is not retried. The
@@ -469,6 +478,11 @@ stores is a supported topology (`docs/engineering-notes.md:297`), and this featu
   `running` write committed before A's step 3 read, so A sees it and aborts before dropping
   anything. Otherwise B's read sees the lock held and refuses the job. Either way, no job
   outside the rebuild group runs while stores are being dropped.
+- **Rebuild-group jobs versus stale caches**: `dispatch_allowed()` allows a job of the latest,
+  non-interrupted rebuild group before it looks at any cached status (R5 §2, rule 1). The cached
+  `reindex_required` is almost always stale exactly then, both in other processes and in the
+  rebuilder's own process until its immediate refresh at step 6, and it must not fail the
+  rebuild. Non-rebuild jobs re-observe the stamps before being refused (rule 4).
 - **Stale caches** (at most `INDEX_STATUS_REFRESH_SECONDS`) can therefore only cause a request to
   be refused or accepted slightly late. They can never cause a write into an inconsistent
   index:

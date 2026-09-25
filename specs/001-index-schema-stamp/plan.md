@@ -199,6 +199,7 @@ The order follows the spec's story priorities.
    - the `domain/index_stamp.py` decision table and its tests;
    - the store functions for SQLite and LanceDB first, because they are unit-testable end to
      end, then Chroma, Milvus and Neo4j;
+   - the maintenance lock, and `JobGroupStore.latest_by_kind`/`delete`;
    - the shim exports test.
 2. **US1 and US2 (P1)**:
    - `index_guard` check plus legacy verification;

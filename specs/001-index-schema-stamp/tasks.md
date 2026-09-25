@@ -280,13 +280,20 @@ still work.
   - **When `dispatch_allowed` refuses**: the job is persisted as `failed` with the errors.md
     `detail` as `error`, `dispatch_job` is never called, and `increment_attempts` is never
     called.
-  - **`dispatch_allowed` reads shared state, not the cache**. It refuses when:
-    - `probe()` says `"exclusive"` and the job's `group_id` differs from the latest
-      `index-rebuild` group;
-    - the latest rebuild is `interrupted`;
-    - the cached stamp state is `reindex_required` or `unverified`.
+  - **`dispatch_allowed` applies the research R5 §2 rules, in order**:
+    1. A job whose `group_id` is the latest non-interrupted `index-rebuild` group is
+       **allowed**, even when the cached status is `reindex_required` and `probe()` says
+       `"exclusive"`. This is the regression case for analysis finding H4: without the rule,
+       every rebuild job fails.
+    2. Another job, with `probe()` saying `"exclusive"` → refused.
+    3. Another job, with the latest rebuild `interrupted` → refused.
+    4. Another job with the cached status `reindex_required`:
+       - if the fake stores now carry a matching stamp (a stale cache) → **allowed**, and the
+         cache is updated to `ok`;
+       - if they are still mismatched → refused.
 
-    It allows a job of the rebuild group being prepared.
+       The re-observation calls `observe_index`, never the embedder.
+    5. Otherwise → allowed.
 - [ ] T022 [P] [US1] Add to `tests/unit/test_mcp_compat.py`: a mocked indexer returning the
   errors.md 409 body to `search_code` gives `{"error": "Indexer returned HTTP 409: Index requires
   rebuild: …"}` containing `/index/rebuild`. The word "unreachable" never appears.
@@ -323,9 +330,17 @@ still work.
       `JSONResponse` builder producing the [contracts/errors.md](contracts/errors.md) bodies,
       including the `preparing` variant, with `detail` ≤ 300 characters and the pointer kept;
     - `health_fields()`.
-  - **`async dispatch_allowed(job)`** is authoritative: `maintenance_lock.probe()` plus the latest
-    `index-rebuild` group from Postgres, combined with the cached stamp state (research R5,
-    R13). `refusal_detail()` gives the refusal text.
+  - **`async dispatch_allowed(job)`** is authoritative. It implements the ordered rules of
+    research R5 §2:
+    1. rebuild-group jobs are always allowed;
+    2. refuse while the lock is held exclusively;
+    3. refuse while the latest rebuild is `interrupted`;
+    4. a cached `reindex_required` or `unverified` is confirmed by a fresh stamp observation,
+       with no embedding, before refusing;
+    5. otherwise allow.
+
+    It uses `maintenance_lock.probe()` and `JobGroupStore.latest_by_kind("index-rebuild")`.
+    `refusal_detail()` gives the refusal text.
   - **Imports**: stores only through `treeweft.retriever` and `treeweft.graph_store`, and
     Postgres only through `adapters/postgresql`.
 
@@ -516,6 +531,11 @@ The real call recreates and stamps the stores and enqueues one group. `/health` 
     dropped.
   - **A takes the lock before B's check**: B's `dispatch_allowed` refuses B's job (failed, not
     retried). A's own rebuild-group jobs dispatched in B are allowed.
+  - **Rebuild from `reindex_required` with stale caches** (H4): A and B both cache
+    `reindex_required`. A rebuilds, and both A's and B's workers pop the rebuild-group jobs
+    before either process refreshes. Every one of those jobs is allowed and none ends `failed`.
+    An unrelated job popped in B right after A's step 6, with B's cache still stale, is allowed
+    after B's fresh stamp re-check.
   - **A crashes after step 4** (the lock is released and the group has 0 of N jobs): at the next
     `refresh()`, both A′ (restarted) and B report `reindex_required` "a rebuild was
     interrupted".

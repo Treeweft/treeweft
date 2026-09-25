@@ -119,7 +119,7 @@ Allowed operations per state:
 |---|---|---|---|
 | ok | yes | yes | yes (if no blockers) |
 | unverified | yes | no: inline re-check first, then 409 if still unverified | yes |
-| reindex_required | 409 | 409 / job fails at dispatch | yes |
+| reindex_required | 409 | 409 / job fails at dispatch, after a fresh stamp re-check. The latest rebuild group's own jobs are always allowed | yes |
 | rebuilding (preparing) | 409 ("stores are being recreated; retry shortly") | 409 / job fails at dispatch, except the rebuild group's own jobs | 409 (one already running) |
 | rebuilding (jobs running) | yes (partial results) | yes | 409 (one already running) |
 

@@ -78,6 +78,8 @@ Progress is visible in `GET /health` (`rebuild_progress`) and `GET /job-groups/{
 ## Job failure at dispatch
 
 The worker marks the job `running`, then asks `dispatch_allowed()`. That call reads the shared
-lock and group state, not the cache. A refused job ends with status `failed` and
+lock and group state, not the cache. Jobs of the latest non-interrupted rebuild group are always
+allowed. Any other job is refused only after a fresh stamp re-check confirms the cached refusal
+(research R5 §2). A refused job ends with status `failed` and
 `error = "<detail string from errors.md>"`, and is not retried. This applies in every indexer
 process.
