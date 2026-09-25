@@ -23,6 +23,7 @@ else:
 # backends.
 _EXPORTED = [
     "clear_all",
+    "clear_index_data",
     "close",
     "delete_entities_by_file",
     "delete_file_entities",
@@ -46,7 +47,9 @@ _EXPORTED = [
     "list_entities",
     "list_sources",
     "load_community_embeddings",
+    "observe_index",
     "pull_graph",
+    "read_stamp",
     "set_centralities_batch",
     "set_community_id",
     "set_community_ids_batch",
@@ -57,6 +60,7 @@ _EXPORTED = [
     "upsert_entity",
     "upsert_relationship",
     "upsert_source",
+    "write_stamp",
 ]
 
 for _name in _EXPORTED:

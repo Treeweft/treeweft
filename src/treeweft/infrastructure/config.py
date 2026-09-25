@@ -90,6 +90,56 @@ def validate_config() -> None:
             f"Missing required environment variables: {', '.join(missing)}. "
             f"Set them in .env or export before starting."
         )
+    # Fail loud on a malformed positive-number setting, naming it (constitution V),
+    # rather than let a bad interval surface later as a runtime TypeError/ValueError.
+    for getter in (
+        index_verify_interval_seconds,
+        index_verify_timeout_seconds,
+        index_status_refresh_seconds,
+    ):
+        getter()
+
+
+# ── Index stamp check tunables (ADR-004 §3) ─────────────────────────────────
+# Read lazily (not at import time) so a bad value fails inside validate_config()
+# with a message naming the setting, instead of crashing every import of this
+# module. Callers that need the current value call the getter, not a constant.
+
+INDEX_VERIFY_INTERVAL_SECONDS_DEFAULT = "60"
+INDEX_VERIFY_TIMEOUT_SECONDS_DEFAULT = "15"
+INDEX_STATUS_REFRESH_SECONDS_DEFAULT = "5"
+
+
+def _positive_number_env(name: str, default: str) -> float:
+    raw = os.environ.get(name, default)
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ConfigError(f"Env var {name!r}={raw!r} is not a valid number") from None
+    if value <= 0:
+        raise ConfigError(f"Env var {name!r}={raw!r} must be a positive number")
+    return value
+
+
+def index_verify_interval_seconds() -> float:
+    """Seconds between legacy-verification retries while `unverified` (default 60)."""
+    return _positive_number_env(
+        "INDEX_VERIFY_INTERVAL_SECONDS", INDEX_VERIFY_INTERVAL_SECONDS_DEFAULT
+    )
+
+
+def index_verify_timeout_seconds() -> float:
+    """Timeout for legacy verification's sample re-embedding (default 15)."""
+    return _positive_number_env(
+        "INDEX_VERIFY_TIMEOUT_SECONDS", INDEX_VERIFY_TIMEOUT_SECONDS_DEFAULT
+    )
+
+
+def index_status_refresh_seconds() -> float:
+    """Seconds between per-process index-status refreshes (default 5)."""
+    return _positive_number_env(
+        "INDEX_STATUS_REFRESH_SECONDS", INDEX_STATUS_REFRESH_SECONDS_DEFAULT
+    )
 
 
 def load_yaml_config(path: str | Path | None = None) -> dict[str, Any]:

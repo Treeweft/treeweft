@@ -11,6 +11,7 @@ except ImportError as _exc:
     _IMPORT_ERROR = _exc
 
 from treeweft.domain.indexing import Chunk, VectorStorePort
+from treeweft.domain.index_stamp import IndexStamp, StoreObservation, parse_stamp
 
 
 class ChromaAdapter(VectorStorePort):
@@ -182,8 +183,20 @@ class ChromaAdapter(VectorStorePort):
 
 import os
 
+from treeweft.config import require_env
+from treeweft.versions import INDEX_SCHEMA_VERSION
+
 CHROMA_PATH = os.environ.get("CHROMA_PATH", "./chroma_data")
+VECTOR_DIM = int(require_env("VECTOR_DIM"))
+EMBEDDING_MODEL = require_env("EMBEDDING_MODEL")
 _adapter: ChromaAdapter | None = None
+
+# ADR-004 §3 index stamp: collection metadata keys. `collection.modify()`
+# replaces the whole metadata dict rather than merging into it, so every
+# writer here reads the existing metadata first and merges locally.
+_STAMP_SCHEMA_KEY = "treeweft.index_schema"
+_STAMP_MODEL_KEY = "treeweft.embedding_model"
+_STAMP_DIM_KEY = "treeweft.vector_dim"
 
 
 def _get_adapter() -> ChromaAdapter:
@@ -193,8 +206,36 @@ def _get_adapter() -> ChromaAdapter:
     return _adapter
 
 
+def _stamp_metadata(stamp: IndexStamp) -> dict[str, str]:
+    return {
+        _STAMP_SCHEMA_KEY: str(stamp.schema),
+        _STAMP_MODEL_KEY: stamp.embedding_model,
+        _STAMP_DIM_KEY: str(stamp.vector_dim),
+    }
+
+
+def _stamp_from_metadata(metadata: dict | None):
+    if not metadata or _STAMP_SCHEMA_KEY not in metadata:
+        return None
+    raw = {
+        "index_schema": metadata.get(_STAMP_SCHEMA_KEY),
+        "embedding_model": metadata.get(_STAMP_MODEL_KEY),
+        "vector_dim": metadata.get(_STAMP_DIM_KEY),
+    }
+    return parse_stamp(raw)  # IndexStamp, or UnreadableStamp if malformed
+
+
 async def init_collection():
-    return _get_adapter().init_collection()
+    adapter = _get_adapter()
+    is_new = False
+    try:
+        adapter._client.get_collection(name=adapter.collection_name)
+    except Exception:
+        is_new = True
+    adapter.init_collection()
+    if is_new:
+        stamp = IndexStamp(schema=INDEX_SCHEMA_VERSION, embedding_model=EMBEDDING_MODEL, vector_dim=VECTOR_DIM)
+        adapter._collection.modify(metadata=_stamp_metadata(stamp))
 
 
 async def insert_chunks(
@@ -266,3 +307,62 @@ def search(
     else:
         chroma_where = None
     return adapter.search(query_embedding, top_k=top_k, where=chroma_where)
+
+
+# ── Index stamp (ADR-004 §3) ─────────────────────────────────────────────────
+
+async def observe_index() -> StoreObservation:
+    adapter = _get_adapter()
+    try:
+        collection = adapter._client.get_collection(name=adapter.collection_name)
+    except chromadb.errors.NotFoundError:
+        return StoreObservation(store="vector", backend="chromadb", exists=False, has_data=False, stamp=None)
+    except Exception as exc:  # noqa: BLE001 — any other failure means "unreachable"
+        return StoreObservation(store="vector", backend="chromadb", exists=True, has_data=False, stamp=None, unreachable=str(exc))
+    try:
+        has_data = collection.count() > 0
+    except Exception as exc:  # noqa: BLE001
+        return StoreObservation(store="vector", backend="chromadb", exists=True, has_data=False, stamp=None, unreachable=str(exc))
+    return StoreObservation(
+        store="vector", backend="chromadb", exists=True, has_data=has_data,
+        stamp=_stamp_from_metadata(collection.metadata),
+    )
+
+
+async def write_stamp(stamp: IndexStamp) -> None:
+    adapter = _get_adapter()
+    if adapter._collection is None:
+        adapter.init_collection()
+    merged = dict(adapter._collection.metadata or {})
+    merged.update(_stamp_metadata(stamp))
+    adapter._collection.modify(metadata=merged)
+
+
+async def sample_chunks(n: int, scan_limit: int = 20) -> list[tuple[str, list[float]]]:
+    """Up to `n` (text, vector) pairs from rows shorter than 50 000 characters,
+    scanning at most `scan_limit` rows (research R3)."""
+    adapter = _get_adapter()
+    if adapter._collection is None:
+        adapter.init_collection()
+    result = adapter._collection.get(limit=scan_limit, include=["documents", "embeddings"])
+    documents = result.get("documents") or []
+    embeddings = result.get("embeddings")
+    embeddings = [] if embeddings is None else list(embeddings)
+    out: list[tuple[str, list[float]]] = []
+    for text, vec in zip(documents, embeddings):
+        text = text or ""
+        if len(text) >= 50000:
+            continue
+        out.append((text, list(vec)))
+        if len(out) >= n:
+            break
+    return out
+
+
+async def drop_index() -> None:
+    adapter = _get_adapter()
+    try:
+        adapter._client.delete_collection(name=adapter.collection_name)
+    except chromadb.errors.NotFoundError:
+        pass
+    adapter._collection = None
