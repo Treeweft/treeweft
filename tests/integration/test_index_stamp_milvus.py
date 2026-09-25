@@ -35,12 +35,15 @@ MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 
 @pytest.fixture
-def adapter():
-    os.environ.setdefault("VECTOR_DIM", str(DIM))
-    os.environ.setdefault("EMBEDDING_MODEL", MODEL)
+def adapter(monkeypatch):
     from pymilvus import MilvusClient
 
     from treeweft.adapters.milvus import vector_store as vs
+
+    # EMBEDDING_MODEL/VECTOR_DIM are read once at module import (real .env
+    # values), not per call — monkeypatch the module attribute directly,
+    # the same way the unit tests (test_milvus_index_stamp.py) do.
+    monkeypatch.setattr(vs, "EMBEDDING_MODEL", MODEL)
 
     raw = MilvusClient(uri=URI)
     if raw.has_collection(COLL):
