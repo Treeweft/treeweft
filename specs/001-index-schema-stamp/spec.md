@@ -136,8 +136,10 @@ Non-admins are refused.
    current schema and stamped, and every registered source is enqueued for re-indexing as one
    job group.
 3. **Given** a rebuild in progress, **When** anyone reads the health report, **Then**
-   `index_status` is `rebuilding` and `rebuild_progress` gives sources done and total. Search is
-   allowed and returns results only from sources rebuilt so far.
+   `index_status` is `rebuilding` and `rebuild_progress` gives sources done and total. Once the
+   stores are recreated and stamped, search is allowed and returns results only from sources
+   rebuilt so far. While the stores are still being dropped and recreated, searches are refused
+   with a "retry shortly" explanation.
 4. **Given** a rebuild in progress, **When** the job group completes (including when some sources
    fail), **Then** `index_status` returns to `ok`, and failed sources are visible in the job
    group's results.
@@ -200,6 +202,14 @@ once both versions are raised. Confirm the committed snapshot matches the curren
   cause `reindex_required`.
 - **No registered sources** at rebuild time. The stores are recreated and stamped, an empty job
   group completes immediately, and the status is `ok`.
+- **Several indexer processes** share one Postgres, queue and set of stores. A rebuild started
+  in one process is honoured by all of them:
+  - no process runs an index job outside the rebuild while the stores are being recreated;
+  - every process reports `rebuilding` and then `ok` within a few seconds of the shared state
+    changing;
+  - a process that starts during a rebuild does not stamp over it.
+- **The process running a rebuild dies partway.** Every process then reports `reindex_required`
+  ("a rebuild was interrupted; run it again"), never an empty index reported as `ok`.
 - **Simple mode** (embedded vector store and SQLite graph). Stamps, adoption, gating and rebuild
   behave the same as in the full stack.
 
@@ -267,13 +277,27 @@ once both versions are raised. Confirm the committed snapshot matches the curren
 - **FR-014**: The rebuild MUST be refused, before anything is dropped, while index jobs are
   running or queued or while another rebuild is in progress.
 - **FR-015**: While the rebuild job group is incomplete, `index_status` MUST be `rebuilding`,
-  search MUST be allowed, and `rebuild_progress` MUST be reported. The state MUST survive an
+  search MUST be allowed once the stores are recreated and stamped (it MAY be refused, with a
+  retry hint, while they are being recreated), and `rebuild_progress` MUST be reported. The state MUST survive an
   indexer restart. When the group completes, the status MUST return to `ok`.
 - **FR-016**: The rebuild MUST keep the summary cache, so re-indexing reuses summaries keyed by
   the LLM model and only recomputes embeddings.
 - **FR-017**: Rebuild requests (dry run and real) MUST be logged with the caller, the sources
   affected, and each stage of the real rebuild. The indexer has no admin audit trail to reuse
   (research R8).
+
+**Several indexer processes**
+
+- **FR-024**: Everything in this specification MUST hold when several indexer processes share
+  one Postgres, one job queue and one set of stores.
+  - A rebuild, community build or stamp write in one process MUST be coordinated with every
+    other process.
+  - No process may run an index job outside the rebuild while the stores are being dropped or
+    recreated.
+  - Each process's reported `index_status` MUST converge to the shared state within
+    `INDEX_STATUS_REFRESH_SECONDS` (default 5).
+  - A holder that dies MUST NOT leave the other processes blocked or reporting `ok` over an
+    incomplete index.
 
 **MCP**
 
@@ -335,6 +359,9 @@ once both versions are raised. Confirm the committed snapshot matches the curren
 - **SC-006**: Any synthetic change in the classifier test table fails the contract test with a
   message naming the change and the required minimum versions. The unit suite stays
   service-free.
+- **SC-008**: With two indexer processes, a rebuild started through one of them runs zero
+  foreign index jobs while the stores are recreated, and both processes report `ok` within 5
+  seconds of the rebuild group completing.
 - **SC-007**: Container health checks report healthy in every index state, with zero restarts
   caused by `reindex_required` or `rebuilding`.
 

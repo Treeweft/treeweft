@@ -25,6 +25,15 @@ stamp.
 | `async observe_index() -> StoreObservation` | | `has_data` = at least one `Entity` (Neo4j `MATCH (e:Entity) RETURN 1 LIMIT 1`, `fetch(1)`) / one row in `entities` |
 | `async read_stamp() -> IndexStamp \| None` | | Used by `observe_index` |
 | `async write_stamp(stamp: IndexStamp) -> None` | | Upsert (Neo4j `MERGE (m:TreeweftMeta {id: $id}) SET …`; SQLite `INSERT … ON CONFLICT(id) DO UPDATE`) |
-| `async clear_index_data() -> None` | | Deletes everything except the meta node or table. Neo4j is batched (research R7). |
+| `async clear_index_data() -> None` | | Deletes everything except the meta node or table. Neo4j is batched (research R7). On Neo4j it delegates to the internal `_clear_index_data(scope_prefix=None)`. A non-None prefix adds `AND n.id STARTS WITH $prefix`, for integration tests only (research R12). |
 
 `clear_all()` (existing, used by tests) MUST also spare the meta node, so a stamp survives it.
+
+## Coordination (Postgres): `adapters/postgresql/`
+
+| Function | Notes |
+|---|---|
+| `maintenance_lock.acquire(mode: "exclusive" \| "shared") -> MaintenanceLockHandle \| None` | Opens a **dedicated** `asyncpg.connect(DATABASE_URL)` connection, not from the pool, and calls `pg_try_advisory_lock` or `pg_try_advisory_lock_shared` on the key `(hashtext('treeweft'), hashtext('index-maintenance'))`. Returns None if the lock is not granted, and closes the connection in that case. `handle.release()` unlocks and closes the connection. |
+| `maintenance_lock.probe() -> "exclusive" \| "shared" \| None` | Reads `pg_locks` through the pool without taking the lock (research R13). |
+| `JobGroupStore.latest_by_kind(kind) -> JobGroup \| None` | The most recent group of that kind. |
+| `JobGroupStore.delete(group_id) -> None` | Used only to remove the group of an aborted rebuild (R7 step 3). |

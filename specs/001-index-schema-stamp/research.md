@@ -61,10 +61,17 @@ Milvus integration test (T-level detail in `tasks.md`) is the gate for it.
   - **Collection present, zero rows, no stamp** counts as fresh too. The check writes the stamp.
 - The graph schema is ensured at startup (`lifecycle.py:413-419`), so a graph store with no data
   and no stamp is stamped at startup.
-- The check runs in `lifecycle.startup()` after `graph_store.ensure_schema()` and after the
-  embedding proxy is created, which legacy verification needs (`lifecycle.py:425-439`). It runs
-  **before** `JobStore().init()` and the queue workers start (`:450-457`), and before recovered
-  jobs are re-enqueued (`:460-512`). No job can write before the status is known.
+- The check runs in `lifecycle.startup()` in this order:
+  1. `graph_store.ensure_schema()`;
+  2. the embedding proxy is created, which legacy verification needs (`lifecycle.py:425-439`);
+  3. `JobStore().init()` and `JobGroupStore().init()`, which the check needs to read the shared
+     rebuild state (R13);
+  4. **the check itself**;
+  5. `PostgresJobQueue().start()` (`:450-457`);
+  6. recovered jobs are re-enqueued (`:460-512`).
+
+  The check therefore runs after the stores it reads are ready, and no worker in this process
+  can pick up a job before the status is known.
 - The check's own I/O is bounded: store reads use the adapters' normal timeouts, and legacy
   re-embedding is capped by `INDEX_VERIFY_TIMEOUT_SECONDS` (default 15). If the check cannot
   complete because a store or the embedding service is unreachable, the status is `unverified`
@@ -122,38 +129,62 @@ tested.
 embedding load and a startup dependency for a case ADR-004 does not cover. A candidate follow-up
 issue.
 
-## R4. Where the index status lives; the retry loop
+## R4. Where the index status lives; the refresh loop
 
 **Decision**
 
 - **Pure logic in `src/treeweft/domain/index_stamp.py`** (no adapter imports):
-  - `IndexStamp`, `ConfiguredIndex`, `StoreCheck`, `IndexStatus`
-  - `decide_store(...)`: the ADR-004 §3 decision table per store
-  - `aggregate(...)`: worst-of across stores, with `reindex_required` > `unverified` >
-    `rebuilding` > `ok`
+  - `IndexStamp`, `ConfiguredIndex`, `StoreCheck`, `RebuildState`, `IndexStatus`;
+  - `decide_store(...)`: the ADR-004 §3 decision table per store;
+  - `aggregate(...)`: worst-of across stores and the rebuild state (precedence in data-model).
 - **Runtime state and orchestration in `src/treeweft/application/index_guard.py`**:
-  - the current `IndexStatus` held in a module global, the same style as `indexer_state.py`
-  - `run_check()`
-  - the verification retry loop
-  - `require_searchable()` / `require_writable()`
-  - rebuild status derivation
-- **Retry loop**: an asyncio task started in `lifecycle.startup()` and cancelled in `shutdown()`,
-  like the existing background loops (`lifecycle.py:516-545`). It runs `run_check()` every
-  `INDEX_VERIFY_INTERVAL_SECONDS` (default 60) while the status is `unverified`, and is idle
-  otherwise.
-  - `require_writable()` also runs `run_check()` inline, once, before refusing a job while
-    `unverified`.
-  - An `asyncio.Lock` serialises checks.
+  - a per-process **cached** `IndexStatus`, held in a module global;
+  - `run_check()`, `refresh()`, the refresh loop;
+  - `require_searchable()` / `require_writable()` (read the cache);
+  - `dispatch_allowed(job)` (authoritative; reads Postgres, see R13);
+  - `rebuild()`.
+- **The shared truth lives outside the process**:
+  - the stamps are in the stores;
+  - the rebuild group and its jobs are in Postgres;
+  - the maintenance lock is a Postgres advisory lock (R13).
+
+  Each process only caches a view of that truth. This is what makes several indexer processes
+  work (R13).
+- **Refresh loop**: one asyncio task per process, started in `lifecycle.startup()` after the
+  first check and cancelled in `shutdown()`, like the existing background loops
+  (`lifecycle.py:516-545`). It calls `refresh()` every `INDEX_STATUS_REFRESH_SECONDS`
+  (default 5). `refresh()`:
+  1. Reads the rebuild state from Postgres. This is always done, and is cheap: one group row,
+     its job statuses, and one `pg_locks` probe.
+  2. Re-observes the store stamps without embedding whenever the cached status is not `ok` or
+     the rebuild state changed since the last refresh. This lets a process that saw
+     `reindex_required` notice that another process rebuilt the index.
+  3. Retries legacy verification (with embedding) while the status is `unverified`, at most
+     every `INDEX_VERIFY_INTERVAL_SECONDS` (default 60).
+  4. Publishes the aggregated status to the cache.
+- **Inline re-check (FR-011)**: when the status is `unverified`, `require_writable()` also runs
+  `run_check()` once inline before refusing a job.
+- **Serialisation**: an `asyncio.Lock` serialises checks within a process.
+- **Staleness bound**: `/health` and the route gates read only the cache, so they never touch a
+  store or Postgres. That resolves analysis finding I1. Across processes, a view is stale for at
+  most `INDEX_STATUS_REFRESH_SECONDS`. Anything that must not be stale (a job about to write)
+  uses `dispatch_allowed()` instead.
 
 **Rationale**:
 
 - Keeping the decision table in `domain/` makes it unit-testable with plain values, which is
   constitution IV layering.
-- Module-level state matches how the indexer already holds its runtime state. `wiring.py` is dead
-  code (it imports classes that no longer exist) and is not a model to follow.
+- Caching keeps request paths cheap. The authoritative check is paid once per job, which is
+  negligible next to indexing work.
+- `wiring.py` is dead code (it imports classes that no longer exist) and is not a model to
+  follow.
 
-**Alternatives considered**: Storing the status in Postgres. Rejected: it has to reflect the stores
-as seen by this process. Simple mode may run without Postgres.
+**Alternatives considered**:
+
+- A status row in Postgres. Rejected: the stamp check has to describe the stores as they are,
+  and every process can observe them directly. Postgres holds only what is genuinely shared
+  coordination: the rebuild group and the lock.
+- Checking Postgres on every request. Rejected: it puts a database round trip on every search.
 
 ## R5. How endpoints and jobs are gated
 
@@ -170,11 +201,19 @@ as seen by this process. Simple mode may run without Postgres.
    - No route in the indexer uses `Depends` today, and `_authorize_scope` cannot be the gate: it
      returns early when auth is off and also guards write routes. Explicit calls follow the
      existing style and are enforced by a route-table test (next point).
-2. **Execution choke point (defence in depth).** The queue worker
-   (`adapters/queue/postgres_queue.py` `_run_one`) checks `index_guard.writes_allowed()` just
-   before `dispatch_job`. A job reaching it while writes are refused is marked `failed` with the
-   reason, the same path an undispatchable job takes today (`:132-140`). Attempts are not
-   incremented, so the job is not retried. This covers every path the HTTP
+2. **Execution choke point (authoritative, cross-process).** The queue worker
+   (`adapters/queue/postgres_queue.py` `_run_one`) does two things, in this order:
+   1. **Persists the job as `running`**, and waits for that write to commit.
+   2. **Calls `await index_guard.dispatch_allowed(job)`**. This reads the shared state (R13)
+      rather than the cache. It refuses when:
+      - the maintenance lock is held exclusively and the job is not part of the rebuild group
+        currently being prepared;
+      - the latest rebuild was interrupted;
+      - this process's stamp check says `reindex_required` or `unverified`.
+
+   A refused job is marked `failed` with the reason, the same path an undispatchable job takes
+   today (`:132-140`). Attempts are not incremented, so the job is not retried. The
+   running-before-check order is what makes the rebuild safe across processes (R13). This covers every path the HTTP
    layer cannot see: fleet auto-refresh (`_enqueue_source_reindex`), restart recovery, and jobs
    queued before a status change.
 3. **A route-table test.** It asserts that every route in the read set calls
@@ -210,40 +249,58 @@ serve the UI and scripts.
 
 ## R7. Rebuild orchestration
 
-**Decision**: `POST /index/rebuild` (admin only, `authz._require_admin`), `?dry_run=true`.
+**Decision**: `POST /index/rebuild` (admin only, `authz._require_admin`), `?dry_run=true`. It
+requires Postgres; without a pool it returns 503 "rebuild requires the job database".
 
-- **Dry run** returns each source from `source_records` (`id`, `label`, `kind`, `chunk_count`)
-  plus totals, and the blockers that would make the real call fail. It writes nothing.
-- **Preconditions for the real call**, all checked before anything is dropped. If any fails, the
-  call returns 409 listing the blockers:
-  - no job `queued` or `running` (`JobStore.list_by_status`);
-  - no community backfill running (`_state._community_build_state`);
-  - no rebuild group still incomplete.
-- **Order**, chosen so a crash at any step fails loud rather than silently leaving an empty `ok`
-  index:
-  1. Create a job group with `kind="index-rebuild"` and `task_count` preset to the number of
-     sources (not incremented per attach).
-  2. Drop the vector collection, run `init_collection()` (which stamps it, R2), clear the graph
-     index data, then stamp the graph (Neo4j: batched
-     `MATCH (n) WHERE NOT n:TreeweftMeta CALL { WITH n DETACH DELETE n } IN TRANSACTIONS OF
-     10000 ROWS` in an auto-commit session; SQLite: `clear_all()`, which already spares
-     `treeweft_meta`). Then call `retrieval.invalidate_graph_caches()`.
-  3. Set the status to `rebuilding`.
-  4. For each source, build the job exactly as `_enqueue_source_reindex` does (same kind
-     resolution), set `group_id`, persist it and enqueue it.
+- **Dry run** returns each source from `source_records` (`id`, `label`, `kind`, `chunk_count`),
+  the totals, and the blockers that would make the real call fail right now. It writes nothing
+  and takes no lock.
+- **The real call, in order**: each step's effects are committed before the next step starts.
+  - **Step 0. Fast pre-check.** Collect the blockers:
+    - jobs `queued` or `running` in any process (`JobStore.list_by_status`, global);
+    - the maintenance lock held in any mode;
+    - an incomplete rebuild group.
+
+    If there are any, return 409 listing them. Nothing has been written.
+  - **Step 1. Take the maintenance lock exclusively** on a dedicated connection (R13). If that
+    fails, return 409 "another rebuild or community build is in progress". From here on, every
+    process's `dispatch_allowed()` refuses jobs that are not part of this rebuild.
+  - **Step 2. Create the job group**, with `kind="index-rebuild"` and `task_count` preset to the
+    number of sources (not incremented per attach).
+  - **Step 3. Re-check the blockers** (queued and running jobs). A job that another process
+    marked `running` before step 1 is visible now (R13). If there are any, delete the group,
+    release the lock, and return 409. Nothing has been dropped.
+  - **Step 4. Recreate the stores.**
+    - Drop the vector collection, then run `init_collection()`, which stamps it (R2).
+    - Clear the graph index data. On Neo4j this is batched
+      `MATCH (n) WHERE NOT n:TreeweftMeta CALL { WITH n DETACH DELETE n } IN TRANSACTIONS OF
+      10000 ROWS` in an auto-commit session. On SQLite it is `clear_all()`, which already spares
+      `treeweft_meta`.
+    - Stamp the graph, then call `retrieval.invalidate_graph_caches()` in this process. Other
+      processes invalidate theirs when `refresh()` sees the new rebuild group.
+  - **Step 5. Enqueue the jobs.** For each source, build the job exactly as
+    `_enqueue_source_reindex` does (same kind resolution), set `group_id`, persist it and
+    enqueue it. Workers in any process may start these at once: `dispatch_allowed()` lets jobs
+    of the group being prepared through.
+  - **Step 6. Release the lock** by closing the dedicated connection. This process's status is
+    refreshed immediately, and the others follow within `INDEX_STATUS_REFRESH_SECONDS`.
+- **If this process fails after step 2**:
+  - its connection closes and the lock is released;
+  - the group is left with fewer jobs than `task_count`, and eventually none of them is active;
+  - every process then derives `interrupted`, which means `reindex_required` ("a rebuild was
+    interrupted; run it again");
+  - a step that raises inside the handler also returns 503 naming the step.
 - **Graph clear scope**: the whole graph except the meta node, including `Source` nodes. The job
   runners recreate them by `MERGE`. The fleet list reads `source_records` first; the graph
   `Source` fallback is only used when Postgres is down.
-- **Status derivation**, used at startup and on every `/health` read (a cached
-  `summarize_group`, refreshed at most every 5 s):
-  - Take the latest `index-rebuild` group, if any.
-    - If it has fewer jobs than its preset `task_count` and none of them is active, the rebuild
-      was interrupted: status `reindex_required`, reason "a rebuild was interrupted; run it
-      again".
-    - If any of its jobs is queued or running: `rebuilding`, with
-      `rebuild_progress = {"done": done+failed+dead_letter, "total": task_count}`.
-    - Otherwise the rebuild is complete, and the stamp check alone decides.
-  - A group with `task_count == 0` (no sources) is complete immediately.
+- **Rebuild state** is derived in `refresh()` from the latest `index-rebuild` group and the lock
+  probe (data-model "RebuildState"):
+  - lock held exclusively → `preparing`, reported as `rebuilding` with done 0;
+  - some jobs of the group queued or running → `rebuilding`, with
+    `rebuild_progress = {"done": done+failed+dead_letter, "total": task_count}`;
+  - fewer jobs than `task_count`, none active, and the lock not held → `interrupted`;
+  - otherwise `complete`, and the stamp check alone decides. A group with `task_count == 0` is
+    complete immediately.
 - **No `force` flag needed**: the "already indexed, skipping" check exists only in the HTTP
   routes (`indexer_service.py:796, 831, 888`). The runners' resume list comes from the vector
   store (`list_indexed_paths`, `indexer_runners.py:646-654`), which is empty after the drop.
@@ -254,8 +311,11 @@ serve the UI and scripts.
 
 - Enqueueing the jobs before dropping the stores. Rejected: a worker could write into the old
   collection before the drop.
-- A new Postgres table for rebuild state. Rejected: `job_groups.kind` plus a preset `task_count`
-  carry everything, with no migration.
+- A new Postgres table for rebuild state. Rejected: `job_groups.kind`, a preset `task_count` and
+  an advisory lock carry everything, with no migration.
+- A time-based "preparing" grace period instead of a lock. Rejected: any timeout is either too
+  short for a large drop or too long to notice a crash. The lock is released exactly when its
+  holder dies.
 
 ## R8. Logging the rebuild (spec FR-017)
 
@@ -342,6 +402,84 @@ admin operation has one. A candidate follow-up issue.
 - **Milvus**: a uniquely named collection (`itest_stamp_<hex>`). It checks the properties
   round-trip, reading the dimension from the schema, and adoption against real stored vectors
   with a fake embedder returning the stored vector. The collection is dropped afterwards.
-- **Neo4j**: the meta node id is a module constant (`_META_ID = "index"`). The test patches it to
-  `itest-stamp-<hex>` and deletes that node afterwards. It never touches a real deployment's
-  stamp.
+- **Neo4j**:
+  - The meta node id is a module constant (`_META_ID = "index"`). The test patches it to
+    `itest-stamp-<hex>` and deletes that node afterwards, so it never touches a real
+    deployment's stamp.
+  - The clear is tested through an internal `_clear_index_data(scope_prefix: str | None)`. The
+    public `clear_index_data()` calls it with `None`. The test calls it with its run prefix,
+    which adds `AND n.id STARTS WITH $prefix`, so only the test's own nodes are deleted. An
+    unscoped clear is never run against a shared database (constitution II; analysis finding
+    C1).
+
+## R13. Several indexer processes
+
+**Constraint**: several indexer processes sharing one Postgres, one job queue and one set of
+stores is a supported topology (`docs/engineering-notes.md:297`), and this feature MUST work in it
+(maintainer decision, 2026-09-25).
+
+**Decision**
+
+- **Shared truth, per-process cache.**
+  - The stamps live in the stores; the rebuild group and its jobs live in Postgres.
+  - One Postgres **session-level advisory lock**, the *maintenance lock*, is the only
+    cross-process coordination. It is taken with `pg_try_advisory_lock(k1, k2)` using a fixed
+    two-integer key: `k1 = hashtext('treeweft')`, `k2 = hashtext('index-maintenance')`.
+  - Every process caches its view and refreshes it (R4).
+- **Who takes the lock, and in what mode**:
+
+  | Holder | Mode | Held for |
+  |---|---|---|
+  | Rebuild | exclusive | steps 1–6 of R7 |
+  | `POST /build-community` backfill | shared (`pg_try_advisory_lock_shared`) | its whole run |
+  | Stamp writes by `run_check()` (fresh stamp or adoption) | shared, for the write only | the write only |
+
+  - A process that cannot get the shared lock skips its stamp write and reports `preparing`
+    (another process is rebuilding). It never stamps over a rebuild in progress.
+  - Community build refuses with 409 while the lock is held exclusively.
+  - The rebuild refuses with 409 while any shared holder exists.
+- **The lock is held on a dedicated `asyncpg.connect()` connection, not taken from the pool.**
+  The pool's `max_size` is 5 (`adapters/postgresql/connection.py`), too small to pin
+  connections for minutes. When the holder process dies, its connection closes and Postgres
+  releases the lock. That is how a crash turns into `interrupted` with no timeout.
+- **Lock probe**: other processes probe the lock without taking it:
+  `SELECT mode FROM pg_locks WHERE locktype = 'advisory' AND classid = $1 AND objid = $2 AND
+  granted`. Only `refresh()` and `dispatch_allowed()` run this probe; request paths never do.
+- **Why no job can write into stores being dropped** (the interleaving argument for analysis
+  finding U2). Let rebuild process A and worker process B run concurrently. The two orders are:
+  - **A**: take the lock (step 1), then create the group (step 2), then read the running and
+    queued jobs (step 3).
+  - **B**: persist its job as `running`, then read the lock and group state in
+    `dispatch_allowed()`.
+
+  Each side's write commits before it reads. If B's read comes before A's step 1, then B's
+  `running` write committed before A's step 3 read, so A sees it and aborts before dropping
+  anything. Otherwise B's read sees the lock held and refuses the job. Either way, no job
+  outside the rebuild group runs while stores are being dropped.
+- **Stale caches** (at most `INDEX_STATUS_REFRESH_SECONDS`) can therefore only cause a request to
+  be refused or accepted slightly late. They can never cause a write into an inconsistent
+  index:
+  - a job enqueued through a stale cache is refused at dispatch;
+  - a search in a process that has not yet seen the rebuild gets 409 for at most one interval.
+- **Startup in a new process during a rebuild**: the first `run_check()` probes the lock, sees
+  `preparing`, and writes no stamp.
+- **Two processes adopting at the same moment**: both write the same stamp under the shared
+  lock. The writes are idempotent.
+
+**Tests**:
+
+- Unit, with a fake lock and a fake job store that let the test interleave steps:
+  - both orders of the A/B argument above;
+  - community build versus rebuild in each order;
+  - a crash (the lock is released and the group is incomplete) leading to `interrupted`;
+  - a stale cache in B leading to a job refused at dispatch;
+  - B's `refresh()` moving from `reindex_required` to `rebuilding` to `ok` after A's rebuild.
+- Integration (opt-in, real Postgres at `POSTGRES_TEST_URL`, `slow`): two real connections
+  prove that the probe query sees an exclusive advisory lock taken by the other connection, and
+  that closing the holder's connection releases it.
+
+**Alternatives considered**:
+
+- Pinning to one indexer process. Rejected by the maintainer: several processes are required.
+- Row-level locking on a "maintenance" table. Rejected: it needs a migration and still has to
+  handle crashed holders; an advisory lock is released by Postgres itself.

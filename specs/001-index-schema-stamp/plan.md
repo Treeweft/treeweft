@@ -25,6 +25,15 @@ The work splits into five parts:
 5. **Guard future schema changes.** `contracts/index_schema.json` plus an `index-breaking`
    classifier stop schema drift in later releases.
 
+**Several indexer processes are supported** (research R13):
+
+- The stamps and the rebuild job group are shared state.
+- One Postgres advisory maintenance lock coordinates rebuilds, community builds and stamp
+  writes.
+- Each process caches its view and refreshes it every 5 s.
+- Workers mark a job `running` before an authoritative `dispatch_allowed()` check, so no job
+  outside the rebuild can write while the stores are recreated.
+
 The PR bumps `pyproject.toml` to 1.1.0, because the new endpoint is additive and the contract test
 requires the bump.
 
@@ -57,7 +66,10 @@ and simple mode.
 
 **Performance Goals**:
 
-- `/health` answers from memory and never touches stores.
+- `/health` and the route gates answer from the per-process cache and never touch stores or
+  Postgres.
+- Cross-process staleness is at most `INDEX_STATUS_REFRESH_SECONDS` (5 s).
+- `dispatch_allowed()` costs one Postgres probe per job.
 - The startup check costs at most three embeddings, and only for unstamped data.
 - Rebuild-group progress is cached for 5 s.
 
@@ -66,6 +78,8 @@ and simple mode.
 - No adapter imports on the startup path; the shims are used instead.
 - `status` never changes, so health checks don't flap.
 - No job may write before the check completes.
+- Several indexer processes must work (R13). The maintenance lock is held on a dedicated
+  connection because the pool `max_size` is 5.
 - Legacy verification is time-bounded (`INDEX_VERIFY_TIMEOUT_SECONDS`, default 15).
 
 **Scale/Scope**: Fleets of tens to hundreds of sources, and collections of millions of chunks.
@@ -113,14 +127,14 @@ src/treeweft/
 ├── versions.py                         # + INDEX_SCHEMA_VERSION = 1
 ├── domain/index_stamp.py               # NEW: IndexStamp, StoreObservation, decide_store, aggregate, reason text
 ├── application/
-│   ├── index_guard.py                  # NEW: status holder, run_check, legacy verification, retry loop,
+│   ├── index_guard.py                  # NEW: cached status, run_check, refresh loop, legacy verification,
 │   │                                   #      require_searchable/require_writable, writes_allowed,
 │   │                                   #      rebuild (dry run + real), rebuild-status derivation
-│   ├── lifecycle.py                    # run check after ensure_schema + embedding proxy, before JobStore/queue;
-│   │                                   #   start/stop retry loop
+│   ├── lifecycle.py                    # ensure_schema → embedding proxy → JobStore/JobGroupStore init → run check
+│   │                                   #   → queue start → recovery; start/stop refresh loop
 │   ├── indexer_service.py              # /health fields; guard calls on read + write routes; POST /index/rebuild
 │   ├── routes_webhook.py               # require_writable on job-enqueuing routes
-│   └── (adapters/queue/postgres_queue.py) # _run_one gate before dispatch_job → job failed, not retried
+│   └── (adapters/queue/postgres_queue.py) # _run_one: persist running → dispatch_allowed() → else failed, not retried
 ├── retriever.py                        # export observe_index, write_stamp, sample_chunks, drop_index
 ├── graph_store.py                      # _EXPORTED += observe_index, read_stamp, write_stamp, clear_index_data
 ├── adapters/
@@ -130,7 +144,10 @@ src/treeweft/
 │   ├── chromadb/vector_store.py        # stamp via collection metadata (merge)
 │   ├── neo4j/graph_store.py            # TreeweftMeta node + constraint; batched clear sparing meta;
 │   │                                   #   clear_all spares meta
-│   └── sqlite/graph_store.py           # treeweft_meta table; stamp read/write
+│   ├── sqlite/graph_store.py           # treeweft_meta table; stamp read/write
+│   └── postgresql/
+│       ├── maintenance_lock.py         # NEW: advisory lock on a dedicated connection; pg_locks probe
+│       └── job_group_store.py          # + latest_by_kind, delete
 └── infrastructure/contracts.py         # index_schema_surface(), diff_index, "index-breaking", index snapshot I/O
 
 scripts/update_contracts.py             # + index_schema snapshot
@@ -160,9 +177,11 @@ tests/unit/
 ├── test_contracts.py                   # + index-breaking cases, index snapshot check
 ├── test_mcp_compat.py                  # + reindex 409 passthrough
 └── test_route_table.py                 # + /index/rebuild
+tests/unit/test_index_multiprocess.py   # NEW: interleavings (R13) with a fake lock + job store
 tests/integration/
 ├── test_index_stamp_milvus.py          # NEW (slow, MILVUS_TEST_URI)
-└── test_index_stamp_neo4j.py           # NEW (slow, NEO4J_TEST_URI)
+├── test_index_stamp_neo4j.py           # NEW (slow, NEO4J_TEST_URI; scoped clear)
+└── test_maintenance_lock_pg.py         # NEW (slow, POSTGRES_TEST_URL; two real connections)
 ```
 
 **Structure Decision**: The existing single-repository layout is used as is: DDD layers under
@@ -184,13 +203,15 @@ The order follows the spec's story priorities.
    - the lifecycle ordering;
    - `/health` fields;
    - the read and write gates with the route-table test;
-   - the dispatch gate;
-   - the retry loop;
+   - the dispatch gate (persist `running`, then `dispatch_allowed()`);
+   - the per-process refresh loop and the verification retry;
    - the MCP 409 test.
 3. **US3 (P2)**:
    - the rebuild dry run;
    - the real rebuild;
-   - status derivation, including an interrupted rebuild.
+   - the maintenance lock, the community-build shared lock, and the cross-process
+     interleaving tests (R13);
+   - status derivation in `refresh()`, including `preparing` and an interrupted rebuild.
 4. **US4 (P3)**:
    - the schema-builder refactors;
    - `index_schema_surface`, the classifier and the baseline snapshot;
@@ -209,4 +230,5 @@ No constitution violations. Two scope notes are recorded for reviewers:
 | Item | Why | Simpler alternative rejected because |
 |---|---|---|
 | ChromaDB stamped although ADR-004 §3 omits it | `VECTOR_STORE=chromadb` is selectable; FR-002 covers every store | Leaving it unstamped would let Chroma deployments search a mismatched index silently |
+| Postgres advisory maintenance lock plus a per-process refresh loop | Several indexer processes are required (maintainer decision). In-memory state alone cannot coordinate a rebuild across processes | Pinning to one process was rejected. A lock row in a table needs a migration and cannot detect a dead holder; an advisory lock is released when its holder's connection dies |
 | Two-layer gate (route and dispatch) | Fleet auto-refresh, restart recovery and pre-queued jobs bypass the routes | A route-only gate misses those paths; a dispatch-only gate would return 202 and then fail the job, which is worse feedback |

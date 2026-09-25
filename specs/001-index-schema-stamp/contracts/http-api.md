@@ -21,8 +21,9 @@ change (research R10).
 | `rebuild_progress` | `{"done": int, "total": int}` | `index_status` is `rebuilding` |
 
 - `status` stays `"ok"` in every index state.
-- The response is served from in-memory state and never blocks on a store or on the embedding
-  service.
+- The response is served from this process's cached view and never blocks on a store, on
+  Postgres or on the embedding service. With several indexer processes, each answers from its own
+  view, which lags the shared state by at most `INDEX_STATUS_REFRESH_SECONDS` (default 5).
 
 ## Refusals while the index is not usable
 
@@ -30,8 +31,8 @@ These routes return **409**, with the body in [errors.md](errors.md):
 
 | State | Refused routes |
 |---|---|
-| `reindex_required` | `POST /search`, `POST /hydrate-chunks`, `GET /find-definition`, `GET /find-callers`, `GET /find-references`, `POST /graph-explore` |
-| `reindex_required`, and `unverified` after one inline re-check | `POST /index-file`, `POST /index-directory`, `POST /index-repo`, `POST /index-graph`, `POST /jobs/{id}/retry`, `POST /build-community`, and the webhook routes that enqueue jobs |
+| `reindex_required`, or `rebuilding` while stores are being recreated (preparing) | `POST /search`, `POST /hydrate-chunks`, `GET /find-definition`, `GET /find-callers`, `GET /find-references`, `POST /graph-explore` |
+| `reindex_required`, preparing, and `unverified` after one inline re-check | `POST /index-file`, `POST /index-directory`, `POST /index-repo`, `POST /index-graph`, `POST /jobs/{id}/retry`, `POST /build-community`, and the webhook routes that enqueue jobs |
 
 - Unchanged in every state: `/health`, auth routes, `/sources`, `/fleet`, `/jobs`, `/job-groups`,
   admin routes, the UI.
@@ -55,6 +56,8 @@ Query: `dry_run` (bool, default `false`).
 `blockers` lists what would make the real call fail, such as `"2 index jobs queued or running"`,
 `"community build running"` or `"rebuild group <id> in progress"`. Nothing is written.
 
+The real call takes the cross-process maintenance lock and follows research R7 steps 0–6.
+
 **Real call → 202**
 
 ```json
@@ -68,11 +71,13 @@ Query: `dry_run` (bool, default `false`).
 |---|---|
 | 401 / 403 | not authenticated / not admin (`authz._require_admin`) |
 | 409 | any blocker present. Body: `{"detail": "Rebuild refused: <blockers>", "blockers": [...]}`. Nothing dropped. |
-| 503 | a store could not be dropped or recreated. Body names the store and step, and `index_status` becomes `reindex_required` with reason "rebuild failed at <step>". |
+| 503 | no Postgres pool ("rebuild requires the job database"), or a store could not be dropped or recreated. Body names the store and step, and `index_status` becomes `reindex_required` with reason "rebuild failed at <step>". |
 
 Progress is visible in `GET /health` (`rebuild_progress`) and `GET /job-groups/{group_id}`.
 
 ## Job failure at dispatch
 
-A job that reaches a worker while writes are refused ends with status `failed` and
-`error = "<detail string from errors.md>"`. It is not retried.
+The worker marks the job `running`, then asks `dispatch_allowed()`. That call reads the shared
+lock and group state, not the cache. A refused job ends with status `failed` and
+`error = "<detail string from errors.md>"`, and is not retried. This applies in every indexer
+process.

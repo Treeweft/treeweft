@@ -61,31 +61,55 @@ Reason format for one mismatch (FR-005):
 `vector store (milvus): embedding_model is BAAI/bge-m3, configured Qwen/Qwen3-Embedding-0.6B`.
 Several reasons are joined with `"; "`.
 
-## IndexStatus (process-wide)
+## RebuildState (shared, derived from Postgres)
 
-`aggregate(checks, rebuild) -> IndexStatus`.
+Derived by `refresh()` in every process from the latest `index-rebuild` job group, its jobs and
+the maintenance-lock probe (research R7, R13).
+
+| Value | Condition | Reported as |
+|---|---|---|
+| `none` | no `index-rebuild` group ever | nothing |
+| `preparing` | the maintenance lock is held **exclusively** | `index_status: rebuilding`, `rebuild_progress {done: 0, total: task_count}` (0 if no group yet) |
+| `rebuilding` | the lock is not held exclusively, and some of the latest group's jobs are `queued`/`running` | `rebuilding` + progress |
+| `interrupted` | the lock is not held exclusively, the latest group has fewer jobs than `task_count`, and none is active | `reindex_required`, reason "a rebuild was interrupted; run it again" |
+| `complete` | all `task_count` jobs are terminal (`done`, `failed`, `dead_letter`), or `task_count == 0` | nothing (the stamp check decides) |
+
+## IndexStatus (per-process cached view)
+
+`aggregate(checks, rebuild_state) -> IndexStatus`, published by `refresh()` and read by
+`/health` and the route gates.
 
 | Field | Type | Present when |
 |---|---|---|
 | `state` | `ok`, `unverified`, `reindex_required` or `rebuilding` | always |
+| `preparing` | bool (internal, not exposed) | `rebuild_state == preparing` |
 | `reason` | str | `reindex_required` or `unverified` |
 | `rebuild_progress` | `{"done": int, "total": int}` | `rebuilding` |
-| `checked_at` | datetime | always (logged, not exposed) |
+| `refreshed_at` | datetime | always (logged, not exposed) |
 
-Precedence: `reindex_required` > `unverified` > `rebuilding` > `ok`. An interrupted rebuild (R7)
-forces `reindex_required`.
+Precedence:
 
-### State transitions
+1. `preparing` (reported as `rebuilding`) comes first: the stores are being recreated, so no
+   stamp check is meaningful.
+2. Then `interrupted`, reported as `reindex_required`.
+3. Then the store checks, worst first: `reindex_required` > `unverified`.
+4. Then `rebuilding`.
+5. Then `ok`.
+
+Staleness: a process's view lags the shared truth by at most `INDEX_STATUS_REFRESH_SECONDS`
+(default 5). The authoritative `dispatch_allowed()` never uses the cache for lock and group state.
+
+### State transitions (reported `index_status`)
 
 ```text
                 startup check
-  (none) ──────────────────────────► ok | unverified | reindex_required
+  (none) ──────────────────────────► ok | unverified | reindex_required | rebuilding (another process is preparing)
   unverified ──retry passes────────► ok
   unverified ──retry fails a check─► reindex_required
-  reindex_required ──POST /index/rebuild──► rebuilding
-  ok ──POST /index/rebuild─────────► rebuilding
+  reindex_required | ok | unverified ──POST /index/rebuild (any process)──► rebuilding (preparing, then jobs running)
   rebuilding ──group complete──────► ok            (failed sources listed in the group)
-  rebuilding ──restart, group incomplete, jobs missing──► reindex_required ("rebuild interrupted")
+  rebuilding ──holder died before all jobs were enqueued──► reindex_required ("rebuild interrupted")
+  reindex_required ──another process rebuilt; next refresh re-observes stamps──► rebuilding / ok
   any ──restart with changed config─► (startup check decides)
 ```
 
@@ -93,10 +117,11 @@ Allowed operations per state:
 
 | State | Search/read endpoints | Index jobs and community build | Rebuild |
 |---|---|---|---|
-| ok | yes | yes | yes (if no active jobs) |
+| ok | yes | yes | yes (if no blockers) |
 | unverified | yes | no: inline re-check first, then 409 if still unverified | yes |
 | reindex_required | 409 | 409 / job fails at dispatch | yes |
-| rebuilding | yes (partial results) | yes | 409 (one already running) |
+| rebuilding (preparing) | 409 ("stores are being recreated; retry shortly") | 409 / job fails at dispatch, except the rebuild group's own jobs | 409 (one already running) |
+| rebuilding (jobs running) | yes (partial results) | yes | 409 (one already running) |
 
 ## Rebuild job group
 
@@ -110,7 +135,21 @@ This reuses `job_groups` (migration 020). No new table.
 | `created_by` | admin user id |
 
 Its jobs are ordinary index jobs with `group_id` set, built the same way as
-`_enqueue_source_reindex`. `done` counts jobs in `done`, `failed` or `dead_letter`.
+`_enqueue_source_reindex`. `done` counts jobs in `done`, `failed` or `dead_letter`. If the
+blocker re-check (research R7 step 3) aborts the rebuild, the group is deleted
+(`JobGroupStore.delete`) before the lock is released, so an aborted rebuild never reads as
+`interrupted`.
+
+## Maintenance lock (shared)
+
+A Postgres session-level advisory lock with the two-integer key `(hashtext('treeweft'),
+hashtext('index-maintenance'))`, held on a dedicated connection (research R13).
+
+| Holder | Mode |
+|---|---|
+| Rebuild (steps 1–6) | exclusive |
+| Community build (whole run) | shared |
+| Stamp write by `run_check()` | shared (for the write only) |
 
 ## Graph meta structures (new)
 

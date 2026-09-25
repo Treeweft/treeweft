@@ -24,8 +24,12 @@ It must pass, including these new tests:
   - the background retry.
 - `test_index_gate_routes.py`: every read or write route calls its guard, and any new index
   route must be classified.
-- `test_index_dispatch_gate.py`: a job reaching `dispatch_job` while refused ends `failed` and is
-  not retried.
+- `test_index_dispatch_gate.py`: the worker persists `running` before `dispatch_allowed()`; a
+  refused job ends `failed` and is not retried.
+- `test_index_multiprocess.py`: the research R13 interleavings between two simulated processes
+  (a rebuild against a worker in both orders, a crash leading to `interrupted`, a stale cache,
+  convergence, and a community build against a rebuild).
+- `test_maintenance_lock.py`: a dedicated connection, the lock modes, and the probe.
 - `test_index_rebuild.py`:
   - the dry run lists sources and chunk counts and writes nothing;
   - the real rebuild drops, stamps, and enqueues one group with a preset `task_count`;
@@ -52,11 +56,18 @@ Regression proof (constitution II): with the gate calls removed, `test_index_gua
 
 ```bash
 MILVUS_TEST_URI=http://localhost:19530 NEO4J_TEST_URI=bolt://localhost:7687 \
-  env -u PYTHONPATH python -m pytest tests/integration -m slow -k index_stamp -q
+POSTGRES_TEST_URL=postgresql://…@10.16.1.226:5432/<test db> \
+  env -u PYTHONPATH python -m pytest tests/integration -m slow -k "index_stamp or maintenance_lock" -q
 ```
 
-These check the Milvus property round-trip and dimension read, and the Neo4j meta node
-round-trip, all under unique names that are cleaned up afterwards.
+These check:
+
+- the Milvus property round-trip and the dimension read;
+- the Neo4j meta-node round-trip, with a **prefix-scoped** clear that never runs unscoped;
+- the Postgres advisory maintenance lock across two real connections, including release when
+  the holder's connection closes.
+
+Everything uses unique names that are cleaned up afterwards.
 
 ## 3. UI
 
@@ -90,3 +101,18 @@ Before starting, confirm the served embedding model and the reranker are the int
 
 Simple mode (optional): repeat steps 1–3 with `TREEWEFT_PROFILE=simple`, changing
 `EMBEDDING_MODEL` in the environment instead of editing the store.
+
+## 5. Two indexer processes (SC-008)
+
+1. Start a second indexer on another port against the same `.env`:
+   `uvicorn treeweft.indexer_service:app --port 8002`. Both processes report `index_status: ok`.
+2. Queue a large `/index-repo` job through :8002. Then `POST /index/rebuild` on :8001.
+   Expected: 409 listing the running job. Nothing is dropped, and the collection row count is
+   unchanged.
+3. With nothing running, `POST /index/rebuild` on :8001. While it prepares, `GET :8002/health`
+   shows `rebuilding` within 5 s. A `/search` on :8002 returns either the `preparing` 409 or
+   partial results, never an error from a missing collection.
+4. Optional: `kill -9` a process during a rebuild's preparation (a scripted test build with a pause
+   before step 5). Within 5 s, the surviving process shows `reindex_required` with "a rebuild
+   was interrupted".
+5. When the group completes, both processes report `ok` within 5 s.

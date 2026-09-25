@@ -16,6 +16,9 @@ Rules:
 - `unverified` variant (index jobs only): `detail` begins
   `"Index unverified: <reason>. Index jobs are refused until the embedding model is verified;
   this retries automatically."`, with `index_status: "unverified"`.
+- `preparing` variant (a rebuild is recreating the stores in some indexer process): read routes
+  and index jobs get `detail` `"Index rebuild in progress: stores are being recreated. Retry
+  shortly; progress is in GET /health."`, with `index_status: "rebuilding"`.
 - What an agent sees through `treeweft-mcp`:
   `{"error": "Indexer returned HTTP 409: Index requires rebuild: …"}`. It never sees
   "Indexer unreachable".
