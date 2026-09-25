@@ -213,7 +213,7 @@ issue.
          `index-rebuild` group and that group is not `interrupted`, allow it. The rebuilder
          stamped the stores before enqueueing it (R7 steps 4–5), so no process's cached status
          can be a reason to refuse it.
-      2. **Refuse** if the maintenance lock is held exclusively (another job's rebuild is
+      2. **Refuse** if the maintenance lock is held exclusively (a rebuild is
          preparing).
       3. **Refuse** if the latest rebuild was `interrupted`.
       4. If this process's **cached** status is `reindex_required` or `unverified`, do not trust
