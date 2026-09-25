@@ -25,18 +25,28 @@ see the Quick Start), so the image matters mostly for server deployments.
 
 ## Versioning
 
-Treeweft uses CalVer: a release is named for the date it was cut, in the
-form `YYYY.M.D`, for example `2026.9.22`.
+Treeweft has two version lines (ADR-004):
 
-- No zero padding (`2026.9.2`, never `2026.09.02`). PEP 440 normalises
-  `09` to `9`, so padding would make the wheel version and the git tag
-  disagree.
-- A second release on the same day appends a counter: `2026.9.22.1`,
-  `2026.9.22.2`.
-- The git tag is the version with a `v` prefix: `v2026.9.22`.
-- The tag must equal `version` in `pyproject.toml`. The publish workflow's
-  `check-tag` job refuses a tag that is not CalVer-shaped or that does not
-  match, before any image is built.
+- **Product releases are CalVer.** Published images are named for the date the
+  release was cut: `YYYY.M.D` without zero padding (`2026.10.1`), with a
+  counter for a second release the same day (`2026.10.1.1`). The rolling
+  month tag (`2026.10`) and `latest` point at the newest release.
+- **The source is SemVer.** `pyproject.toml` carries `MAJOR.MINOR.PATCH`
+  (from `1.0.0`). MAJOR means a breaking change to the indexer HTTP API, the
+  MCP tools or the index schema; MINOR means additions; PATCH means fixes.
+  `tests/unit/test_contracts.py` enforces the bump against the snapshots in
+  `contracts/`.
+- **Every release commit carries both tags:** `v<SemVer>` first, then
+  `v<CalVer>`, which triggers the publish workflow. The workflow's `check-tag`
+  job (`scripts/check_release_tags.py`) refuses a malformed CalVer tag or a
+  missing SemVer tag.
+- **The month tag is a stability pin.** A release that bumps the SemVer MAJOR
+  is only ever the first release of its month, and `check-tag` refuses one
+  mid-month. Pinning `TREEWEFT_IMAGE_TAG=2026.10` therefore never pulls in a
+  breaking change. Releases from before 1.0.0 (CalVer source versions) are
+  outside this rule.
+- `GET /health` reports both: `"version"` (SemVer) and `"release"` (CalVer,
+  `null` when running from a source checkout).
 
 ## Tags
 
@@ -104,20 +114,19 @@ gh variable set DOCKERHUB_NAMESPACE --repo treeweft/treeweft --body treeweft
 
 Cutting a release:
 
-1. Set `version` in `pyproject.toml` to today's date in CalVer form (see
-   "Versioning" above) and merge to `main`. The unit suite checks the shape.
-2. Tag and push the tag — the same string with a `v` prefix:
-   ```bash
-   git tag v2026.9.22 && git push origin v2026.9.22
-   ```
-3. Watch the "Docker images" workflow. `check-tag` runs first and fails the
-   run if the tag and pyproject disagree; then four build jobs run in
-   parallel, one per image. The indexer and reranker jobs take the longest
-   (the reranker pulls a ~6 GB CUDA base).
-4. Verify on Docker Hub, or from any machine:
-   ```bash
-   docker pull treeweft/ui:2026.9.22 && docker pull treeweft/indexer:2026.9.22
-   ```
+1. **Release PR.** Set `version` in `pyproject.toml` to the SemVer the release
+   needs; `tests/unit/test_contracts.py` says which. Run `uv lock` and
+   `python scripts/update_contracts.py` to record the new contract snapshots.
+   Move the `## Unreleased` entries in `CHANGELOG.md` under a new
+   `## <SemVer> — <CalVer>` heading. A release with a MAJOR bump must be the
+   first release of its month.
+2. **Merge**, then tag the merge commit twice, SemVer first:
+
+       git tag v1.2.0 && git push origin v1.2.0
+       git tag v2026.10.1 && git push origin v2026.10.1
+
+3. Watch the "Docker images" workflow. `check-tag` runs first; then four build
+   jobs push `2026.10.1`, `2026.10` and `latest`.
 
 A pre-release smoke build without touching `latest`: run the workflow manually
 from the Actions tab (or `gh workflow run docker-publish.yml --ref <branch>`).
