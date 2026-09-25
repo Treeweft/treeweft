@@ -240,9 +240,21 @@ async def run_check() -> IndexStatus:
 
 async def refresh() -> IndexStatus:
     """The periodic refresh (research R4): always re-reads the rebuild
-    state (cheap); re-observes the stamps only while not `ok`, or while
-    `unverified` and the retry interval has elapsed (then with
-    verification/embedding)."""
+    state (cheap); re-observes the stamps only while not `ok`.
+
+    `unverified` and `reindex_required` are both re-checked with full
+    (embedding) verification once the retry interval has elapsed — never
+    with the cheap, no-embedding path. A store whose current state came
+    from a legacy-verification failure (no stamp, has data) cannot be
+    re-derived cheaply: `decide_store` reports `unverified` for a
+    not-yet-run check, so a cheap re-observation would silently soften a
+    real, already-confirmed failure into "not yet verified" on the very
+    next tick, before the retry interval ever elapses. A stamp-mismatch
+    `reindex_required` costs nothing extra here either way: decide_store
+    never calls the embedder once a stamp is present, so this is not
+    wasted verification for that case (bug found live in T058: the pre-fix
+    version misreported a confirmed Milvus "no verifiable chunks" failure
+    as merely `unverified` within one refresh tick)."""
     global _status, _refreshed_at, _last_verify_attempt
     async with _lock:
         rebuild_state = await _rebuild_state_now()
@@ -250,7 +262,7 @@ async def refresh() -> IndexStatus:
             return _status
 
         do_verify = False
-        if _status.state == "unverified":
+        if _status.state in ("unverified", "reindex_required"):
             now = asyncio.get_event_loop().time()
             if now - _last_verify_attempt >= index_verify_interval_seconds():
                 do_verify = True
