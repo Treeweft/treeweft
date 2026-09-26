@@ -22,6 +22,9 @@ Milvus, Postgres or a model server. Postgres is faked with the `_FakePool`/`_Fak
 - **[P]**: can run in parallel (different files, no dependency on an incomplete task)
 - **[Story]**: US1–US4 from spec.md
 
+**FR-019** (nothing outside the vector store keeps vector-store row IDs) has no task: research R10
+settled it during planning, with evidence. Re-check it only if a task adds a consumer of row IDs.
+
 ---
 
 ## Phase 1: Setup
@@ -46,7 +49,8 @@ Milvus, Postgres or a model server. Postgres is faked with the `_FakePool`/`_Fak
 
   Every statement uses `IF NOT EXISTS` (the runner is unlocked; issue #28). No pin rows are
   inserted. The header comment supersedes 005's "bump `PROMPT_VERSION`" note; 005 is not edited.
-  Test in `tests/unit/test_migration_021.py`: the file is the highest-numbered migration, every
+  Test in `tests/unit/test_migration_021.py`: `021_prompt_versions.sql` exists, the migration
+  numbers have no gaps, every
   `CREATE` and `ADD COLUMN` is `IF NOT EXISTS`, and it contains no `INSERT INTO prompt_pins`.
 
 ---
@@ -140,7 +144,9 @@ summary and HyDE paths. Every story needs them.
     monkeypatched short interval.
   - A reload that changes the HyDE pin clears `llm_adapter._HYDE_CACHE`; one that leaves it
     unchanged does not.
-  - With `DATABASE_URL` unset, `effective()` returns `BASELINE`, and `load_and_seed()` is a no-op.
+  - With `DATABASE_URL` unset, `effective()` returns `BASELINE`, and `load_and_seed()` writes
+    nothing and logs one warning: "prompt pins unavailable without DATABASE_URL; using baseline
+    chunk_summary v3, hyde v1" (constitution V: an observable fallback).
 - [ ] T010 Implement `src/treeweft/application/prompt_pins.py`:
   - the module-level `PinView`, swapped atomically, and `effective(op, source_id=None)`;
   - `load_and_seed()`, per research R9;
@@ -198,6 +204,8 @@ deployment is seeded to v4.
   - A job with a file error does not call it. A job with **one transient summary error**
     (strategy `"error"`) does not call it either, and `job["summary_errors"] == 1`.
   - With `USE_SUMMARY_VECTOR` off, or `summary_vectors_supported()` False, it records `None`.
+  - `treeweft.retriever.summary_vectors_supported` exists for milvus, lancedb and chromadb
+    (added to `test_store_shim_exports.py`'s `names` here; T021 adds the other four).
   - A `graph` job and an `incremental` job never call either method.
   - The target version is resolved once at job start into `job["payload"]["summary_version"]`.
     A resumed job (`skip_count > 0`) reuses it even after the pin moves, and records that version.
@@ -270,7 +278,7 @@ dry run and then for real:
   First try a partial-column `merge_insert` (`id`, `summary_vector`). If lancedb 0.33.0 rejects
   it, the test pins the full-row fallback (research R7).
 - [ ] T021 [P] [US2] Extend `tests/unit/test_store_shim_exports.py` `names` with
-  `summary_vectors_supported`, `snapshot_source_row_ids`, `fetch_rows`, `write_summary_vectors`
+  `snapshot_source_row_ids`, `fetch_rows`, `write_summary_vectors`
   and `count_source_rows` for milvus, lancedb and chromadb. Add Milvus unit tests to
   `tests/unit/test_milvus_summary_rewrite.py` with a mocked `MilvusClient`:
   - the snapshot uses `query_iterator` with an `_escape_literal`-escaped filter (a `source_id`
@@ -309,6 +317,11 @@ dry run and then for real:
   - Startup recovery re-enqueues an interrupted `resummarize`, even when its source has a done
     job. Other kinds keep the "superseded" behaviour.
   - While `reindex_required`, the worker's `dispatch_allowed` refuses a queued `resummarize`.
+  - If `enqueue_if_stale` raises, the finished job keeps its status and the error is logged
+    (constitution V).
+  - Two processes racing to enqueue for one source (the hook in both, or a hook against a pin
+    change): the second insert's unique violation on `jobs_active_source_uniq` is caught and
+    reported as deferred or already queued, never a 500. Exactly one job exists afterwards.
 - [ ] T024 [P] [US2] Write `tests/unit/test_prompt_routes.py` for `GET /prompt-versions` and
   `PUT /prompt-pins/{operation}` ([contracts/http-api.md](contracts/http-api.md)):
   - Non-admins get 401 or 403 on both.
@@ -322,6 +335,9 @@ dry run and then for real:
     - an overridden source (skipped);
     - an already-current source (excluded);
     - a source with an active job (`deferred`);
+    - a source whose refresh toward v4 ended with errors (`summary_refresh_target = 4`,
+      `summary_prompt_version = 3`) while the pin moves back to 3: it is listed in `enqueued`
+      (spec US2 scenario 6, FR-015);
     - the index `reindex_required` (the pin is stored, and every source is in `not_enqueued`
       with the reason).
 
@@ -329,6 +345,9 @@ dry run and then for real:
     job IDs match the sources the dry run listed (SC-004).
   - Two or more jobs share one `prompt-refresh` group.
   - `updated_by` is the caller.
+  - A real pin change logs one line with the caller, the operation and scope, the old and new
+    version, and the enqueued, deferred and not-enqueued source IDs. A dry run logs that it was a
+    dry run (FR-026).
   - A `hyde` pin change enqueues nothing and returns `effect`, and the HyDE cache is cleared in
     the calling process.
   - `GET /sources` includes `summary_prompt_version`, `summary_refresh_target` and
@@ -359,9 +378,13 @@ dry run and then for real:
     enqueues through `_state._job_queue`;
   - `enqueue_if_stale(source_id)`.
 
+  An enqueue that loses a race on `jobs_active_source_uniq` is caught and reported as deferred
+  (or already queued), never as a 500. The same applies in `enqueue_if_stale`.
+
   Extend `application/prompt_pins.py` with `set_pin(op, "deployment", version, *, updated_by,
   dry_run)`. It validates, computes the plan, and (if not a dry run) writes, `NOTIFY`s, swaps its
-  own view immediately, and enqueues. It returns the contract's result shape.
+  own view immediately, and enqueues. It returns the contract's result shape, and logs the
+  change per FR-026.
 - [ ] T029 [US2] In `src/treeweft/application/indexer_runners.py`:
   - add `kind == "resummarize"` to `dispatch_job`;
   - implement `_run_resummarize_job(job)` per research R10 steps 0–5, using T016's
@@ -379,7 +402,7 @@ dry run and then for real:
   without Postgres. Register the router next to `indexer_service.py:160`. Add the three summary
   fields to `GET /sources`.
 - [ ] T032 [US2] Regression proofs, each shown failing and then restored, and recorded in the PR:
-  - remove the `summary_refresh_target` term from `is_stale`: T005 and T022's pin-back scenario
+  - remove the `summary_refresh_target` term from `is_stale`: T005 and T024's pin-back case
     (spec US2 scenario 6) fail (FR-015);
   - let the dry-run branch call `store.upsert`: T024 fails.
 
@@ -419,6 +442,8 @@ deployment pin, with no job when it is already there.
       version.
   - `DELETE /sources/{id}` deletes the source's override row.
   - All of these routes are admin-only.
+  - Override changes and manual refreshes log the caller, the source, the old and new version,
+    and the outcome (FR-026).
 
 ### Implementation for User Story 3
 
@@ -428,7 +453,7 @@ deployment pin, with no job when it is already there.
   `PUT /prompt-pins/hyde/sources/{source_id}` (always 400) to `routes_prompts.py`.
 - [ ] T035 [US3] Add `POST /sources/{source_id}/resummarize` to `routes_prompts.py`. It returns
   the guard's 409 as-is (`await index_guard.require_writable()`), then applies T028's plan for a
-  single source.
+  single source, and logs the request per FR-026.
 - [ ] T036 [US3] In `remove_source` (`src/treeweft/application/indexer_service.py:1247-1293`),
   call `PromptPinStore.delete_overrides_for_source(source_id)` next to `_source_repo.delete`.
   **Not** in the pre-reindex `graph_store.delete_source` path (`indexer_runners.py:766`).

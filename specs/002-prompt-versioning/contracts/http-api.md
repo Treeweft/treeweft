@@ -125,5 +125,7 @@ always runs for it.
 
 - `GET /sources`: each source gains `summary_prompt_version`, `summary_refresh_target` and
   `summary_stale`.
+  `summary_stale` is the same value as `stale` in `GET /prompt-versions`. The `summary_` prefix
+  keeps it unambiguous among the other `/sources` fields.
 - `GET /jobs` and `GET /jobs/{id}`: a new `kind` value, `resummarize`. The job-group kind
   `prompt-refresh` is new too. Both kind fields are free text, so this is not a contract change.

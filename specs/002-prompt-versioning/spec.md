@@ -99,7 +99,8 @@ at v4.
    refresh job, and the response lists those jobs.
 3. **Given** a refresh job, **When** it runs, **Then** every chunk of the source gets a summary
    and a summary vector at the target version (cache hits reused, rejection markers respected), a
-   chunk with no summary gets the same zero vector it gets at index time, and code vectors,
+   chunk with no summary gets the store's own no-summary value as at index time (a zero vector
+   on Milvus, NULL on LanceDB), and code vectors,
    full-text search data, metadata and the chunk count are unchanged.
 4. **Given** a refresh in which every chunk got a summary or a rejection marker, **When** it
    completes, **Then** the source's recorded version becomes the target and it is no longer stale.
@@ -248,7 +249,7 @@ any real request, and that cancelling sends nothing.
   version for a source MUST be its override if one is set, otherwise the deployment pin.
 - **FR-006**: Resolution MUST come from an in-memory view of the pins, loaded at startup and
   refreshed when any process changes a pin. It MUST NOT query the database per chunk or per query.
-  Every indexer process MUST see a pin change within a few seconds.
+  Every indexer process MUST see a pin change within 5 seconds (SC-008).
 - **FR-007**: Summary-cache entries MUST be written and read under the version resolved for the
   call, so several versions' entries coexist. The cache's key and the existing per-request
   summary-version read override MUST keep working unchanged.
@@ -264,7 +265,9 @@ any real request, and that cancelling sends nothing.
   built with. Existing sources MUST be recorded as v3 when the migration runs. The recorded version
   MUST be set when a **full** index job of the source completes cleanly (no failed files and no
   transient summary failures), to the version that job used, and when a refresh
-  completes cleanly (FR-014). An **incremental** index job MUST NOT change it, because it
+  completes cleanly (FR-014). A clean full index job with summary vectors off, or on a vector
+  store without them, MUST record the version as unknown, because the source then holds no
+  summary vectors. An **incremental** index job MUST NOT change it, because it
   re-summarizes only changed files. *(Amends ADR-003 §2, which also set it on incremental
   completion.)*
 - **FR-011**: A source MUST be reported stale when its recorded version is known and differs from
@@ -288,7 +291,8 @@ any real request, and that cancelling sends nothing.
     path (cache hits and rejection markers reused);
   - embed the summaries through the existing embedding path;
   - write each chunk back with its new summary vector and every other stored field unchanged;
-  - give a chunk with no summary the zero vector it gets at index time;
+  - give a chunk with no summary the store's own no-summary value, as at index time (a zero
+    vector on Milvus, NULL on LanceDB);
   - report progress as chunks processed out of total through the existing job fields;
   - advance the recorded version to the target only when every chunk got a summary or a
     rejection marker. Otherwise it ends as done with errors and leaves the version unchanged;
@@ -419,5 +423,8 @@ any real request, and that cancelling sends nothing.
   registry. `/speckit-plan` settles the fallback if a notification is missed.
 - The refresh reuses the existing embed batch size, embedding proxy and summary path. It has no
   per-row progress marker; a retry redoes the source, cheaply because of the summary cache.
+- Without Postgres (`DATABASE_URL` unset) there are no pins: the baseline versions
+  (chunk-summary v3, HyDE v1) are used, so an upgrade changes no prompt. Startup logs a warning
+  saying so, and the pin endpoints report that they need Postgres.
 - The next Postgres migration number is 021, as the ADR assumes.
 - The source version is 1.1.0 and unreleased, so this feature keeps it (see FR-031).
