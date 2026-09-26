@@ -37,6 +37,12 @@ def _row_to_record(row: asyncpg.Record) -> SourceRecord:
     graph_indexed_at = row["graph_indexed_at"] if "graph_indexed_at" in keys else None
     if isinstance(graph_indexed_at, datetime):
         graph_indexed_at = graph_indexed_at.replace(tzinfo=timezone.utc)
+    summary_prompt_version = (
+        row["summary_prompt_version"] if "summary_prompt_version" in keys else None
+    )
+    summary_refresh_target = (
+        row["summary_refresh_target"] if "summary_refresh_target" in keys else None
+    )
     return SourceRecord(
         id=row["id"],
         path=row["path"] or "",
@@ -52,6 +58,8 @@ def _row_to_record(row: asyncpg.Record) -> SourceRecord:
         kind=(row["kind"] if "kind" in keys else "repo") or "repo",
         graph_indexed=graph_indexed,
         graph_indexed_at=graph_indexed_at,
+        summary_prompt_version=summary_prompt_version,
+        summary_refresh_target=summary_refresh_target,
     )
 
 
@@ -213,3 +221,88 @@ class PostgreSourceRepository(SourceRepositoryPort):
         except Exception:
             logger.exception("set_graph_indexed: database update failed")
             return False
+
+    async def mark_summary_refresh(self, source_id: str, target: int | None) -> None:
+        """Mark a summary-only refresh toward `target` as pending/running.
+
+        Sets only summary_refresh_target -- summary_prompt_version is left
+        untouched until the refresh finishes (record_summary_version).
+        """
+        # Raises instead of logging: a refresh must not write unmarked (FR-015).
+        pool = await self._get_pool()
+        if pool is None:
+            raise RuntimeError("mark_summary_refresh needs Postgres (DATABASE_URL)")
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE source_records SET summary_refresh_target = $2 WHERE id = $1",
+                source_id, target,
+            )
+
+    async def record_summary_version(self, source_id: str, version: int | None) -> None:
+        """Record the chunk_summary version the source's stored summary
+        vectors were (re)built with, and clear any pending refresh target.
+
+        One UPDATE, so a reader never observes summary_prompt_version
+        advanced without summary_refresh_target cleared, or vice versa.
+        """
+        pool = await self._get_pool()
+        if pool is None:
+            return
+        try:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    """UPDATE source_records
+                          SET summary_prompt_version = $2,
+                              summary_refresh_target = NULL
+                        WHERE id = $1""",
+                    source_id, version,
+                )
+        except Exception:
+            logger.exception("record_summary_version: database update failed")
+
+    async def summary_versions_for(
+        self, source_ids: list[str]
+    ) -> dict[str, Optional[int]]:
+        """Batch-look up recorded chunk_summary versions for many sources.
+
+        One query instead of one get_by_id per distinct source (the
+        summary_tail read path's former N+1). A source id with no row in the
+        result is simply absent from the returned dict -- callers treat that
+        the same as an explicitly NULL recorded version ("unknown").
+        """
+        if not source_ids:
+            return {}
+        pool = await self._get_pool()
+        if pool is None:
+            return {}
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id, summary_prompt_version FROM source_records "
+                    "WHERE id = ANY($1)",
+                    list(source_ids),
+                )
+                return {r["id"]: r["summary_prompt_version"] for r in rows}
+        except Exception:
+            logger.exception("summary_versions_for: database query failed")
+            return {}
+
+    async def summary_version_histogram(self) -> dict[int, int]:
+        """Count sources by their recorded chunk_summary version, ignoring
+        rows where it is NULL (never summarized). Feeds the startup seeding
+        rule (research R1 / data-model.md "seed_version")."""
+        pool = await self._get_pool()
+        if pool is None:
+            return {}
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    """SELECT summary_prompt_version AS version, COUNT(*) AS n
+                         FROM source_records
+                        WHERE summary_prompt_version IS NOT NULL
+                        GROUP BY summary_prompt_version"""
+                )
+                return {int(r["version"]): int(r["n"]) for r in rows}
+        except Exception:
+            logger.exception("summary_version_histogram: database query failed")
+            return {}

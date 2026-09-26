@@ -11,6 +11,11 @@ and rewrites `scope["client"]` from X-Forwarded-For whenever the immediate
 peer is in forwarded_allow_ips (default 127.0.0.1) — which a reverse proxy on
 the same host always is.
 
+The admin-gated surface also covers ADR-003's prompt-pins endpoints
+(`GET /prompt-versions`, `PUT /prompt-pins/{operation}`): the class below
+drives them through the real app to confirm the grant is refused the same
+way there as everywhere else.
+
 This is hardening, not a demonstrated bypass. uvicorn 0.34's
 `get_trusted_client_host` walks the list right-to-left and returns the first
 untrusted hop, so a proxy that appends (`$proxy_add_x_forwarded_for`) still
@@ -85,3 +90,42 @@ class TestProxyEvidenceRefusesTheGrant:
             client = _Client("127.0.0.1")
 
         assert _is_loopback_client(Bare()) is True
+
+
+class TestPromptPinsRoutesRefuseTheGrantOverAProxy:
+    """The prompt-pins admin surface (ADR-003) joins /users, /groups,
+    /embedding-backends and /audit/search on the list this module's
+    docstring names — driven end to end, unlike the rest of this file,
+    because these are new routes rather than the shared helper."""
+
+    def _client(self, monkeypatch, headers):
+        monkeypatch.setenv("AUTH_ENABLED", "false")
+        monkeypatch.setenv("TREEWEFT_DEV_MODE", "1")
+        from fastapi.testclient import TestClient
+
+        from treeweft.application.indexer_service import app
+
+        return TestClient(
+            app, client=("127.0.0.1", 12345), headers=headers, raise_server_exceptions=False
+        )
+
+    def test_get_prompt_versions_refuses_forwarded_loopback(self, monkeypatch):
+        client = self._client(monkeypatch, {"x-forwarded-for": "127.0.0.1"})
+        resp = client.get("/prompt-versions")
+        assert resp.status_code == 401
+
+    def test_put_prompt_pin_refuses_forwarded_loopback(self, monkeypatch):
+        client = self._client(monkeypatch, {"x-forwarded-for": "127.0.0.1"})
+        resp = client.put("/prompt-pins/chunk_summary", json={"version": 3})
+        assert resp.status_code == 401
+
+    def test_direct_loopback_still_grants_admin_for_the_new_routes(self, monkeypatch):
+        """The dev-convenience case this exists for must keep working for
+        the new surface too — it reaches the route's own logic (503, no
+        Postgres configured in the test env) instead of 401/403."""
+        from treeweft.application import indexer_state
+
+        monkeypatch.setattr(indexer_state, "DATABASE_URL", "")
+        client = self._client(monkeypatch, {})
+        resp = client.get("/prompt-versions")
+        assert resp.status_code == 503

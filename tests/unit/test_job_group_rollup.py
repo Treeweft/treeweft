@@ -18,10 +18,18 @@ def test_empty_group_is_queued_with_zero_counts():
     s = summarize_group(_grp(task_count=3), [])
     assert s["status"] == "queued"
     assert s["status_counts"] == {
-        "queued": 0, "running": 0, "done": 0, "failed": 0, "dead_letter": 0,
+        "queued": 0, "running": 0, "waiting": 0, "done": 0, "failed": 0, "dead_letter": 0,
     }
     assert s["progress"] == {"processed_files": 0, "total_files": 0}
     assert s["task_count"] == 3  # from the group row, not the (empty) task list
+
+
+def test_waiting_counts_as_active():
+    """A waiting Task is queued behind a resummarize refresh it preempted
+    (ADR-003 finding #6) -- it must read as "running", never "done"."""
+    s = summarize_group(_grp(1), [_job(JobStatus.WAITING)])
+    assert s["status"] == "running"
+    assert s["status_counts"]["waiting"] == 1
 
 
 def test_all_done_is_done():

@@ -17,7 +17,7 @@ from typing import Any, Callable, Coroutine, Optional
 from treeweft.domain.audit import AuditRecord, FailureMode, Operation
 from treeweft.domain.circuit_breaker import CircuitBreaker, CircuitConfig
 from treeweft.domain.fallback_router import FallbackRouter
-from treeweft.domain.response_validator import ResponseSchema, ResponseValidator
+from treeweft.domain.response_validator import ResponseValidator
 from treeweft.domain.retry_engine import RetryConfig, RetryEngine
 from treeweft.infrastructure.audit import JSONLAuditLogger
 
@@ -50,25 +50,8 @@ _audit = JSONLAuditLogger(
 # Fallback router: strategies registered per operation type
 _fallback = FallbackRouter()
 
-# Default response schema for HyDE (code only, no markdown)
-_HYDE_SCHEMA = ResponseSchema(
-    min_length=5,
-    max_length=8000,
-    forbidden_phrases=[
-        "I can't", "I don't know", "I cannot", "as an AI",
-        "```json", "here's",
-    ],
-)
-
-# Default response schema for summaries (concise sentence)
-_SUMMARY_SCHEMA = ResponseSchema(
-    min_length=5,
-    max_length=500,
-    forbidden_phrases=[
-        "I can't", "I don't know", "as an AI",
-        "here is", "this code",
-    ],
-)
+# Prompt schemas live in `treeweft.adapters.llm_api.prompts` (the registry,
+# ADR-003) as part of each version's `PromptVersion`, not here.
 
 
 # ── public API ─────────────────────────────────────────────────────

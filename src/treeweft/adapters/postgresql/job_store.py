@@ -8,6 +8,9 @@ sqlite JobStore so the call sites in indexer_service.py remain unchanged.
 from __future__ import annotations
 
 import json
+import time
+
+import asyncpg
 
 from treeweft.adapters.postgresql.connection import get_pool
 from treeweft.domain.jobs import Job, JobStatus
@@ -179,6 +182,153 @@ class JobStore:
                 source_id,
             )
             return self._row_to_job(row) if row else None
+
+    async def find_active_for_sources(self, source_ids: list[str]) -> dict[str, Job]:
+        """Return the active (queued/running) job for each source in
+        `source_ids` that has one, keyed by source_id.
+
+        One query instead of N `find_active_for_source` calls — used by
+        `routes_prompts.get_prompt_versions`, which otherwise did one round
+        trip per listed source.
+        """
+        if not source_ids:
+            return {}
+        pool = await _require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT ON (source_id) * FROM jobs "
+                "WHERE source_id = ANY($1) AND status IN ('queued', 'running') "
+                "ORDER BY source_id, start_time DESC",
+                source_ids,
+            )
+        return {row["source_id"]: self._row_to_job(row) for row in rows}
+
+    async def cancel_if_queued(self, job_id: str, message: str) -> bool:
+        """Atomically cancel `job_id` iff a job_queue row for it still
+        exists: drop that row and mark the job `done` with `message`.
+
+        Queue-row ownership, not `jobs.status`, is the claim: the worker's
+        `_claim_one` DELETEs the job_queue row before it ever upserts
+        `running` (`postgres_queue.PostgresJobQueue._run_one`), so a job
+        whose row is already gone is already owned by a worker even though
+        `jobs.status` may still read `queued` for a few more instructions.
+        Returns False (no-op) when no row was deleted — the caller falls
+        through to the waiting-job path (ADR-003 preemption case 2)."""
+        pool = await _require_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "DELETE FROM job_queue WHERE job_id = $1 RETURNING job_id",
+                    job_id,
+                )
+                if row is None:
+                    return False
+                await conn.execute(
+                    "UPDATE jobs SET status = 'done', message = $2, finished_at = $3 "
+                    "WHERE id = $1 AND status = 'queued'",
+                    job_id, message, time.time(),
+                )
+                return True
+
+    async def promote_next_waiting(self, after_job_id: str) -> str | None:
+        """Promote the oldest job waiting on `after_job_id`, atomically.
+
+        One transaction, holding a row lock on every waiting candidate
+        (`FOR UPDATE`) for the duration:
+
+        1. No waiting jobs -> None.
+        2. The source already has an active (queued/running) job -- a plain
+           enqueue won the race while this job was in flight -- relink every
+           waiter to that job's id instead of promoting, and return None.
+        3. Otherwise, conditionally flip the oldest waiter to `queued`
+           (`WHERE status = 'waiting'`, so a concurrent promoter that got
+           there first is a no-op here), relink the rest behind it, insert
+           its job_queue row, and return its id.
+
+        A concurrent plain enqueue can land between step 2's check and
+        step 3's UPDATE and trip `jobs_active_source_uniq`
+        (`asyncpg.UniqueViolationError`) -- caught once and retried from
+        step 1, which then takes branch 2 against the now-visible winner.
+        """
+        if not after_job_id:
+            return None
+        pool = await _require_pool()
+        for attempt in range(2):
+            try:
+                async with pool.acquire() as conn:
+                    async with conn.transaction():
+                        rows = await conn.fetch(
+                            "SELECT * FROM jobs WHERE status = 'waiting' "
+                            "AND payload ->> 'after_job' = $1 "
+                            "ORDER BY start_time ASC FOR UPDATE",
+                            after_job_id,
+                        )
+                        if not rows:
+                            return None
+
+                        waiting_ids = [r["id"] for r in rows]
+                        source_id = rows[0]["source_id"]
+
+                        active = await conn.fetchrow(
+                            "SELECT id FROM jobs WHERE source_id = $1 "
+                            "AND status IN ('queued', 'running') LIMIT 1",
+                            source_id,
+                        )
+                        if active is not None:
+                            await conn.execute(
+                                "UPDATE jobs SET payload = jsonb_set("
+                                "payload, '{after_job}', to_jsonb($2::text)) "
+                                "WHERE id = ANY($1::text[])",
+                                waiting_ids, active["id"],
+                            )
+                            return None
+
+                        first_id = waiting_ids[0]
+                        rest_ids = waiting_ids[1:]
+
+                        claimed = await conn.fetchrow(
+                            "UPDATE jobs SET status = 'queued' "
+                            "WHERE id = $1 AND status = 'waiting' RETURNING id",
+                            first_id,
+                        )
+                        if claimed is None:
+                            return None
+
+                        if rest_ids:
+                            await conn.execute(
+                                "UPDATE jobs SET payload = jsonb_set("
+                                "payload, '{after_job}', to_jsonb($2::text)) "
+                                "WHERE id = ANY($1::text[])",
+                                rest_ids, first_id,
+                            )
+
+                        await conn.execute(
+                            "INSERT INTO job_queue (job_id) VALUES ($1) "
+                            "ON CONFLICT DO NOTHING",
+                            first_id,
+                        )
+                        return first_id
+            except asyncpg.UniqueViolationError:
+                if attempt == 0:
+                    continue
+                raise
+        return None
+
+    async def find_waiting_after(self, after_job_id: str) -> list[Job]:
+        """Jobs with status='waiting' whose payload->>'after_job' is
+        `after_job_id`, oldest first. Used at a resummarize job's batch
+        boundary (has any follower arrived?) and by promotion (which one(s)
+        to enqueue) once that job reaches a terminal status."""
+        if not after_job_id:
+            return []
+        pool = await _require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM jobs WHERE status = 'waiting' "
+                "AND payload ->> 'after_job' = $1 ORDER BY start_time ASC",
+                after_job_id,
+            )
+            return [self._row_to_job(r) for r in rows]
 
     async def update_status(self, job_id: str, status: JobStatus) -> None:
         pool = await _require_pool()

@@ -33,6 +33,7 @@ READ_ONLY_GETS = {
     "/sources/{source_id}/grants", "/fleet", "/users", "/users/{user_id}/tokens",
     "/groups", "/groups/{group_id}/members", "/api-keys", "/auth/me",
     "/audit/search", "/embedding-backends", "/build-community", "/debug/tasks",
+    "/prompt-versions",
     "/find-definition", "/find-callers", "/find-references", "/openapi.json",
     "/docs", "/docs/oauth2-redirect", "/redoc", "/sse",
 }

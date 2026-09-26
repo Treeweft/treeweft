@@ -96,6 +96,7 @@ def validate_config() -> None:
         index_verify_interval_seconds,
         index_verify_timeout_seconds,
         index_status_refresh_seconds,
+        prompt_pins_refresh_seconds,
     ):
         getter()
 
@@ -139,6 +140,20 @@ def index_status_refresh_seconds() -> float:
     """Seconds between per-process index-status refreshes (default 5)."""
     return _positive_number_env(
         "INDEX_STATUS_REFRESH_SECONDS", INDEX_STATUS_REFRESH_SECONDS_DEFAULT
+    )
+
+
+# ── Prompt pins (ADR-003) ────────────────────────────────────────────────────
+# Read lazily, same rationale as the index stamp tunables above: a bad value
+# fails inside validate_config() naming the setting, not at import time.
+
+PROMPT_PINS_REFRESH_SECONDS_DEFAULT = "5"
+
+
+def prompt_pins_refresh_seconds() -> float:
+    """Seconds between per-process admin-pin refreshes (default 5)."""
+    return _positive_number_env(
+        "PROMPT_PINS_REFRESH_SECONDS", PROMPT_PINS_REFRESH_SECONDS_DEFAULT
     )
 
 

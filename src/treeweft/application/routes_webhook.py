@@ -281,8 +281,13 @@ async def handle_webhook(request: Request):
     # an incremental job that re-queued itself after a retry — don't create a
     # colliding job. The jobs_active_source_uniq partial index would otherwise
     # reject the second insert and 500 the webhook. Mirrors the new-source guard.
+    #
+    # Preemption (finding #6): a `resummarize` (summary-only refresh) active
+    # job does NOT cover code changes, so it does not get the dedup response —
+    # index work preempts it instead (`prompt_refresh.preempt_active_refresh`).
+    # Any other active kind keeps the dedup response unchanged.
     active = await _find_active_job_for_source(source_id)
-    if active:
+    if active is not None and active.get("kind") != "resummarize":
         return {
             "job_id": active["job_id"],
             "status": active["status"],
@@ -299,56 +304,63 @@ async def handle_webhook(request: Request):
     if shed is not None:
         return shed
 
-    # Oversized payload check: if changed_files exceeds
-    # MAX_CHANGED_FILES, fall back to a full re-index job instead of a giant
-    # incremental payload. One bounded job replaces thousands of changed_files.
-    if len(changed_files) > MAX_CHANGED_FILES:
-        logger.warning(
-            "Webhook for %s: %d changed files exceeds MAX_CHANGED_FILES=%d — "
-            "falling back to full re-index",
-            repo_url, len(changed_files), MAX_CHANGED_FILES,
-        )
-        full_job = runners._new_job("repo", source_id, repo_url)
-        full_job["source_url"] = repo_url
-        full_job["source_branch"] = branch
-        full_job["files_to_process"] = len(changed_files)
-        full_job["message"] = (
-            f"Full re-index triggered: {len(changed_files)} changed files exceeds "
-            f"MAX_CHANGED_FILES={MAX_CHANGED_FILES}"
-        )
-        await _attach_webhook_group(full_job, f"webhook: {repo_url}")
-        await runners._persist_job(full_job)
-        await _state._job_queue.enqueue(full_job["job_id"])
-        return {
-            "job_id": full_job["job_id"],
-            "status": "queued",
-            "source": repo_url,
-            "files_to_process": len(changed_files),
-            "files_removed": 0,
-            "message": full_job["message"],
-        }
+    files_removed = sum(1 for f in changed_files if f["action"] == "removed")
 
-    accept_time = time.time()
-    job = runners._new_job("incremental", source_id, repo_url)
-    job["source_url"] = repo_url
-    job["source_branch"] = branch
-    job["files_to_process"] = len(changed_files)
-    job["files_removed"] = sum(
-        1 for f in changed_files if f["action"] == "removed"
-    )
-    # Persist changed_files in payload so any worker can reconstruct and resume
-    # this job after a crash — no longer reliant on the git provider re-firing.
-    job["payload"] = {"changed_files": changed_files, "branch": branch, "accept_time": accept_time}
-    await _attach_webhook_group(job, f"webhook: {repo_url} (incremental)")
-    await runners._persist_job(job)
-    await _state._job_queue.enqueue(job["job_id"])
+    async def _build_incremental_or_fallback_job() -> dict:
+        # Oversized payload check: if changed_files exceeds MAX_CHANGED_FILES,
+        # fall back to a full re-index job instead of a giant incremental
+        # payload. One bounded job replaces thousands of changed_files.
+        if len(changed_files) > MAX_CHANGED_FILES:
+            logger.warning(
+                "Webhook for %s: %d changed files exceeds MAX_CHANGED_FILES=%d — "
+                "falling back to full re-index",
+                repo_url, len(changed_files), MAX_CHANGED_FILES,
+            )
+            full_job = runners._new_job("repo", source_id, repo_url)
+            full_job["source_url"] = repo_url
+            full_job["source_branch"] = branch
+            full_job["files_to_process"] = len(changed_files)
+            full_job["message"] = (
+                f"Full re-index triggered: {len(changed_files)} changed files exceeds "
+                f"MAX_CHANGED_FILES={MAX_CHANGED_FILES}"
+            )
+            await _attach_webhook_group(full_job, f"webhook: {repo_url}")
+            return full_job
+
+        accept_time = time.time()
+        job = runners._new_job("incremental", source_id, repo_url)
+        job["source_url"] = repo_url
+        job["source_branch"] = branch
+        job["files_to_process"] = len(changed_files)
+        job["files_removed"] = files_removed
+        # Persist changed_files in payload so any worker can reconstruct and
+        # resume this job after a crash — no longer reliant on the git
+        # provider re-firing.
+        job["payload"] = {
+            "changed_files": changed_files, "branch": branch, "accept_time": accept_time,
+        }
+        job["message"] = f"Incremental index for {len(changed_files)} changed files"
+        await _attach_webhook_group(job, f"webhook: {repo_url} (incremental)")
+        return job
+
+    if active is not None:  # active["kind"] == "resummarize"
+        from treeweft.application import prompt_refresh
+        outcome = await prompt_refresh.preempt_active_refresh(
+            source_id, _build_incremental_or_fallback_job,
+        )
+        job = outcome.job
+    else:
+        job = await _build_incremental_or_fallback_job()
+        await runners._persist_job(job)
+        await _state._job_queue.enqueue(job["job_id"])
+
     return {
         "job_id": job["job_id"],
-        "status": "queued",
+        "status": job["status"],
         "source": repo_url,
         "files_to_process": len(changed_files),
-        "files_removed": sum(1 for f in changed_files if f["action"] == "removed"),
-        "message": f"Incremental index for {len(changed_files)} changed files",
+        "files_removed": job.get("files_removed", 0),
+        "message": job["message"],
     }
 
 

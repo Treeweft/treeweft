@@ -23,6 +23,8 @@ from treeweft import graph_store
 from treeweft.application import index_guard
 from treeweft.application import indexer_state as _state
 from treeweft.application import indexer_runners as runners
+from treeweft.application import prompt_pins
+from treeweft.application import prompt_refresh
 from treeweft.application import routes_auth as rauth
 from treeweft.domain.authorization import Role
 from treeweft.application.fleet import select_sources_to_refresh
@@ -87,17 +89,34 @@ async def _fleet_refresh_once() -> int:
         src = by_id.get(sid)
         if src is None:
             continue
-        # The single-active-job-per-source invariant already prevents pile-ups;
-        # skipping here avoids needless job churn and log noise.
-        if await _webhook._find_active_job_for_source(sid):
+        # The single-active-job-per-source invariant already prevents pile-ups
+        # for any OTHER active job kind; a resummarize refresh is preemptable
+        # instead (ADR-003 finding #6) so a stale-code source isn't stuck
+        # behind an hours-long summary-only refresh.
+        active = await _webhook._find_active_job_for_source(sid)
+        if active is not None and active.get("kind") != "resummarize":
             continue
         try:
-            job_id = await _svc._enqueue_source_reindex(src)
-            metrics.fleet_refresh_enqueued_total.inc()
-            enqueued += 1
-            logger.info(
-                "Fleet auto-refresh: re-indexing stale source %s (job %s)", sid, job_id
-            )
+            if active is not None:
+                async def _build(src=src):
+                    return _svc._build_source_reindex_job(src)
+
+                outcome = await prompt_refresh.preempt_active_refresh(sid, _build)
+                job_id = outcome.job["job_id"]
+                if outcome.mode == "queued":
+                    metrics.fleet_refresh_enqueued_total.inc()
+                    enqueued += 1
+                logger.info(
+                    "Fleet auto-refresh: re-indexing stale source %s (job %s, %s)",
+                    sid, job_id, outcome.mode,
+                )
+            else:
+                job_id = await _svc._enqueue_source_reindex(src)
+                metrics.fleet_refresh_enqueued_total.inc()
+                enqueued += 1
+                logger.info(
+                    "Fleet auto-refresh: re-indexing stale source %s (job %s)", sid, job_id
+                )
         except Exception:
             logger.exception("Fleet auto-refresh: failed to enqueue source %s", sid)
     return enqueued
@@ -441,6 +460,13 @@ async def startup(app):
 
     await _seed_admin_if_first_start()
 
+    # ── Prompt pins (ADR-003, research R9) ───────────────────────────────
+    # No try/except (constitution V): a missing migration 021 or an
+    # unregistered stored pin must abort startup, not be logged and
+    # swallowed. A no-op without DATABASE_URL (logs a warning).
+    await prompt_pins.load_and_seed()
+    await prompt_pins.start_sync()
+
     # ── JobStore/JobGroupStore: initialize before the index-schema check ────
     # ADR-004 §3 (research R2): the check reads the latest rebuild group
     # through JobGroupStore, so both stores must exist before it runs. It
@@ -490,8 +516,15 @@ async def startup(app):
         for job in incomplete:
             jd = job.to_dict()
 
-            # Source is already DONE elsewhere — mark this stale job as superseded.
-            if job.source_id and job.source_id in done_source_ids:
+            # Source is already DONE elsewhere — mark this stale job as
+            # superseded. `resummarize` is exempt (research R5): nothing
+            # else re-runs an interrupted summary-only refresh, so it is
+            # re-enqueued like any job with no prior completion instead.
+            if (
+                job.source_id
+                and job.source_id in done_source_ids
+                and job.kind != "resummarize"
+            ):
                 jd["status"] = "done"
                 jd["finished_at"] = time.time()
                 jd["message"] = "Superseded by prior completed index for this source"
@@ -521,6 +554,36 @@ async def startup(app):
             "Job recovery: %d resumed, %d superseded (already done), %d abandoned",
             resumed, superseded, abandoned,
         )
+
+    # ── Waiting-job recovery (ADR-003 preemption, finding #6) ────────────────
+    # A `waiting` job is promoted if the refresh it is waiting on
+    # (payload["after_job"]) is no longer queued/running -- e.g. the indexer
+    # died mid-refresh and the loop above marked it superseded/abandoned, or
+    # it simply finished before the crash and the promotion hook never ran.
+    # If that refresh was instead RESUMED above under the same job id (still
+    # queued/running), the waiting job stays linked to it -- no action needed.
+    waiting_jobs = await _state._job_store.list_by_status(JobStatus.WAITING)
+    if waiting_jobs:
+        checked_after_ids: set[str] = set()
+        promoted = 0
+        for wj in waiting_jobs:
+            after_id = (wj.payload or {}).get("after_job")
+            if not after_id or after_id in checked_after_ids:
+                continue
+            checked_after_ids.add(after_id)
+            ref = await _state._job_store.get(after_id)
+            # A 'waiting' ref is not orphaned (code-review finding D): its
+            # own head will be promoted (by this same loop, on some other
+            # iteration, or later) and its followers chain behind it then.
+            # Promoting them here too would leave two queued jobs for one
+            # source.
+            if ref is not None and ref.status in (
+                JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING,
+            ):
+                continue
+            promoted += len(await prompt_refresh.promote_waiting_after(after_id))
+        if promoted:
+            logger.info("Job recovery: promoted %d orphaned waiting job(s)", promoted)
 
     # ── Login-attempt purge ──────────────────────────────────────────────────
 
@@ -585,6 +648,9 @@ async def shutdown(app):
     await graph_store.close()
     if _state._job_queue is not None:
         await _state._job_queue.stop()
+    # Stop the prompt-pins listener/refresh loop, next to the embedding
+    # listener stop below (both are dedicated Postgres connections).
+    await prompt_pins.stop_sync()
     # Stop the embedding proxy's NOTIFY listener (releases its dedicated
     # connection). Must happen before close_pool() since this connection
     # is independent of the pool but still talks to the same Postgres.

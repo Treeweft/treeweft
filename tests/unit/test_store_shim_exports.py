@@ -34,7 +34,11 @@ _VECTOR_STAMP_PROBE = textwrap.dedent(
     """
     import json
     import treeweft.retriever as r
-    names = ["observe_index", "write_stamp", "sample_chunks", "drop_index"]
+    names = [
+        "observe_index", "write_stamp", "sample_chunks", "drop_index",
+        "summary_vectors_supported", "snapshot_source_row_ids", "fetch_rows",
+        "write_summary_vectors", "count_source_rows",
+    ]
     print(json.dumps({n: hasattr(r, n) for n in names}))
     """
 )

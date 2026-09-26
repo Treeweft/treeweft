@@ -112,7 +112,8 @@ export function JobDetailPage() {
           <span className="text-sm font-medium">Overall progress</span>
           <span className="text-sm tabular-nums text-muted-foreground">
             {(detail.progress?.processed_files ?? 0).toLocaleString()} /{" "}
-            {(detail.progress?.total_files ?? 0).toLocaleString()} files (
+            {(detail.progress?.total_files ?? 0).toLocaleString()}{" "}
+            {detail.kind === "resummarize" || detail.kind === "prompt-refresh" ? "chunks" : "files"} (
             {overallPct}%)
           </span>
         </div>

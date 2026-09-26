@@ -450,3 +450,102 @@ async def drop_index() -> None:
     await asyncio.to_thread(_drop)
     with _lock:
         _table = None
+
+
+def summary_vectors_supported() -> bool:
+    """LanceDB stores a nullable summary_vector (research R7)."""
+    return True
+
+
+# ── Prompt-versioning summary refresh (ADR-003 §3, research R7/R10) ─────────
+
+
+async def snapshot_source_row_ids(source_id: str) -> list[str]:
+    """All row ids for a source, unbatched (research R10 batches by caller)."""
+
+    def _scan() -> list[str]:
+        tbl = _get_table()
+        predicate = f"source_id = '{_esc(source_id)}'"
+        total = tbl.count_rows(predicate)
+        if not total:
+            return []
+        rows = (
+            tbl.search(None)
+            .where(predicate)
+            .select(["id"])
+            .limit(total)
+            .to_list()
+        )
+        return [r["id"] for r in rows]
+
+    return await asyncio.to_thread(_scan)
+
+
+async def fetch_rows(ids: list[str]) -> list[dict]:
+    """Full rows (every column) for the given ids."""
+    if not ids:
+        return []
+
+    def _fetch() -> list[dict]:
+        tbl = _get_table()
+        literal = ", ".join(f"'{_esc(i)}'" for i in ids)
+        predicate = f"id IN ({literal})"
+        total = tbl.count_rows(predicate)
+        if not total:
+            return []
+        return tbl.search(None).where(predicate).limit(total).to_list()
+
+    return await asyncio.to_thread(_fetch)
+
+
+async def count_source_rows(source_id: str) -> int:
+    def _count() -> int:
+        tbl = _get_table()
+        return tbl.count_rows(f"source_id = '{_esc(source_id)}'")
+
+    return await asyncio.to_thread(_count)
+
+
+async def write_summary_vectors(
+    rows: list[dict], vectors: list[list[float] | None]
+) -> None:
+    """Update `summary_vector` in place, keyed by `id`. `None` -> NULL.
+
+    lancedb 0.33.0's `merge_insert("id").when_matched_update_all()` accepts a
+    partial column set (`id`, `summary_vector`) fine — verified on a real
+    tmp-dir table in test_lancedb_summary_rewrite.py. The full-row fallback
+    below only guards against a future lancedb version rejecting that.
+    """
+    if not rows:
+        return
+
+    def _write() -> None:
+        import pyarrow as pa
+
+        tbl = _get_table()
+        dim = tbl.schema.field("vector").type.list_size
+        vec_type = pa.list_(pa.float32(), dim)
+        ids = [r["id"] for r in rows]
+        try:
+            partial = pa.table(
+                {
+                    "id": pa.array(ids, type=pa.string()),
+                    "summary_vector": pa.array(vectors, type=vec_type),
+                }
+            )
+            tbl.merge_insert("id").when_matched_update_all().execute(partial)
+        except Exception:
+            logger.warning(
+                "lancedb merge_insert partial columns rejected; "
+                "falling back to full-row merge",
+                exc_info=True,
+            )
+            full_rows = []
+            for row, vec in zip(rows, vectors):
+                merged = dict(row)
+                merged["summary_vector"] = vec
+                full_rows.append(merged)
+            full_table = pa.Table.from_pylist(full_rows, schema=tbl.schema)
+            tbl.merge_insert("id").when_matched_update_all().execute(full_table)
+
+    await asyncio.to_thread(_write)

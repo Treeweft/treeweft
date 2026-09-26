@@ -52,6 +52,7 @@ class TestRunOnePersistsBeforeCheck:
         q = PostgresJobQueue(max_workers=1)
         job = _job()
         store = AsyncMock()
+        store.find_waiting_after = AsyncMock(return_value=[])
         store.get = AsyncMock(return_value=job)
 
         order: list[str] = []
@@ -84,6 +85,7 @@ class TestRunOnePersistsBeforeCheck:
         q = PostgresJobQueue(max_workers=1)
         job = _job()
         store = AsyncMock()
+        store.find_waiting_after = AsyncMock(return_value=[])
         store.get = AsyncMock(return_value=job)
 
         persisted: list[dict] = []
@@ -119,6 +121,7 @@ class TestRunOnePersistsBeforeCheck:
         q = PostgresJobQueue(max_workers=1)
         job = _job()
         store = AsyncMock()
+        store.find_waiting_after = AsyncMock(return_value=[])
         store.get = AsyncMock(return_value=job)
         store.increment_attempts = AsyncMock(return_value=99)
 

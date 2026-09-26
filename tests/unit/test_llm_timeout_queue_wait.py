@@ -100,7 +100,7 @@ async def test_chunk_summaries_opt_out_of_counting_queue_wait(monkeypatch):
         return "Defines f.", "simple"
 
     monkeypatch.setattr(llm_caller, "call_with_control_layer", _fake)
-    await llm_adapter._generate_summary("def f(): pass", "python", "a.py")
+    await llm_adapter._generate_summary("def f(): pass", "python", "a.py", version=3)
     assert seen.get("timeout_includes_queue") is False
 
 

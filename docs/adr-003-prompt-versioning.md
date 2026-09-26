@@ -1,12 +1,14 @@
 # ADR-003: Prompt Versioning with Admin Pins and Summary-Only Refresh
 
-- Status: Proposed
+- Status: Accepted and implemented (1.1.0) (amended 2026-09-25 during
+  planning of spec `specs/002-prompt-versioning`)
 - Date: 2026-09-23
 - Owner: indexer / LLM adapter
 
 > An ADR records a decision at a point in time. The Context below describes
-> the code as it was on the date above. This record is **Proposed**: nothing
-> in it is implemented yet.
+> the code as it was on the date above. It was accepted on 2026-09-25. The
+> amendments made while planning its implementation are marked "amended
+> 2026-09-25" and summarized in "Amendments" at the end.
 
 ## Context
 
@@ -73,6 +75,14 @@ New module `adapters/llm_api/prompts.py`: an append-only registry
 Pins are resolved from an in-memory map that is loaded from Postgres at
 startup and reloaded on `LISTEN prompt_pins_changed`, the same mechanism as
 `embedding_backends`. There is no database round-trip per chunk or query.
+Unlike the `embedding_backends` listener, it also reloads after every
+(re)connect of its LISTEN connection and every 5 seconds
+(`PROMPT_PINS_REFRESH_SECONDS`), so a notification lost while disconnected
+delays a change by at most one interval (amended 2026-09-25).
+
+Without Postgres (`DATABASE_URL` unset) there are no pins: resolution uses the
+baseline versions `chunk_summary` v3 and `hyde` v1, so an upgrade changes no
+prompt, and the pin endpoints return 503 (amended 2026-09-25).
 
 **Caches.**
 
@@ -81,7 +91,10 @@ startup and reloaded on `LISTEN prompt_pins_changed`, the same mechanism as
   and its key are unchanged; reads stay version-scoped, and rejection markers
   (`""`) are per version.
 - The existing per-request `summary_prompt_version` read override
-  (`summary_tail`) keeps working unchanged.
+  (`summary_tail`) keeps working unchanged and is not validated against the
+  registry (the benchmark reads an unregistered tier). Without it, each tail
+  chunk is read at its source's recorded version, falling back to the
+  effective version on a miss (amended 2026-09-25).
 - `_HYDE_CACHE` keys gain the HyDE version, and the cache is cleared when the
   HyDE pin changes. Otherwise a previous version's expansion would keep being
   served for a repeated query.
@@ -102,15 +115,23 @@ CREATE TABLE IF NOT EXISTS prompt_pins (
 );
 
 ALTER TABLE source_records
-    ADD COLUMN IF NOT EXISTS summary_prompt_version INTEGER;
+    ADD COLUMN IF NOT EXISTS summary_prompt_version INTEGER,
+    ADD COLUMN IF NOT EXISTS summary_refresh_target INTEGER;
 UPDATE source_records SET summary_prompt_version = 3
     WHERE summary_prompt_version IS NULL;
 ```
 
 - The migration does **not** insert pin rows; see "Pin seeding" below.
 - `source_records.summary_prompt_version` is the version the source's stored
-  summary vectors were built with. It is set when a full or incremental index
-  job completes and when a `resummarize` job completes cleanly. `NULL` means
+  summary vectors were built with. It is set when a full index job (file,
+  directory or repo) completes cleanly, meaning no failed files **and** no
+  transient summary failures, to the version resolved when that job started;
+  and when a `resummarize` job completes cleanly. An incremental index
+  job never changes it: it re-summarizes only the changed files, so advancing
+  the version would report a stale source as current (amended 2026-09-25,
+  spec 002 FR-010). A clean full job with summary vectors off, or on a store
+  without them, sets it to `NULL`, as do file and directory jobs, which insert
+  chunks without summary vectors (only repo jobs summarize). A graph-only job never changes it. `NULL` means
   unknown or never summarized (for example, indexed with
   `USE_SUMMARY_VECTOR=0`). Backfilling 3 is correct because every existing
   index was built with v3. The backfill also applies to sources indexed with
@@ -122,9 +143,20 @@ UPDATE source_records SET summary_prompt_version = 3
 - Mutations emit `NOTIFY prompt_pins_changed` in the same transaction as the
   row write.
 
-**Staleness.** A source is stale when `summary_prompt_version IS NOT NULL`
-and it differs from `effective_version("chunk_summary", source_id)`. During a
-migration:
+- `source_records.summary_refresh_target` is the version an unfinished
+  `resummarize` was moving the source toward. It is set when the job starts,
+  before its first write, and cleared together with setting
+  `summary_prompt_version` when the job, or a full index job, completes cleanly.
+  While it is set, the source's summary vectors may be mixed (amended
+  2026-09-25, spec 002 FR-015).
+
+**Staleness.** A source is stale when `summary_refresh_target IS NOT NULL`,
+or when `summary_prompt_version IS NOT NULL` and it differs from
+`effective_version("chunk_summary", source_id)`. The first rule keeps a source
+with a partly applied or overtaken refresh from looking current: without it,
+moving the pin back to the recorded version would hide the mixed vectors, and
+a manual refresh would be a no-op. Every pin change that affects such a source
+enqueues a refresh for it. During a migration:
 
 - new and incremental indexing of the source already uses the target version;
 - search uses whatever vectors are stored. Every version's summaries are
@@ -144,11 +176,19 @@ migration:
 ### 3. The `resummarize` job
 
 A new job kind, dispatched on `Job.kind` like the others. Migration 008's
-one-active-job-per-source rule serializes it with index and incremental jobs
-on the same source.
+one-active-job-per-source rule does not queue a second job behind an active
+one; it refuses it. So a refresh for a source with an active job is
+**deferred**: the triggering response lists it with the blocking job, and when
+any job other than a `resummarize` finishes, the source is re-checked and a
+refresh is enqueued if it is still stale. A finished refresh re-triggers only
+when a pin change overtook it, so a refresh that keeps failing cannot loop. Startup crash recovery re-enqueues an interrupted `resummarize`
+instead of treating it as superseded by the source's earlier index job
+(amended 2026-09-25).
 
 Per source:
 
+0. **Mark** the source: set `source_records.summary_refresh_target` to the
+   target version before anything is written.
 1. **Snapshot** the source's primary keys (IDs only,
    `consistency_level=Strong`). This is required because on Milvus 2.5 an
    upsert re-inserts a row under a **new** primary key (see "Verified Milvus
@@ -161,12 +201,16 @@ Per source:
    - embed the summaries through the existing embedding proxy;
    - upsert each full row **without** `sparse_vector`, which the BM25 function
      generates server-side, carrying the new `summary_vector`. A chunk with no
-     summary gets the same zero vector it gets at index time.
+     summary gets the store's own no-summary value, as at index time: a zero
+     vector on Milvus, NULL on LanceDB (amended 2026-09-25).
+   After the last batch, a `Strong` count of the source's rows must equal the
+   snapshot size, or the job fails loudly (amended 2026-09-25).
 3. On completion, set `source_records.summary_prompt_version` to the target
-   **only if** every chunk got a summary or a rejection marker. If any chunk
-   failed transiently (a timeout or LLM error), the job finishes `done` with
-   errors and the recorded version is left unchanged, so the source stays
-   stale and can be retried.
+   and clear `summary_refresh_target`, in one statement, **only if** every
+   chunk got a summary or a rejection marker. If any chunk failed transiently
+   (a timeout or LLM error), the job finishes `done` with errors and both
+   columns are left unchanged, so the source stays stale and can be retried.
+   The same applies to an interrupted or failed job.
 
 **Retry.** There is no per-row progress marker; re-running redoes the source.
 Summaries generated by the earlier run are cache hits, so a retry costs only
@@ -176,7 +220,12 @@ of the total, using the existing job fields.
 **Simple mode (LanceDB).** `summary_vector` is updated in place, with no key
 churn. `USE_SUMMARY_VECTOR` defaults to 0 there; with it off, `resummarize`
 is a no-op that leaves `summary_prompt_version` unchanged and reports that
-summary vectors are disabled.
+summary vectors are disabled. LanceDB rows are updated with `merge_insert` by
+their client-generated `id`.
+
+**ChromaDB.** The ChromaDB backend stores no summary vectors
+(`insert_chunks` discards them), so `resummarize` there is the same reported
+no-op (amended 2026-09-25).
 
 **Triggers.**
 
@@ -394,3 +443,37 @@ schema ADR-004 §3 stamps and checks (`src/treeweft/domain/index_stamp.py`).
   `_process_file`.
 - [ADR-001](adr-001-cost-aware-embedding-proxy.md): the embedding proxy that
   the refresh job reuses.
+
+## Amendments
+
+Made on 2026-09-25 while planning the implementation
+(`specs/002-prompt-versioning/research.md`, where each has its evidence):
+
+1. Incremental index jobs never advance a source's recorded version; only a
+   clean full index job or a clean refresh does, and "clean" includes no
+   transient summary failures (§2; research R6).
+2. `summary_refresh_target` marks an unfinished refresh, so a source with
+   mixed summary vectors stays stale for every target (§2, §3).
+3. Refreshes are deferred behind an active job and enqueued when it finishes,
+   rather than serialized by migration 008, which it does not do (§3; R4).
+   Interrupted refreshes are re-enqueued at startup (R5).
+4. The ChromaDB backend has no summary vectors, so a refresh there is a
+   reported no-op, and "zero vector" is each store's no-summary value (§3; R7).
+5. Pin propagation reloads after a reconnect and on a 5-second interval (§1;
+   R3). Without Postgres, the baseline versions are used (§1; R9).
+6. The summary tail's default read version is the source's recorded version
+   (§1; R8).
+7. A post-refresh row count check guards against duplicates from Milvus
+   re-keying (§3; R10).
+8. After code review (2026-09-26): a transient summary failure during a
+   refresh keeps the chunk's existing summary vector (only a rejection gets the
+   no-summary value), and a run in which every chunk fails ends `failed`. A
+   refresh re-reads the pins before resolving its target, re-checks the source
+   around each write so a deleted source is not resurrected by a Milvus
+   upsert, and a refresh overtaken by a pin change is followed by one to the
+   new target.
+9. After code review (2026-09-26): index work preempts an active refresh
+   instead of being deduplicated against it. A queued refresh is cancelled; a
+   running one gets a `waiting` index job behind it and stops at its next
+   batch. Waiting jobs run in arrival order, and the refresh is re-enqueued if
+   the source is still stale. Migration 022 indexes waiting jobs.
