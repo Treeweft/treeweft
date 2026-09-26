@@ -39,6 +39,38 @@ class UnknownPromptVersionError(ValueError):
         self.version = version
         self.valid_versions = valid_versions
 
+
+HYDE_OVERRIDE_DETAIL = (
+    "hyde pins are deployment-wide; per-source overrides are not supported"
+)
+
+
+class HydeOverrideNotSupportedError(ValueError):
+    """Raised by `set_pin` for a hyde pin with a non-deployment scope (US3
+    scenario 4). Same refusal for a dry run and a real call — the table's
+    `CHECK` enforces the same rule."""
+
+    def __init__(self):
+        super().__init__(HYDE_OVERRIDE_DETAIL)
+
+
+class UnknownSourceError(ValueError):
+    """Raised by `set_pin`/`clear_override` for a source_id that does not
+    exist. The API translates this to a 404."""
+
+    def __init__(self, source_id: str):
+        super().__init__(f"unknown source: {source_id}")
+        self.source_id = source_id
+
+
+class NoOverrideError(ValueError):
+    """Raised by `clear_override` when `source_id` exists but carries no
+    chunk_summary override. The API translates this to a 404."""
+
+    def __init__(self, source_id: str):
+        super().__init__(f"source {source_id} has no chunk_summary override")
+        self.source_id = source_id
+
 _SCHEMA_CHECK_SQL = """
     SELECT
         to_regclass('prompt_pins') IS NOT NULL AS has_table,
@@ -305,26 +337,45 @@ def _log_pin_change(
 async def set_pin(
     operation: str, scope: str, version: int, *, updated_by: str | None, dry_run: bool
 ) -> dict:
-    """Set the deployment pin for `operation` (US2: `scope == "deployment"`
-    only — per-source overrides are added by US3).
+    """Set the deployment pin (`scope == "deployment"`, US2) or a per-source
+    chunk_summary override (`scope == <source_id>`, US3).
+
+    HyDE has no per-source overrides: any non-deployment scope raises
+    `HydeOverrideNotSupportedError`, for both a dry run and a real call,
+    before anything else is validated.
 
     Validates the version against the registry (raising
     `UnknownPromptVersionError` on a miss, for both a dry run and a real
-    call). Setting the pin to its already-current version is a no-op: no
-    row is written, `NOTIFY`d, or logged as a change.
+    call). For an override scope, the source must exist
+    (`UnknownSourceError` otherwise). Setting the pin to its already-current
+    value at that scope is a no-op: no row is written, `NOTIFY`d, or logged
+    as a change.
 
     A real (non dry-run) call writes the pin, swaps this process's own view
     immediately (`reload()`, which also clears `llm_adapter._HYDE_CACHE` on
-    a HyDE change), and enqueues every affected source's refresh. A dry run
-    computes the identical plan and writes nothing (SC-004).
+    a HyDE change), and enqueues a refresh for every affected source — every
+    non-overridden source for a deployment change, or just the one source
+    for an override. A dry run computes the identical plan and writes
+    nothing (SC-004).
     """
-    if scope != "deployment":
-        raise NotImplementedError("prompt_pins.set_pin only supports scope='deployment' so far")
+    if operation == "hyde" and scope != "deployment":
+        raise HydeOverrideNotSupportedError()
 
     if not prompts.is_registered(operation, version):
         raise UnknownPromptVersionError(operation, version, prompts.versions(operation))
 
-    previous_version = _view.deployment.get(operation)
+    if scope == "deployment":
+        previous_version = _view.deployment.get(operation)
+        sources = [
+            s for s in await _source_repo.list_all() if s.id not in _view.overrides
+        ]
+    else:
+        source = await _source_repo.get_by_id(scope)
+        if source is None:
+            raise UnknownSourceError(scope)
+        previous_version = _view.overrides.get(scope)
+        sources = [source]
+
     if previous_version == version:
         return _empty_result(operation, scope, previous_version, version, dry_run)
 
@@ -338,9 +389,6 @@ async def set_pin(
 
     from treeweft.application import prompt_refresh
 
-    sources = [
-        s for s in await _source_repo.list_all() if s.id not in _view.overrides
-    ]
     plan = await prompt_refresh.plan_refreshes(sources, lambda _sid: version)
 
     if not dry_run:
@@ -362,4 +410,51 @@ async def set_pin(
         "effect": None,
     }
     _log_pin_change(dry_run, updated_by, operation, scope, previous_version, version, result)
+    return result
+
+
+async def clear_override(source_id: str, *, updated_by: str | None, dry_run: bool) -> dict:
+    """Clear a source's chunk_summary override (US3 scenario 3): it then
+    follows the deployment pin again.
+
+    Raises `UnknownSourceError` when `source_id` doesn't exist, and
+    `NoOverrideError` when it exists but carries no override — both are a
+    404 at the API. A real call deletes the pin row (`NOTIFY`), swaps this
+    process's view, and enqueues a refresh only if the source is now stale
+    toward the deployment pin. A dry run computes the identical plan and
+    writes nothing.
+    """
+    source = await _source_repo.get_by_id(source_id)
+    if source is None:
+        raise UnknownSourceError(source_id)
+
+    previous_version = _view.overrides.get(source_id)
+    if previous_version is None:
+        raise NoOverrideError(source_id)
+
+    version = _view.deployment["chunk_summary"]
+
+    from treeweft.application import prompt_refresh
+
+    plan = await prompt_refresh.plan_refreshes([source], lambda _sid: version)
+
+    if not dry_run:
+        await _pin_store.delete("chunk_summary", source_id)
+        await reload()
+        plan = await prompt_refresh.enqueue_refreshes(plan, created_by=updated_by)
+
+    result = {
+        "dry_run": dry_run,
+        "operation": "chunk_summary",
+        "scope": source_id,
+        "previous_version": previous_version,
+        "version": version,
+        "enqueued": [i.enqueued_dict() for i in plan.enqueued],
+        "deferred": [i.deferred_dict() for i in plan.deferred],
+        "not_enqueued": [i.not_enqueued_dict() for i in plan.not_enqueued],
+        "group_id": plan.group_id if not dry_run else None,
+        "total_chunks": plan.total_chunks,
+        "effect": None,
+    }
+    _log_pin_change(dry_run, updated_by, "chunk_summary", source_id, previous_version, version, result)
     return result

@@ -306,7 +306,7 @@ dry run and then for real:
   - A source deleted mid-job gives done with "source deleted", and no further writes.
   - A pin moved while the job was queued is re-resolved at start, and the payload is updated.
   - No parse, code-embedding or graph function is called (SC-002; assert with spies).
-- [ ] T023 [P] [US2] Write `tests/unit/test_refresh_hooks.py` (research R4, R5):
+- [X] T023 [P] [US2] Write `tests/unit/test_refresh_hooks.py` (research R4, R5):
   - After a `repo` or `incremental` job finishes (done, errors or failed) on a stale source with
     no active job and a writable index, one `resummarize` is enqueued.
   - None is enqueued when:
@@ -391,7 +391,7 @@ dry run and then for real:
     `_summaries_for_chunks`, the embedding path `_process_file` uses, and the job counters from
     research R12 (the `total_files`/`processed_files` chunk units, `total_chunks`, and `message`
     `"refreshed N/M chunks to chunk_summary vK"`).
-- [ ] T030 [US2] Call `prompt_refresh.enqueue_if_stale(job.source_id)` after every terminal
+- [X] T030 [US2] Call `prompt_refresh.enqueue_if_stale(job.source_id)` after every terminal
   status of a non-`resummarize` job in `src/treeweft/adapters/queue/postgres_queue.py`
   (`_run_one`, including the dead-letter path), guarded so that a failure there is logged and
   never fails the finished job. Exempt `kind == "resummarize"` from the "superseded" rule in
@@ -401,7 +401,7 @@ dry run and then for real:
   False`, 200 for both). Return 400 as `JSONResponse({"detail", "valid_versions"})`, and 503
   without Postgres. Register the router next to `indexer_service.py:160`. Add the three summary
   fields to `GET /sources`.
-- [ ] T032 [US2] Regression proofs, each shown failing and then restored, and recorded in the PR:
+- [X] T032 [US2] Regression proofs, each shown failing and then restored, and recorded in the PR:
   - remove the `summary_refresh_target` term from `is_stale`: T005 and T024's pin-back case
     (spec US2 scenario 6) fail (FR-015);
   - let the dry-run branch call `store.upsert`: T024 fails.
@@ -425,7 +425,7 @@ deployment pin, with no job when it is already there.
 
 ### Tests for User Story 3 (write first, confirm they fail)
 
-- [ ] T033 [P] [US3] Write `tests/unit/test_prompt_override_routes.py`:
+- [X] T033 [P] [US3] Write `tests/unit/test_prompt_override_routes.py`:
   - `PUT /prompt-pins/chunk_summary/sources/{id}`, dry run then real: only that source appears;
     an unknown version gives 400 with `valid_versions`; an unknown source gives 404.
   - `PUT /prompt-pins/hyde/sources/{id}`, dry run or not, gives 400.
@@ -447,14 +447,14 @@ deployment pin, with no job when it is already there.
 
 ### Implementation for User Story 3
 
-- [ ] T034 [US3] Add `set_pin(op, source_id, …)` validation (a `hyde` override gives 400) and
+- [X] T034 [US3] Add `set_pin(op, source_id, …)` validation (a `hyde` override gives 400) and
   `clear_override(source_id, …)` to `src/treeweft/application/prompt_pins.py`. Add the `PUT` and
   `DELETE /prompt-pins/chunk_summary/sources/{source_id}` routes and
   `PUT /prompt-pins/hyde/sources/{source_id}` (always 400) to `routes_prompts.py`.
-- [ ] T035 [US3] Add `POST /sources/{source_id}/resummarize` to `routes_prompts.py`. It returns
+- [X] T035 [US3] Add `POST /sources/{source_id}/resummarize` to `routes_prompts.py`. It returns
   the guard's 409 as-is (`await index_guard.require_writable()`), then applies T028's plan for a
   single source, and logs the request per FR-026.
-- [ ] T036 [US3] In `remove_source` (`src/treeweft/application/indexer_service.py:1247-1293`),
+- [X] T036 [US3] In `remove_source` (`src/treeweft/application/indexer_service.py:1247-1293`),
   call `PromptPinStore.delete_overrides_for_source(source_id)` next to `_source_repo.delete`.
   **Not** in the pre-reindex `graph_store.delete_source` path (`indexer_runners.py:766`).
 
@@ -553,7 +553,7 @@ Confirm sends the real request.
   Confirm that `pyproject.toml` is still 1.1.0 and that `v1.1.0` is not tagged (`git tag -l
   v1.1.0`). If it is tagged, bump to 1.2.0 instead (research R13). Do **not** run
   `scripts/update_contracts.py`.
-- [ ] T046 Run the full unit suite, `env -u PYTHONPATH python -m pytest tests/unit -q`, and
+- [X] T046 Run the full unit suite, `env -u PYTHONPATH python -m pytest tests/unit -q`, and
   `cd ui && npm test && npm run build`. Record the pass and fail counts, including
   `test_contracts.py`'s version check.
 - [ ] T047 Run quickstart §3's integration tests against the homelab Milvus and Postgres

@@ -145,6 +145,7 @@ class PostgresJobQueue(JobQueue):
             logger.warning(
                 "Worker %d: job %s refused by index_guard (kind=%s)", worker_id, job_id, job.kind
             )
+            await self._maybe_enqueue_refresh(worker_id, job)
             return
 
         coro = idx_runners.dispatch_job(job)
@@ -155,6 +156,7 @@ class PostgresJobQueue(JobQueue):
             jd["finished_at"] = time.time()
             await idx_runners._persist_job(jd)
             logger.warning("Worker %d: cannot dispatch job %s (kind=%s)", worker_id, job_id, job.kind)
+            await self._maybe_enqueue_refresh(worker_id, job)
             return
 
         self._active_count += 1
@@ -171,7 +173,9 @@ class PostgresJobQueue(JobQueue):
             # Increment attempt counter in DB and check against cap.
             new_attempts = await idx_state._job_store.increment_attempts(job_id)
             if new_attempts < idx.MAX_JOB_ATTEMPTS:
-                # Re-enqueue for another attempt.
+                # Re-enqueue for another attempt. Not terminal -- the
+                # refresh hook must not fire here (research R4): a still
+                # in-flight retry could otherwise race the refresh it starts.
                 logger.warning(
                     "Worker %d: retryable job %s (kind=%s) attempt %d/%d — re-enqueuing",
                     worker_id, job_id, job.kind, new_attempts, idx.MAX_JOB_ATTEMPTS,
@@ -199,6 +203,35 @@ class PostgresJobQueue(JobQueue):
                 from treeweft.infrastructure import metrics
                 metrics.dead_letter_jobs_total.inc()
                 metrics.incremental_jobs_total.labels(status="dead_letter").inc()
+                await self._maybe_enqueue_refresh(worker_id, job)
+        elif exc_raised is None:
+            # A clean finish (done, or done with errors -- the runner
+            # itself already persisted the terminal status/error count).
+            await self._maybe_enqueue_refresh(worker_id, job)
+
+    async def _maybe_enqueue_refresh(self, worker_id: int, job) -> None:
+        """After every terminal status of a non-`resummarize` job (research
+        R4), enqueue a chunk-summary refresh for its source if it is now
+        stale. Never runs after a `resummarize` job itself -- that would
+        let a refresh that keeps failing requeue itself in a loop.
+
+        A failure here is logged and never changes the finished job
+        (constitution V): the job's own status/error was already persisted
+        before this runs, and nothing below touches it.
+        """
+        if job.kind == "resummarize":
+            return
+        source_id = getattr(job, "source_id", None)
+        if not source_id:
+            return
+        try:
+            from treeweft.application import prompt_refresh
+            await prompt_refresh.enqueue_if_stale(source_id)
+        except Exception:
+            logger.exception(
+                "Worker %d: prompt_refresh.enqueue_if_stale(%s) failed after job %s (kind=%s)",
+                worker_id, source_id, job.id, job.kind,
+            )
 
     async def _worker(self, worker_id: int) -> None:
         while self._running:

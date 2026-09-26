@@ -1305,6 +1305,15 @@ async def remove_source(source_id: str, request: Request):
         await _state._source_repo.delete(source_id)
     except Exception:
         pass
+    # A deleted source's chunk_summary override (ADR-003) would otherwise
+    # outlive it, silently governing nothing. Best-effort, like the registry
+    # delete above.
+    try:
+        await prompt_pins._pin_store.delete_overrides_for_source(source_id)
+    except Exception:
+        logger.warning(
+            "failed to delete prompt-pin overrides for deleted source %s", source_id, exc_info=True
+        )
     return {"status": "deleted", "source_id": source_id}
 
 

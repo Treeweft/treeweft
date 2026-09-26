@@ -498,8 +498,15 @@ async def startup(app):
         for job in incomplete:
             jd = job.to_dict()
 
-            # Source is already DONE elsewhere — mark this stale job as superseded.
-            if job.source_id and job.source_id in done_source_ids:
+            # Source is already DONE elsewhere — mark this stale job as
+            # superseded. `resummarize` is exempt (research R5): nothing
+            # else re-runs an interrupted summary-only refresh, so it is
+            # re-enqueued like any job with no prior completion instead.
+            if (
+                job.source_id
+                and job.source_id in done_source_ids
+                and job.kind != "resummarize"
+            ):
                 jd["status"] = "done"
                 jd["finished_at"] = time.time()
                 jd["message"] = "Superseded by prior completed index for this source"

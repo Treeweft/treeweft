@@ -18,16 +18,22 @@ The read endpoint deliberately lives at `/prompt-versions`, not under
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from starlette.responses import JSONResponse
 
 from treeweft.adapters.llm_api import prompts
+from treeweft.application import index_guard
 from treeweft.application import indexer_authz as authz
 from treeweft.application import indexer_state as _state
 from treeweft.application import prompt_pins
+from treeweft.application import prompt_refresh
 from treeweft.application import routes_webhook as _routes_webhook
 from treeweft.domain.prompt_pins import is_stale
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -142,3 +148,120 @@ async def put_prompt_pin(operation: str, req: PinRequest, request: Request, dry_
         return _no_postgres()
 
     return result
+
+
+@router.put("/prompt-pins/chunk_summary/sources/{source_id}")
+async def put_prompt_pin_override(
+    source_id: str, req: PinRequest, request: Request, dry_run: bool = False
+):
+    authz._require_admin(request)
+    if not _state.DATABASE_URL:
+        return _no_postgres()
+
+    try:
+        result = await prompt_pins.set_pin(
+            "chunk_summary", source_id, req.version,
+            updated_by=_caller_id(request), dry_run=dry_run,
+        )
+    except prompt_pins.UnknownPromptVersionError as exc:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": str(exc), "valid_versions": list(exc.valid_versions)},
+        )
+    except prompt_pins.UnknownSourceError:
+        raise HTTPException(404, f"unknown source: {source_id}")
+    except RuntimeError:
+        return _no_postgres()
+
+    return result
+
+
+@router.put("/prompt-pins/hyde/sources/{source_id}")
+async def put_hyde_pin_override(source_id: str, request: Request, dry_run: bool = False):
+    """Always refused: HyDE has no per-source overrides (US3 scenario 4)."""
+    authz._require_admin(request)
+    if not _state.DATABASE_URL:
+        return _no_postgres()
+
+    return JSONResponse(
+        status_code=400, content={"detail": prompt_pins.HYDE_OVERRIDE_DETAIL}
+    )
+
+
+@router.delete("/prompt-pins/chunk_summary/sources/{source_id}")
+async def delete_prompt_pin_override(source_id: str, request: Request, dry_run: bool = False):
+    authz._require_admin(request)
+    if not _state.DATABASE_URL:
+        return _no_postgres()
+
+    try:
+        result = await prompt_pins.clear_override(
+            source_id, updated_by=_caller_id(request), dry_run=dry_run,
+        )
+    except (prompt_pins.UnknownSourceError, prompt_pins.NoOverrideError):
+        raise HTTPException(404, f"no chunk_summary override for source: {source_id}")
+    except RuntimeError:
+        return _no_postgres()
+
+    return result
+
+
+def _log_manual_refresh(
+    caller: str | None, source_id: str, previous_version, target_version: int, outcome: str
+) -> None:
+    logger.warning(
+        "event=prompt_manual_refresh caller=%s source_id=%s previous_version=%s "
+        "target_version=%s outcome=%s",
+        caller, source_id, previous_version, target_version, outcome,
+    )
+
+
+@router.post("/sources/{source_id}/resummarize")
+async def resummarize_source(source_id: str, request: Request):
+    """A manual, single-source refresh (US3 scenario 5, FR-025).
+
+    Routed as POST specifically so the `/sources` GET auth-skip
+    (`indexer_service.py:157`) does not apply to it.
+    """
+    authz._require_admin(request)
+    if not _state.DATABASE_URL:
+        return _no_postgres()
+
+    source = await _state._source_repo.get_by_id(source_id)
+    if source is None:
+        raise HTTPException(404, f"unknown source: {source_id}")
+
+    gate = await index_guard.require_writable()
+    if gate is not None:
+        return gate
+
+    caller = _caller_id(request)
+    target = prompt_pins.effective("chunk_summary", source_id)
+
+    plan = await prompt_refresh.plan_refreshes([source], lambda _sid: target)
+
+    if not plan.enqueued and not plan.deferred:
+        result = {"job_id": None, "reason": f"already current at chunk_summary v{target}"}
+        _log_manual_refresh(
+            caller, source_id, source.summary_prompt_version, target, "already_current"
+        )
+        return result
+
+    if plan.deferred:
+        item = plan.deferred[0]
+        result = {"job_id": item.blocking_job_id, "deferred": True}
+        _log_manual_refresh(caller, source_id, item.current_version, target, "deferred")
+        return result
+
+    plan = await prompt_refresh.enqueue_refreshes(plan, created_by=caller)
+
+    if plan.deferred:
+        item = plan.deferred[0]
+        result = {"job_id": item.blocking_job_id, "deferred": True}
+        _log_manual_refresh(caller, source_id, item.current_version, target, "deferred")
+        return result
+
+    item = plan.enqueued[0]
+    result = {"job_id": item.job_id, "target_version": target}
+    _log_manual_refresh(caller, source_id, item.current_version, target, "enqueued")
+    return JSONResponse(status_code=202, content=result)
