@@ -207,11 +207,11 @@ priority as US1.
     - the Ryuk overrides (`TESTCONTAINERS_RYUK_PRIVILEGED`, `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE`)
       for rootless Docker or Docker Desktop;
     - `.itest-logs` and the CI artifact.
-- [ ] T016 Regression proof (SC-004, run locally): temporarily break `_escape_literal` in
+- [X] T016 Regression proof (SC-004, run locally): temporarily break `_escape_literal` in
   `src/treeweft/adapters/milvus/vector_store.py`, run the self-provisioned suite, and confirm that
   `test_milvus_filter_injection.py` fails. Revert, and confirm `git diff` shows no source change.
   Record the failing test names.
-- [ ] T017 Final verification:
+- [X] T017 Final verification:
   - the unit suite (record the count), plus a run with `DOCKER_HOST=unix:///nonexistent.sock`
     (SC-005);
   - the full self-provisioned integration suite (record counts and time);
