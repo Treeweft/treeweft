@@ -23,6 +23,7 @@ from treeweft import graph_store
 from treeweft.application import index_guard
 from treeweft.application import indexer_state as _state
 from treeweft.application import indexer_runners as runners
+from treeweft.application import prompt_pins
 from treeweft.application import routes_auth as rauth
 from treeweft.domain.authorization import Role
 from treeweft.application.fleet import select_sources_to_refresh
@@ -441,6 +442,13 @@ async def startup(app):
 
     await _seed_admin_if_first_start()
 
+    # ── Prompt pins (ADR-003, research R9) ───────────────────────────────
+    # No try/except (constitution V): a missing migration 021 or an
+    # unregistered stored pin must abort startup, not be logged and
+    # swallowed. A no-op without DATABASE_URL (logs a warning).
+    await prompt_pins.load_and_seed()
+    await prompt_pins.start_sync()
+
     # ── JobStore/JobGroupStore: initialize before the index-schema check ────
     # ADR-004 §3 (research R2): the check reads the latest rebuild group
     # through JobGroupStore, so both stores must exist before it runs. It
@@ -585,6 +593,9 @@ async def shutdown(app):
     await graph_store.close()
     if _state._job_queue is not None:
         await _state._job_queue.stop()
+    # Stop the prompt-pins listener/refresh loop, next to the embedding
+    # listener stop below (both are dedicated Postgres connections).
+    await prompt_pins.stop_sync()
     # Stop the embedding proxy's NOTIFY listener (releases its dedicated
     # connection). Must happen before close_pool() since this connection
     # is independent of the pool but still talks to the same Postgres.

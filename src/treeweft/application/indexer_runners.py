@@ -42,6 +42,9 @@ from treeweft.infrastructure.config import (
 from treeweft.infrastructure.fileio import read_source
 from treeweft.retriever import delete_chunks_by_file
 from treeweft.retriever import init_collection, insert_chunks, delete_chunks_by_source
+from treeweft.retriever import summary_vectors_supported
+
+_SUMMARIZING_KINDS = frozenset({"repo"})
 from dataclasses import dataclass
 from typing import Any, Coroutine
 import asyncio
@@ -501,13 +504,37 @@ def _collect_files(path: str, skip_patterns: list[str] | None = None) -> list[st
     return sorted(files)
 
 
-async def _summaries_for_chunks(chunks: list[dict]) -> list[str | None]:
+async def _resolve_summary_version(job: dict) -> int:
+    """Resolve a full job's chunk-summary target version, once (research R6).
+
+    Reuses `job["payload"]["summary_version"]` when already present -- a
+    resumed job keeps using the version it started with, even if the pin has
+    moved since. Otherwise resolves the source's effective version, stores
+    it in the payload, and persists the job.
+    """
     from treeweft.application import prompt_pins
 
-    # T016 rewrites this to take the job's target version as a parameter
-    # (research R6); until then it resolves the deployment/override version
-    # itself, same as `generate_summary()` does for other callers.
-    version = prompt_pins.effective("chunk_summary")
+    payload = job.get("payload") or {}
+    version = payload.get("summary_version")
+    if version is not None:
+        return version
+    version = prompt_pins.effective("chunk_summary", job.get("source_id"))
+    payload["summary_version"] = version
+    job["payload"] = payload
+    await _persist_job(job)
+    return version
+
+
+async def _summaries_for_chunks(
+    chunks: list[dict], *, version: int,
+) -> list[tuple[str | None, str]]:
+    """Resolve a summary outcome per chunk at the given prompt version.
+
+    Returns one `(summary, strategy)` pair per chunk, `strategy` one of
+    `"cached"`, `"generated"`, `"rejected"`, `"error"`. A cache hit is
+    `("...", "cached")`; a cached rejection marker (`""`) is
+    `(None, "rejected")`.
+    """
     keys = [llm.chunk_cache_key(c["text"]) for c in chunks]
     with tracer.start_as_current_span(
         "summaries.cache_lookup",
@@ -516,16 +543,17 @@ async def _summaries_for_chunks(chunks: list[dict]) -> list[str | None]:
         cached = await llm.cache_get_many(keys, version, include_rejected=True)
         span.set_attribute("treeweft.cache_hits", len(cached))
         span.set_attribute("treeweft.cache_misses", len(keys) - len(cached))
-    out: list[str | None] = [None] * len(chunks)
+    out: list[tuple[str | None, str]] = [(None, "error")] * len(chunks)
     pending: list[int] = []
     for i, key in enumerate(keys):
         if key in cached:
-            out[i] = cached[key] or None  # rejection marker -> no summary
+            summary = cached[key]
+            out[i] = (summary, "cached") if summary else (None, "rejected")
         else:
             pending.append(i)
 
     if pending:
-        async def _one(i: int) -> tuple[int, str | None]:
+        async def _one(i: int) -> tuple[int, tuple[str | None, str]]:
             if OTEL_TRACE_PER_CHUNK:
                 with tracer.start_as_current_span(
                     "summaries.generate",
@@ -534,24 +562,24 @@ async def _summaries_for_chunks(chunks: list[dict]) -> list[str | None]:
                         "treeweft.llm_model": os.environ.get("LLM_MODEL", ""),
                     },
                 ):
-                    summary, _strategy = await llm.summarize_with_cache(
+                    outcome = await llm.summarize_with_cache(
                         chunks[i]["text"], chunks[i].get("language", ""),
                         chunks[i]["file_path"], version=version,
                     )
-                    return i, summary
-            summary, _strategy = await llm.summarize_with_cache(
+                    return i, outcome
+            outcome = await llm.summarize_with_cache(
                 chunks[i]["text"], chunks[i].get("language", ""),
                 chunks[i]["file_path"], version=version,
             )
-            return i, summary
+            return i, outcome
 
         with tracer.start_as_current_span(
             "summaries.generate_batch",
             attributes={"treeweft.miss_count": len(pending)},
         ):
             results = await asyncio.gather(*(_one(i) for i in pending), return_exceptions=False)
-        for i, summary in results:
-            out[i] = summary
+        for i, outcome in results:
+            out[i] = outcome
     return out
 
 
@@ -559,7 +587,9 @@ async def _process_file(
     file_path: str,
     source_id: str,
     *,
+    version: int,
     skip_graph: bool = False,
+    job: dict | None = None,
 ) -> int:
     from treeweft.infrastructure.retry import retry_with_backoff, SkipError
 
@@ -605,7 +635,14 @@ async def _process_file(
 
     summary_embs: list[list[float] | None] | None = None
     if USE_SUMMARY_VECTOR:
-        summaries = await _summaries_for_chunks(chunks)
+        outcomes = await _summaries_for_chunks(chunks, version=version)
+        summaries = [s for s, _strategy in outcomes]
+        error_count = sum(1 for _s, strategy in outcomes if strategy == "error")
+        if error_count and job is not None:
+            job["summary_errors"] = (job.get("summary_errors") or 0) + error_count
+            job_payload = job.get("payload") or {}
+            job_payload["summary_errors"] = (job_payload.get("summary_errors") or 0) + error_count
+            job["payload"] = job_payload
         to_embed = [s for s in summaries if s]
         if to_embed:
             with tracer.start_as_current_span(
@@ -684,6 +721,7 @@ async def _walk_and_index(
     sem = asyncio.Semaphore(INDEX_FILE_CONCURRENCY)
     persist_lock = asyncio.Lock()
     skip_graph = bool(job.get("skip_graph", False))
+    summary_version = (job.get("payload") or {}).get("summary_version")
 
     async def _process_one(file_path: str) -> None:
         async with sem:
@@ -709,7 +747,10 @@ async def _walk_and_index(
             ) as file_span:
                 try:
                     n = await asyncio.wait_for(
-                        _process_file(file_path, source_id, skip_graph=skip_graph),
+                        _process_file(
+                            file_path, source_id,
+                            version=summary_version, skip_graph=skip_graph, job=job,
+                        ),
                         timeout=INDEX_FILE_TIMEOUT,
                     )
                 except asyncio.TimeoutError as exc:
@@ -916,6 +957,25 @@ async def _finalize_job(job: dict, total_chunks: int, total_files: int, message:
         await _state._source_repo.save(record)
     except Exception:
         pass  # Degraded mode — graph store is the primary persistence
+
+    # ADR-003 research R6 / FR-010; graph and incremental jobs never touch it.
+    kind = job.get("kind") or "repo"
+    if kind in ("file", "directory", "repo"):
+        try:
+            # Only repo jobs summarize (via _process_file); file and directory
+            # jobs insert without summary vectors, so they record "unknown".
+            if kind in _SUMMARIZING_KINDS and USE_SUMMARY_VECTOR and summary_vectors_supported():
+                summary_errors = int(job.get("summary_errors") or 0)
+                if errors == 0 and summary_errors == 0:
+                    version = (job.get("payload") or {}).get("summary_version")
+                    await _state._source_repo.record_summary_version(job["source_id"], version)
+            else:
+                await _state._source_repo.record_summary_version(job["source_id"], None)
+        except Exception:
+            logger.exception(
+                "record_summary_version failed for source %s", job.get("source_id"),
+            )
+
     metrics.active_jobs.dec()
     await _persist_job(job)
 
@@ -965,6 +1025,7 @@ async def _run_index_file_job(job: dict, file_path: str):
             job["status"] = "running"
             metrics.active_jobs.inc()
             metrics.queue_depth.dec()
+            await _resolve_summary_version(job)
             job["total_files"] = 1
             job["current_file"] = file_path
             if resuming and job.get("committed_files", 0) >= 1:
@@ -1018,6 +1079,7 @@ async def _run_index_directory_job(job: dict, directory: str, pattern: str):
         job["status"] = "running"
         metrics.active_jobs.inc()
         metrics.queue_depth.dec()
+        await _resolve_summary_version(job)
         if not resuming:
             await _reset_source(job["source_id"])
             job["committed_files"] = 0
@@ -1188,6 +1250,7 @@ async def _run_index_repo_job(
         job["status"] = "running"
         metrics.active_jobs.inc()
         metrics.queue_depth.dec()
+        await _resolve_summary_version(job)
         if not resuming:
             await _reset_source(job["source_id"])
             job["committed_files"] = 0

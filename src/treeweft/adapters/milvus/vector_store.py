@@ -632,6 +632,11 @@ async def drop_index() -> None:
     return await _get_adapter().drop_index()
 
 
+def summary_vectors_supported() -> bool:
+    """Milvus stores a non-nullable summary_vector (research R7)."""
+    return True
+
+
 async def insert_chunks(
     chunks: list[dict],
     embeddings: list[list[float]],

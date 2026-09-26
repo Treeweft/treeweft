@@ -450,3 +450,8 @@ async def drop_index() -> None:
     await asyncio.to_thread(_drop)
     with _lock:
         _table = None
+
+
+def summary_vectors_supported() -> bool:
+    """LanceDB stores a nullable summary_vector (research R7)."""
+    return True

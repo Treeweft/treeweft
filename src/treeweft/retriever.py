@@ -32,6 +32,7 @@ if _store == "chromadb":
         observe_index,
         sample_chunks,
         search,
+        summary_vectors_supported,
         write_stamp,
     )
 
@@ -79,6 +80,7 @@ elif _store == "lancedb":
         observe_index,
         sample_chunks,
         search,
+        summary_vectors_supported,
         write_stamp,
     )
 else:
@@ -96,6 +98,7 @@ else:
         observe_index,
         sample_chunks,
         search,
+        summary_vectors_supported,
         write_stamp,
     )
 

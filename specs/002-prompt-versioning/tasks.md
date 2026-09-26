@@ -197,7 +197,7 @@ deployment is seeded to v4.
 
 ### Tests for User Story 1 (write first, confirm they fail)
 
-- [ ] T013 [P] [US1] Write `tests/unit/test_full_index_summary_version.py` (research R6,
+- [X] T013 [P] [US1] Write `tests/unit/test_full_index_summary_version.py` (research R6,
   FR-010), with a fake vector store and a fake source repo:
   - A clean `repo`, `directory` or `file` job calls `record_summary_version(source, <payload
     version>)`, which also clears the target.
@@ -209,12 +209,12 @@ deployment is seeded to v4.
   - A `graph` job and an `incremental` job never call either method.
   - The target version is resolved once at job start into `job["payload"]["summary_version"]`.
     A resumed job (`skip_count > 0`) reuses it even after the pin moves, and records that version.
-- [ ] T014 [P] [US1] Write `tests/unit/test_summary_tail_version.py` (research R8):
+- [X] T014 [P] [US1] Write `tests/unit/test_summary_tail_version.py` (research R8):
   - With no per-request version, tail chunks are read at each source's recorded version, and a
     miss falls back to the effective version. There is one `cache_get_many` call per distinct
     version.
   - An explicit `summary_prompt_version=9002` is passed through unvalidated.
-- [ ] T015 [P] [US1] Write `tests/unit/test_lifecycle_prompt_pins.py`:
+- [X] T015 [P] [US1] Write `tests/unit/test_lifecycle_prompt_pins.py`:
   - `startup()` calls `prompt_pins.load_and_seed()` after `run_migrations()` and before
     `index_guard.run_check()` and the job queue's `start()` (assert the call order).
   - A `RuntimeError` from it propagates, so startup aborts, and it is not logged-and-swallowed.
@@ -222,7 +222,7 @@ deployment is seeded to v4.
 
 ### Implementation for User Story 1
 
-- [ ] T016 [US1] In `src/treeweft/application/indexer_runners.py`:
+- [X] T016 [US1] In `src/treeweft/application/indexer_runners.py`:
   - `_summaries_for_chunks(chunks, *, version) -> list[SummaryOutcome]`;
   - the full-job runners (file, directory, repo) resolve `prompt_pins.effective("chunk_summary",
     source_id)` at start into `job["payload"]["summary_version"]`, unless it is already present
@@ -234,14 +234,14 @@ deployment is seeded to v4.
   This task also adds `summary_vectors_supported()` (Milvus and LanceDB return True, ChromaDB
   False) to the three vector-store modules and the `treeweft.retriever` import blocks, because the
   rule needs it. T025–T027 add the other four store functions.
-- [ ] T017 [US1] In `src/treeweft/application/retrieval.py` (around `:1011`), implement research
+- [X] T017 [US1] In `src/treeweft/application/retrieval.py` (around `:1011`), implement research
   R8's default read version, grouping `cache_get_many` calls by version.
-- [ ] T018 [US1] In `src/treeweft/application/lifecycle.py`:
+- [X] T018 [US1] In `src/treeweft/application/lifecycle.py`:
   - call `await prompt_pins.load_and_seed()` right after `_seed_admin_if_first_start()`, with no
     try/except (constitution V);
   - then call `await prompt_pins.start_sync()`, and `stop_sync()` in shutdown next to the
     embedding listener (`:594`).
-- [ ] T019 [US1] Regression proof: revert T016's incremental/graph exclusion locally (let
+- [X] T019 [US1] Regression proof: revert T016's incremental/graph exclusion locally (let
   `_finalize_incremental_job` call `record_summary_version`), confirm that
   `test_full_index_summary_version.py` fails, then restore. Record this in the PR (constitution
   II, FR-010).

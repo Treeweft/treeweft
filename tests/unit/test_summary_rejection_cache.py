@@ -234,5 +234,6 @@ async def test_summaries_for_chunks_treats_marker_as_cached_none(monkeypatch):
 
     monkeypatch.setattr(llm, "cache_get_many", _get_many)
     monkeypatch.setattr(llm, "summarize_with_cache", _summarize)
-    assert await indexer_runners._summaries_for_chunks(chunks) == ["Defines a.", None]
+    outcomes = await indexer_runners._summaries_for_chunks(chunks, version=3)
+    assert outcomes == [("Defines a.", "cached"), (None, "rejected")]
     assert generated == []

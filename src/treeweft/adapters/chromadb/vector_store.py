@@ -366,3 +366,8 @@ async def drop_index() -> None:
     except chromadb.errors.NotFoundError:
         pass
     adapter._collection = None
+
+
+def summary_vectors_supported() -> bool:
+    """ChromaDB has no summary vector: insert_chunks drops it (research R7)."""
+    return False

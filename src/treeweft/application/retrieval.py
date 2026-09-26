@@ -731,6 +731,88 @@ def _apply_response_mode(
     return out
 
 
+async def _recorded_versions(source_ids: set[str]) -> dict[str, int | None]:
+    """Look up each source's recorded `chunk_summary` version.
+
+    Returns `None` for a source whose record is missing or whose lookup
+    failed (Postgres unavailable) -- both mean "unknown", and the caller
+    falls back to the effective version.
+    """
+    from treeweft.application import indexer_state as _state
+
+    versions: dict[str, int | None] = {}
+    for source_id in source_ids:
+        try:
+            record = await _state._source_repo.get_by_id(source_id)
+        except Exception:
+            record = None
+        versions[source_id] = (
+            record.summary_prompt_version if record is not None else None
+        )
+    return versions
+
+
+async def _resolve_tail_summaries(
+    tail_entries: list[tuple[str, str | None]],
+    *,
+    summary_prompt_version: int | None,
+) -> dict[str, str]:
+    """Resolve cached summaries for summary_tail chunks (research R8).
+
+    `tail_entries` is a list of (sha1, source_id) pairs for the tail chunks.
+
+    - An explicit `summary_prompt_version` is passed through unchanged and
+      NOT validated against the registry -- a single `cache_get_many` call.
+    - Otherwise each chunk is read at its source's RECORDED version
+      (`source_records.summary_prompt_version`), falling back to the
+      source's EFFECTIVE version (`prompt_pins.effective`) for chunks missed
+      at the recorded version, and for chunks whose recorded version is
+      unknown. Calls are grouped by version: one `cache_get_many` per
+      distinct version.
+    """
+    if not tail_entries:
+        return {}
+
+    if summary_prompt_version is not None:
+        shas = sorted({sha for sha, _ in tail_entries})
+        return await llm.cache_get_many(
+            shas, prompt_version=summary_prompt_version
+        )
+
+    from treeweft.application import prompt_pins
+
+    source_ids = {source_id for _, source_id in tail_entries if source_id}
+    recorded = await _recorded_versions(source_ids)
+
+    by_recorded_version: dict[int, set[str]] = {}
+    for sha, source_id in tail_entries:
+        version = recorded.get(source_id) if source_id else None
+        if version is not None:
+            by_recorded_version.setdefault(version, set()).add(sha)
+
+    summary_by_sha: dict[str, str] = {}
+    for version, shas in by_recorded_version.items():
+        summary_by_sha.update(
+            await llm.cache_get_many(sorted(shas), prompt_version=version)
+        )
+
+    # Chunks with an unknown recorded version, and chunks missed at their
+    # recorded version, are read again at the source's effective version.
+    by_effective_version: dict[int, set[str]] = {}
+    for sha, source_id in tail_entries:
+        if sha in summary_by_sha:
+            continue
+        version = prompt_pins.effective("chunk_summary", source_id)
+        by_effective_version.setdefault(version, set()).add(sha)
+
+    for version, shas in by_effective_version.items():
+        fallback = await llm.cache_get_many(sorted(shas), prompt_version=version)
+        for sha, summary in fallback.items():
+            summary_by_sha.setdefault(sha, summary)
+
+    return summary_by_sha
+
+
 # Neighbor payload cap and ranking. Neighbors arrive as raw Neo4j node dicts;
 # on a typical hit most are ExternalModule import targets (bare npm/pip names
 # the agent can't open). Rank internal entities (they have a file_path) and
@@ -964,8 +1046,13 @@ async def graph_search(
     shared_source = next(iter(hit_sources)) if len(hit_sources) == 1 else None
     chunks = []
     raw_texts: list[str | None] = []
+    # Captured before the shared_source nulling below, so summary_tail can
+    # still resolve each tail chunk's source even on a repo-scoped search
+    # where every hit's wire-level source_id is dropped.
+    hit_source_ids: list[str | None] = []
     for hit in hits:
         raw_texts.append(raw_text_by_id.get(id(hit)))
+        hit_source_ids.append(hit.source_id)
         # Strip import/using/#include lines from the BODY before the header is
         # prepended — the header is a comment line, never matched.
         if strip_imp and hit.snippet:
@@ -1001,26 +1088,17 @@ async def graph_search(
     if response_mode != "full":
         summary_by_sha: dict[str, str] = {}
         if response_mode == "summary_tail":
-            tail_shas = sorted({
-                llm.chunk_cache_key(raw)
-                for raw in raw_texts[SUMMARY_TAIL_HEAD:]
-                if raw
-            })
-            if tail_shas:
+            tail_entries = [
+                (llm.chunk_cache_key(raw), hit_source_ids[i])
+                for i, raw in enumerate(raw_texts)
+                if i >= SUMMARY_TAIL_HEAD and raw
+            ]
+            if tail_entries:
                 try:
-                    # T017 rewrites this to resolve the source's version
-                    # properly (research R8); until then, fall back to the
-                    # deployment/override pin when no per-request override
-                    # was given, same as before `prompt_version` was
-                    # required.
-                    from treeweft.application import prompt_pins
-
-                    resolved_version = (
-                        summary_prompt_version
-                        or prompt_pins.effective("chunk_summary")
+                    summary_by_sha = await _resolve_tail_summaries(
+                        tail_entries,
+                        summary_prompt_version=summary_prompt_version,
                     )
-                    summary_by_sha = await llm.cache_get_many(
-                        tail_shas, prompt_version=resolved_version)
                 except Exception:
                     # Summary cache unavailable -> every tail chunk falls back
                     # to its full snippet (never an empty body).

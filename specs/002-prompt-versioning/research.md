@@ -169,6 +169,10 @@ any job with no prior completion. A re-run redoes the source cheaply (summary ca
     mark. The source now holds no summary vectors, which is the ADR's meaning of NULL ("never
     summarized").
   - Anything else: change neither column.
+- **Found during implementation (T016):** only `repo` jobs summarize (through `_walk_and_index`
+  and `_process_file`). `file` and `directory` jobs insert chunks with no summary vectors. So
+  those two kinds follow the "summary vectors off" branch and record `NULL`. Recording their
+  version would report empty summary vectors as current.
 - The `graph` and `incremental` kinds never touch either column (FR-010). Incremental jobs
   already bypass the source registry (`_finalize_incremental_job`, `indexer_runners.py:796`).
 - If the effective version changed during the job, the job still records the version it used, so
