@@ -128,7 +128,7 @@ summary and HyDE paths. Every story needs them.
 
 ### Pin view, seeding and sync
 
-- [ ] T009 [P] Write `tests/unit/test_prompt_pins_sync.py`, with a fake pool and a fake listener
+- [X] T009 [P] Write `tests/unit/test_prompt_pins_sync.py`, with a fake pool and a fake listener
   connection:
   - `load_and_seed()`:
     - on an empty table with no sources, seeds latest;
@@ -147,7 +147,7 @@ summary and HyDE paths. Every story needs them.
   - With `DATABASE_URL` unset, `effective()` returns `BASELINE`, and `load_and_seed()` writes
     nothing and logs one warning: "prompt pins unavailable without DATABASE_URL; using baseline
     chunk_summary v3, hyde v1" (constitution V: an observable fallback).
-- [ ] T010 Implement `src/treeweft/application/prompt_pins.py`:
+- [X] T010 Implement `src/treeweft/application/prompt_pins.py`:
   - the module-level `PinView`, swapped atomically, and `effective(op, source_id=None)`;
   - `load_and_seed()`, per research R9;
   - `start_sync()` and `stop_sync()`, copying `EmbeddingProxy.start_listener`'s dedicated
