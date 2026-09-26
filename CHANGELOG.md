@@ -52,6 +52,11 @@ Added, Fixed.
   model; this needs the embedding service reachable. Until it succeeds,
   the index reports `unverified`: search keeps working, but new index
   jobs are refused. See `docs/upgrading.md`.
+- Migration 022 indexes jobs with the new `waiting` status. Index work
+  (webhooks, index requests, graph rebuilds, fleet refreshes) preempts an
+  active summary refresh instead of being dropped: a queued refresh is
+  cancelled, and a running one finishes its current batch and stops while
+  the index job waits behind it.
 - Migration 021 adds `prompt_pins` and the `source_records` columns
   `summary_prompt_version`/`summary_refresh_target`. Prompt pins are
   seeded on first start: an existing deployment's sources were built with

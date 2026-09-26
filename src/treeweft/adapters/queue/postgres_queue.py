@@ -244,6 +244,18 @@ class PostgresJobQueue(JobQueue):
         if not source_id:
             return
 
+        # Promote a job waiting on this one first (refresh preemption chains
+        # waiting jobs behind any kind), so the refresh checks below see the
+        # source as busy and defer instead of racing it.
+        try:
+            from treeweft.application import prompt_refresh
+            await prompt_refresh.promote_waiting_after(job.id)
+        except Exception:
+            logger.exception(
+                "Worker %d: promote_waiting_after(%s) failed for source %s",
+                worker_id, job.id, source_id,
+            )
+
         if job.kind == "resummarize":
             try:
                 from treeweft.application import indexer_state as idx_state

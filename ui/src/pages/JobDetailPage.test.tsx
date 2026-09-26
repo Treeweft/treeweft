@@ -70,7 +70,7 @@ function detail(tasks: JobTask[]): JobGroupDetail {
     created_at: Date.now() / 1000 - 60,
     created_by: "user_1",
     task_count: tasks.length,
-    status_counts: { queued: 0, running: 0, done: 0, failed: 0, dead_letter: 0 },
+    status_counts: { queued: 0, running: 0, waiting: 0, done: 0, failed: 0, dead_letter: 0 },
     progress: { processed_files: 6, total_files: 12 },
     status: "running",
     tasks,

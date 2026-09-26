@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Awaitable, Callable
 
 import asyncpg
 
@@ -269,3 +270,98 @@ async def enqueue_if_stale(source_id: str) -> str | None:
         chunk_count=int(source.chunk_count or 0),
     )
     return await _create_resummarize_job(item, created_by=None, group_id=None)
+
+
+# ---------------------------------------------------------------------------
+# Refresh preemption (code-review finding #6): index work must not be
+# silently dropped while a `resummarize` refresh owns a source's only
+# "active job" slot (jobs_active_source_uniq, migration 008).
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PreemptOutcome:
+    """Result of `preempt_active_refresh` — the job it created plus how."""
+
+    job: dict
+    # "queued": no resummarize was active, or its queued row was cancelled in
+    #   time and the incoming job was enqueued exactly as the route would today.
+    # "waiting": the resummarize was already running (or won the claim race);
+    #   the incoming job was persisted with status=waiting and left out of
+    #   job_queue, to be promoted once the refresh reaches a terminal status.
+    mode: str
+    preempted_job_id: str | None = None
+
+
+async def preempt_active_refresh(
+    source_id: str, build_job: Callable[[], Awaitable[dict]],
+) -> PreemptOutcome:
+    """Let index work preempt an active `resummarize` refresh for `source_id`.
+
+    `build_job` is an async callable that builds (and, if the route attaches
+    a job group, does so) the incoming job dict exactly as the call site
+    would today — but does not persist or enqueue it; this function owns
+    that step, so it can choose "queued" or "waiting" atomically.
+
+    Call sites must call this ONLY when `_find_active_job_for_source` found
+    an active job of kind `resummarize` — for any other kind, callers keep
+    today's dedup response unchanged. This function re-checks the active job
+    itself (case 3 in the design: it may have finished, or no longer be a
+    resummarize, between the caller's check and this call), so it degrades
+    gracefully to a plain enqueue when there is nothing left to preempt.
+    """
+    refresh = await _routes_webhook._find_active_job_for_source(source_id)
+    if refresh is None or refresh.get("kind") != "resummarize":
+        job = await build_job()
+        await runners._persist_job(job)
+        await _state._job_queue.enqueue(job["job_id"])
+        return PreemptOutcome(job=job, mode="queued", preempted_job_id=None)
+
+    refresh_id = refresh["job_id"]
+    job = await build_job()
+
+    canceled = await _state._job_store.cancel_if_queued(
+        refresh_id, message=f"preempted by {job.get('kind') or 'index'} job",
+    )
+    if canceled:
+        await runners._persist_job(job)
+        await _state._job_queue.enqueue(job["job_id"])
+        return PreemptOutcome(job=job, mode="queued", preempted_job_id=refresh_id)
+
+    # Either genuinely running, or a worker claimed it (queued -> running)
+    # between our check and the cancel attempt — both fall through here.
+    job["status"] = "waiting"
+    job["payload"] = {**(job.get("payload") or {}), "after_job": refresh_id}
+    job["message"] = "queued after the running summary refresh"
+    await runners._persist_job(job)
+    return PreemptOutcome(job=job, mode="waiting", preempted_job_id=refresh_id)
+
+
+async def promote_waiting_after(after_job_id: str) -> list[str]:
+    """Promote the oldest job waiting on `after_job_id` once that job is
+    terminal, and chain the rest behind it, so every request runs in order.
+
+    Superseding older requests would lose work: two incremental pushes carry
+    different changed files. Returns the promoted job_id ([] if none).
+    """
+    store = _state._job_store
+    if store is None or not after_job_id:
+        return []
+
+    waiting = await store.find_waiting_after(after_job_id)
+    if not waiting:
+        return []
+
+    waiting.sort(key=lambda j: j.start_time)
+    first, *rest = waiting
+
+    for j in rest:
+        jd = j.to_dict()
+        jd["payload"] = {**(jd.get("payload") or {}), "after_job": first.id}
+        await runners._persist_job(jd)
+
+    jd = first.to_dict()
+    jd["status"] = "queued"
+    await runners._persist_job(jd)
+    await _state._job_queue.enqueue(first.id)
+    return [first.id]

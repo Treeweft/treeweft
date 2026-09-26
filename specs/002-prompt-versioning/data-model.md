@@ -110,6 +110,14 @@ Here `rec` is `summary_prompt_version` and `T` is the effective chunk-summary ve
 | `message` | `"refreshed N/M chunks to chunk_summary vK"`, or the reason for a no-op |
 | `group_id` | A deployment-pin change enqueuing more than one refresh creates one job group (`kind="prompt-refresh"`) for progress. A single refresh is a group of one, as for other jobs |
 
+## Waiting jobs (refresh preemption)
+
+A job created while its source's refresh is running has `status = 'waiting'` (new
+`JobStatus.WAITING`) and `payload.after_job` = the job it waits on. `waiting` is outside
+migration 008's one-active-job status set, and the job is not in `job_queue` until promoted.
+Migration 022 adds a partial index on `payload->>'after_job'` `WHERE status = 'waiting'`. Job
+groups count a waiting job as active.
+
 ## Validation rules
 
 | Rule | Where | Error |

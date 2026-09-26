@@ -12,6 +12,11 @@ class JobStatus(str, enum.Enum):
     DONE = "done"
     FAILED = "failed"
     DEAD_LETTER = "dead_letter"
+    # A job built and persisted, but deliberately kept out of job_queue and
+    # out of the jobs_active_source_uniq status set (migration 008) because
+    # it is waiting for a running `resummarize` refresh (payload["after_job"])
+    # to vacate the source first (ADR-003 preemption design).
+    WAITING = "waiting"
 
 
 @dataclass

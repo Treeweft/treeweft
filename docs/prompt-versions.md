@@ -123,11 +123,22 @@ completes.
 A source can have only one active job. If a stale source already has one
 running (an index, incremental, or another refresh), the pin-change
 response lists it under `deferred` with the blocking job's ID instead of
-enqueuing a second job. When that job finishes — of any kind other than
-`resummarize` — the source is re-checked and a refresh is enqueued for it
-automatically if it is still stale. A refresh is never enqueued twice for
-one source, and a finished refresh never re-enqueues itself, so a refresh
-that keeps failing won't loop; see "Retrying a refresh" below.
+enqueuing a second job. When that job finishes, the source is re-checked
+and a refresh is enqueued for it automatically if it is still stale. A
+refresh is never enqueued twice for one source, and a finished refresh
+re-triggers only when a pin change overtook it, so a refresh that keeps
+failing won't loop; see "Retrying a refresh" below.
+
+### Index work preempts a refresh
+
+A webhook push, an index request, a graph rebuild or a fleet refresh for a
+source whose refresh is active is never dropped. A queued refresh is
+cancelled ("preempted by … job") and the index job runs. If the refresh is
+already running, the index job is accepted with status `waiting`; the
+refresh stops at its next batch ("preempted by index work after N/M
+chunks"), the source stays stale, and the waiting job runs. Several waiting
+jobs run in arrival order. The refresh is re-enqueued afterwards if the
+source is still stale.
 
 ### Not-enqueued refreshes
 

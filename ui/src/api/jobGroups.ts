@@ -12,6 +12,7 @@ import { api } from "@/api/client";
 export interface StatusCounts {
   queued: number;
   running: number;
+  waiting: number;
   done: number;
   failed: number;
   dead_letter: number;
@@ -30,6 +31,10 @@ export type GroupStatus = "running" | "failed" | "done" | "queued";
 export type TaskStatus =
   | "queued"
   | "running"
+  // Created while its source's resummarize refresh was RUNNING; not in
+  // job_queue yet, promoted to "queued" once that refresh finishes
+  // (ADR-003 preemption, finding #6). Counts as in-progress, never "done".
+  | "waiting"
   | "done"
   | "failed"
   | "dead_letter";
@@ -152,8 +157,8 @@ export function jobStatusCounts(groups: JobGroupSummary[]): {
 }
 
 /**
- * Bucket a group's tasks into in-progress (running/queued), done, and failed
- * (failed/dead_letter). Order within each bucket is preserved from input.
+ * Bucket a group's tasks into in-progress (running/queued/waiting), done, and
+ * failed (failed/dead_letter). Order within each bucket is preserved from input.
  */
 export function taskBuckets(tasks: JobTask[]): {
   inprogress: JobTask[];
@@ -164,7 +169,8 @@ export function taskBuckets(tasks: JobTask[]): {
   const done: JobTask[] = [];
   const failed: JobTask[] = [];
   for (const t of tasks) {
-    if (t.status === "running" || t.status === "queued") inprogress.push(t);
+    if (t.status === "running" || t.status === "queued" || t.status === "waiting")
+      inprogress.push(t);
     else if (t.status === "done") done.push(t);
     else if (t.status === "failed" || t.status === "dead_letter")
       failed.push(t);
@@ -176,13 +182,15 @@ export function taskBuckets(tasks: JobTask[]): {
 export function taskStatusCounts(tasks: JobTask[]): {
   running: number;
   queued: number;
+  waiting: number;
   done: number;
   failed: number;
 } {
-  const out = { running: 0, queued: 0, done: 0, failed: 0 };
+  const out = { running: 0, queued: 0, waiting: 0, done: 0, failed: 0 };
   for (const t of tasks) {
     if (t.status === "running") out.running += 1;
     else if (t.status === "queued") out.queued += 1;
+    else if (t.status === "waiting") out.waiting += 1;
     else if (t.status === "done") out.done += 1;
     else if (t.status === "failed" || t.status === "dead_letter")
       out.failed += 1;

@@ -40,7 +40,7 @@ function group(over: Partial<JobGroupSummary>): JobGroupSummary {
     created_at: Date.now() / 1000 - 120,
     created_by: "user_1",
     task_count: 4,
-    status_counts: { queued: 1, running: 1, done: 2, failed: 0, dead_letter: 0 },
+    status_counts: { queued: 1, running: 1, waiting: 0, done: 2, failed: 0, dead_letter: 0 },
     progress: { processed_files: 50, total_files: 100 },
     status: "running",
     ...over,
@@ -70,6 +70,7 @@ describe("JobsPage feed", () => {
         status_counts: {
           queued: 0,
           running: 0,
+          waiting: 0,
           done: 3,
           failed: 0,
           dead_letter: 0,

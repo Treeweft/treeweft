@@ -206,8 +206,14 @@ any real request, and that cancelling sends nothing.
 - **A source already has an active job** (index, incremental or refresh). The one-active-job rule
   forbids a second job, so the refresh is **deferred**: the response lists the source and the
   blocking job, and the refresh is enqueued when that job finishes, if the source is still stale.
-  A refresh is never enqueued twice for one source, and a finished refresh never re-enqueues
-  itself.
+  A refresh is never enqueued twice for one source, and a finished refresh re-triggers only when
+  a pin change overtook it.
+- **Index work arrives while a refresh is active** (a webhook push, an index request, a graph
+  rebuild, a fleet refresh). Index work preempts the refresh, so no request is dropped. A queued
+  refresh is cancelled and the index job enqueued. A running refresh gets a `waiting` index job
+  behind it; the refresh stops at its next batch, leaving the source marked stale, and the waiting
+  job then runs. Several waiting jobs run one after another in arrival order. The refresh is
+  re-enqueued afterwards if the source is still stale. (Code-review decision, 2026-09-26.)
 - **A source is deleted while its refresh is queued or running.** The refresh ends without writing
   and without error beyond noting the source is gone.
 - **A source with summary vectors disabled, or a vector store without summary vectors**

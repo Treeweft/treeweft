@@ -70,6 +70,11 @@ class TestRunOneRefreshHook:
         q = PostgresJobQueue(max_workers=1)
         store = AsyncMock()
         store.get = AsyncMock(return_value=job)
+        # ADR-003 preemption: promote_waiting_after(job.id) now runs for every
+        # resummarize terminal status, before the overtaken-pin check below --
+        # give it a real empty list rather than an auto-mocked (truthy, then
+        # unawaited-coroutine-producing) AsyncMock.
+        store.find_waiting_after = AsyncMock(return_value=[])
 
         persisted: list[dict] = []
 
@@ -228,6 +233,7 @@ class TestRunOneRefreshHook:
 
         q = PostgresJobQueue(max_workers=1)
         store = AsyncMock()
+        store.find_waiting_after = AsyncMock(return_value=[])
         store.get = AsyncMock(return_value=job)
         store.increment_attempts = AsyncMock(return_value=99)  # exceeds MAX_JOB_ATTEMPTS
 
@@ -265,6 +271,7 @@ class TestRunOneRefreshHook:
 
         q = PostgresJobQueue(max_workers=1)
         store = AsyncMock()
+        store.find_waiting_after = AsyncMock(return_value=[])
         store.get = AsyncMock(return_value=job)
         store.increment_attempts = AsyncMock(return_value=1)  # below MAX_JOB_ATTEMPTS
 
@@ -383,6 +390,7 @@ class TestRunOneRefreshHook:
 
         q = PostgresJobQueue(max_workers=1)
         store = AsyncMock()
+        store.find_waiting_after = AsyncMock(return_value=[])
         store.get = AsyncMock(return_value=job)
 
         monkeypatch.setattr(idx_state, "_job_store", store)

@@ -8,6 +8,7 @@ sqlite JobStore so the call sites in indexer_service.py remain unchanged.
 from __future__ import annotations
 
 import json
+import time
 
 from treeweft.adapters.postgresql.connection import get_pool
 from treeweft.domain.jobs import Job, JobStatus
@@ -199,6 +200,40 @@ class JobStore:
                 source_ids,
             )
         return {row["source_id"]: self._row_to_job(row) for row in rows}
+
+    async def cancel_if_queued(self, job_id: str, message: str) -> bool:
+        """Atomically cancel `job_id` iff it is still `queued`: mark it `done`
+        with `message` and drop its job_queue row. Returns False (no-op) if a
+        worker already claimed it (status moved to `running`) — the caller
+        falls through to the waiting-job path (ADR-003 preemption case 2)."""
+        pool = await _require_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                row = await conn.fetchrow(
+                    "UPDATE jobs SET status = 'done', message = $2, finished_at = $3 "
+                    "WHERE id = $1 AND status = 'queued' RETURNING id",
+                    job_id, message, time.time(),
+                )
+                if row is None:
+                    return False
+                await conn.execute("DELETE FROM job_queue WHERE job_id = $1", job_id)
+                return True
+
+    async def find_waiting_after(self, after_job_id: str) -> list[Job]:
+        """Jobs with status='waiting' whose payload->>'after_job' is
+        `after_job_id`, oldest first. Used at a resummarize job's batch
+        boundary (has any follower arrived?) and by promotion (which one(s)
+        to enqueue) once that job reaches a terminal status."""
+        if not after_job_id:
+            return []
+        pool = await _require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM jobs WHERE status = 'waiting' "
+                "AND payload ->> 'after_job' = $1 ORDER BY start_time ASC",
+                after_job_id,
+            )
+            return [self._row_to_job(r) for r in rows]
 
     async def update_status(self, job_id: str, status: JobStatus) -> None:
         pool = await _require_pool()

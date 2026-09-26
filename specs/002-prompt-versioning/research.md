@@ -125,6 +125,17 @@ It does not:
   refresh that keeps failing toward the current pin therefore cannot requeue itself in a loop
   (amended after code review). A retry after errors is manual, or follows the next pin change.
 
+**Preemption (code-review decision, 2026-09-26)**: the reverse direction matters too. Index work
+that finds an active `resummarize` must not be deduplicated against it, because a refresh does not
+cover code changes. `prompt_refresh.preempt_active_refresh` cancels a queued refresh
+(`UPDATE … WHERE status='queued'`) and enqueues the index job; for a running refresh it persists
+the index job with status `waiting` and `payload.after_job` set to the refresh (outside the
+one-active-job index, and not in `job_queue`). The refresh checks for a waiting job at each batch
+boundary and stops, leaving its mark set. After any job finishes, the worker promotes the oldest
+job waiting on it and relinks the rest behind that one, so pushes run in order and none is lost;
+then the refresh hook re-plans. Startup recovery promotes a waiting job whose predecessor is no
+longer active. Migration 022 indexes `payload->>'after_job'` for waiting jobs.
+
 **Rationale**: it keeps the FR-016 promise that every stale source gets a refresh. Queued jobs
 cannot be reordered, and the hook needs no new table. A full index job on a stale source
 normally makes the source current itself (R6), so the hook is then a no-op.

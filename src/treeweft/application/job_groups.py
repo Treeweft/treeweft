@@ -15,11 +15,13 @@ _STATUS_KEYS = [s.value for s in JobStatus]  # queued, running, done, failed, de
 def _derive_status(counts: dict[str, int], total: int) -> str:
     """Single status for the whole group.
 
-    running if any Task is active (running/queued); else failed if any Task
-    failed/dead-lettered; else done if there are Tasks (all done); else queued
-    (a group with no Tasks yet).
+    running if any Task is active (running/queued/waiting -- a waiting Task
+    is queued behind a resummarize refresh it preempted, ADR-003 finding #6,
+    and must not read as finished); else failed if any Task failed/dead-
+    lettered; else done if there are Tasks (all done); else queued (a group
+    with no Tasks yet).
     """
-    if counts["running"] + counts["queued"] > 0:
+    if counts["running"] + counts["queued"] + counts.get("waiting", 0) > 0:
         return "running"
     if counts["failed"] + counts["dead_letter"] > 0:
         return "failed"

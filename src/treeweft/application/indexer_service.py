@@ -802,7 +802,7 @@ async def handle_index_file(req: IndexFileRequest, request: Request):
     source_id = make_source_id(path=str(path))
 
     active = await _routes_webhook._find_active_job_for_source(source_id)
-    if active:
+    if active is not None and active.get("kind") != "resummarize":
         logger.info(
             "File %s already has %s job %s — refusing duplicate submission",
             file_path, active["status"], active["job_id"],
@@ -818,13 +818,22 @@ async def handle_index_file(req: IndexFileRequest, request: Request):
             )
             return JobAck(job_id=existing["job_id"], status="done", source_id=source_id)
 
-    job = runners._new_job("file", source_id, file_path)
-    job["source_path"] = str(path)
-    job["created_by"] = _caller_id(request)
-    await _attach_group(job, job["created_by"])
-    await runners._persist_job(job)
-    await _state._job_queue.enqueue(job["job_id"])
-    return JobAck(job_id=job["job_id"], status="queued", source_id=source_id)
+    async def _build() -> dict:
+        job = runners._new_job("file", source_id, file_path)
+        job["source_path"] = str(path)
+        job["created_by"] = _caller_id(request)
+        await _attach_group(job, job["created_by"])
+        return job
+
+    if active is not None:  # active["kind"] == "resummarize" (finding #6)
+        from treeweft.application import prompt_refresh
+        outcome = await prompt_refresh.preempt_active_refresh(source_id, _build)
+        job = outcome.job
+    else:
+        job = await _build()
+        await runners._persist_job(job)
+        await _state._job_queue.enqueue(job["job_id"])
+    return JobAck(job_id=job["job_id"], status=job["status"], source_id=source_id)
 
 
 @app.post("/index-directory", response_model=JobAck, status_code=202)
@@ -840,7 +849,7 @@ async def handle_index_directory(req: IndexDirectoryRequest, request: Request):
     source_id = make_source_id(path=directory)
 
     active = await _routes_webhook._find_active_job_for_source(source_id)
-    if active:
+    if active is not None and active.get("kind") != "resummarize":
         logger.info(
             "Directory %s already has %s job %s — refusing duplicate submission",
             directory, active["status"], active["job_id"],
@@ -856,13 +865,6 @@ async def handle_index_directory(req: IndexDirectoryRequest, request: Request):
             )
             return JobAck(job_id=existing["job_id"], status="done", source_id=source_id)
 
-    job = runners._new_job("directory", source_id, directory)
-    job["source_path"] = directory
-    job["created_by"] = _caller_id(request)
-    await _attach_group(job, job["created_by"])
-    if FEATURE_SKIP_PATTERNS and req.skip_patterns:
-        job["skip_patterns"] = list(req.skip_patterns)
-
     pf_warnings: list[dict] | None = None
     pf_recommendations: dict | None = None
     if req.auto_preflight:
@@ -874,10 +876,25 @@ async def handle_index_directory(req: IndexDirectoryRequest, request: Request):
         except Exception:
             logger.exception("auto-preflight failed; proceeding without warnings")
 
-    await runners._persist_job(job)
-    await _state._job_queue.enqueue(job["job_id"])
+    async def _build() -> dict:
+        job = runners._new_job("directory", source_id, directory)
+        job["source_path"] = directory
+        job["created_by"] = _caller_id(request)
+        await _attach_group(job, job["created_by"])
+        if FEATURE_SKIP_PATTERNS and req.skip_patterns:
+            job["skip_patterns"] = list(req.skip_patterns)
+        return job
+
+    if active is not None:  # active["kind"] == "resummarize" (finding #6)
+        from treeweft.application import prompt_refresh
+        outcome = await prompt_refresh.preempt_active_refresh(source_id, _build)
+        job = outcome.job
+    else:
+        job = await _build()
+        await runners._persist_job(job)
+        await _state._job_queue.enqueue(job["job_id"])
     return JobAck(
-        job_id=job["job_id"], status="queued", source_id=source_id,
+        job_id=job["job_id"], status=job["status"], source_id=source_id,
         warnings=pf_warnings, recommendations=pf_recommendations,
     )
 
@@ -900,7 +917,7 @@ async def handle_index_repo(req: IndexRepoRequest, request: Request):
     source_id = make_source_id(path=req.path, url=req.url, branch=req.branch)
 
     active = await _routes_webhook._find_active_job_for_source(source_id)
-    if active:
+    if active is not None and active.get("kind") != "resummarize":
         logger.info(
             "Repo %s already has %s job %s — refusing duplicate submission",
             label, active["status"], active["job_id"],
@@ -916,15 +933,6 @@ async def handle_index_repo(req: IndexRepoRequest, request: Request):
             )
             return JobAck(job_id=existing["job_id"], status="done", source_id=source_id)
 
-    job = runners._new_job("repo", source_id, label)
-    job["source_url"] = req.url or ""
-    job["source_path"] = label if not req.url else ""
-    job["source_branch"] = req.branch or ""
-    job["created_by"] = _caller_id(request)
-    await _attach_group(job, job["created_by"], req.group_id)
-    if FEATURE_SKIP_PATTERNS and req.skip_patterns:
-        job["skip_patterns"] = list(req.skip_patterns)
-
     # Auto-preflight (best-effort; non-blocking). Only runs for local
     # paths — for remote URLs we'd need a shallow clone which is expensive
     # to do twice. Skip patterns are surfaced regardless of feature flag.
@@ -939,10 +947,27 @@ async def handle_index_repo(req: IndexRepoRequest, request: Request):
         except Exception:
             logger.exception("auto-preflight failed; proceeding without warnings")
 
-    await runners._persist_job(job)
-    await _state._job_queue.enqueue(job["job_id"])
+    async def _build() -> dict:
+        job = runners._new_job("repo", source_id, label)
+        job["source_url"] = req.url or ""
+        job["source_path"] = label if not req.url else ""
+        job["source_branch"] = req.branch or ""
+        job["created_by"] = _caller_id(request)
+        await _attach_group(job, job["created_by"], req.group_id)
+        if FEATURE_SKIP_PATTERNS and req.skip_patterns:
+            job["skip_patterns"] = list(req.skip_patterns)
+        return job
+
+    if active is not None:  # active["kind"] == "resummarize" (finding #6)
+        from treeweft.application import prompt_refresh
+        outcome = await prompt_refresh.preempt_active_refresh(source_id, _build)
+        job = outcome.job
+    else:
+        job = await _build()
+        await runners._persist_job(job)
+        await _state._job_queue.enqueue(job["job_id"])
     return JobAck(
-        job_id=job["job_id"], status="queued", source_id=source_id,
+        job_id=job["job_id"], status=job["status"], source_id=source_id,
         warnings=pf_warnings, recommendations=pf_recommendations,
     )
 
@@ -1360,22 +1385,30 @@ async def handle_index_graph(req: IndexGraphRequest, request: Request):
         )
 
     active = await _routes_webhook._find_active_job_for_source(req.source_id)
-    if active:
+    if active is not None and active.get("kind") != "resummarize":
         return JobAck(
             job_id=active["job_id"], status=active["status"],
             source_id=req.source_id,
         )
 
     label = record.url or record.path
-    job = runners._new_job("graph", req.source_id, label)
-    job["source_path"] = record.path or ""
-    job["source_url"] = record.url or ""
-    job["source_branch"] = record.branch or ""
-    job["created_by"] = _caller_id(request)
 
-    await runners._persist_job(job)
-    await _state._job_queue.enqueue(job["job_id"])
-    return JobAck(job_id=job["job_id"], status="queued", source_id=req.source_id)
+    async def _build() -> dict:
+        job = runners._new_job("graph", req.source_id, label)
+        job["source_path"] = record.path or ""
+        job["source_url"] = record.url or ""
+        job["source_branch"] = record.branch or ""
+        job["created_by"] = _caller_id(request)
+        return job
+
+    if active is not None:
+        from treeweft.application import prompt_refresh
+        job = (await prompt_refresh.preempt_active_refresh(req.source_id, _build)).job
+    else:
+        job = await _build()
+        await runners._persist_job(job)
+        await _state._job_queue.enqueue(job["job_id"])
+    return JobAck(job_id=job["job_id"], status=job["status"], source_id=req.source_id)
 
 
 # Backfill runs across every source (~20s each), so it must not block the

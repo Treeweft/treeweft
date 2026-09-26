@@ -24,6 +24,7 @@ from treeweft.application import index_guard
 from treeweft.application import indexer_state as _state
 from treeweft.application import indexer_runners as runners
 from treeweft.application import prompt_pins
+from treeweft.application import prompt_refresh
 from treeweft.application import routes_auth as rauth
 from treeweft.domain.authorization import Role
 from treeweft.application.fleet import select_sources_to_refresh
@@ -88,17 +89,34 @@ async def _fleet_refresh_once() -> int:
         src = by_id.get(sid)
         if src is None:
             continue
-        # The single-active-job-per-source invariant already prevents pile-ups;
-        # skipping here avoids needless job churn and log noise.
-        if await _webhook._find_active_job_for_source(sid):
+        # The single-active-job-per-source invariant already prevents pile-ups
+        # for any OTHER active job kind; a resummarize refresh is preemptable
+        # instead (ADR-003 finding #6) so a stale-code source isn't stuck
+        # behind an hours-long summary-only refresh.
+        active = await _webhook._find_active_job_for_source(sid)
+        if active is not None and active.get("kind") != "resummarize":
             continue
         try:
-            job_id = await _svc._enqueue_source_reindex(src)
-            metrics.fleet_refresh_enqueued_total.inc()
-            enqueued += 1
-            logger.info(
-                "Fleet auto-refresh: re-indexing stale source %s (job %s)", sid, job_id
-            )
+            if active is not None:
+                async def _build(src=src):
+                    return _svc._build_source_reindex_job(src)
+
+                outcome = await prompt_refresh.preempt_active_refresh(sid, _build)
+                job_id = outcome.job["job_id"]
+                if outcome.mode == "queued":
+                    metrics.fleet_refresh_enqueued_total.inc()
+                    enqueued += 1
+                logger.info(
+                    "Fleet auto-refresh: re-indexing stale source %s (job %s, %s)",
+                    sid, job_id, outcome.mode,
+                )
+            else:
+                job_id = await _svc._enqueue_source_reindex(src)
+                metrics.fleet_refresh_enqueued_total.inc()
+                enqueued += 1
+                logger.info(
+                    "Fleet auto-refresh: re-indexing stale source %s (job %s)", sid, job_id
+                )
         except Exception:
             logger.exception("Fleet auto-refresh: failed to enqueue source %s", sid)
     return enqueued
@@ -536,6 +554,29 @@ async def startup(app):
             "Job recovery: %d resumed, %d superseded (already done), %d abandoned",
             resumed, superseded, abandoned,
         )
+
+    # ── Waiting-job recovery (ADR-003 preemption, finding #6) ────────────────
+    # A `waiting` job is promoted if the refresh it is waiting on
+    # (payload["after_job"]) is no longer queued/running -- e.g. the indexer
+    # died mid-refresh and the loop above marked it superseded/abandoned, or
+    # it simply finished before the crash and the promotion hook never ran.
+    # If that refresh was instead RESUMED above under the same job id (still
+    # queued/running), the waiting job stays linked to it -- no action needed.
+    waiting_jobs = await _state._job_store.list_by_status(JobStatus.WAITING)
+    if waiting_jobs:
+        checked_after_ids: set[str] = set()
+        promoted = 0
+        for wj in waiting_jobs:
+            after_id = (wj.payload or {}).get("after_job")
+            if not after_id or after_id in checked_after_ids:
+                continue
+            checked_after_ids.add(after_id)
+            ref = await _state._job_store.get(after_id)
+            if ref is not None and ref.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+                continue
+            promoted += len(await prompt_refresh.promote_waiting_after(after_id))
+        if promoted:
+            logger.info("Job recovery: promoted %d orphaned waiting job(s)", promoted)
 
     # ── Login-attempt purge ──────────────────────────────────────────────────
 

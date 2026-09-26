@@ -1114,7 +1114,22 @@ async def _run_resummarize_job(job: dict):
         await _persist_job(job)
 
         errors = 0
+        job_id = job.get("job_id", "")
         for start in range(0, total, EMBED_BATCH_SIZE):
+            # ADR-003 preemption (finding #6): stop cleanly at a batch boundary
+            # if index work has arrived for this source while we were running.
+            # Leave the refresh mark set (source stays stale) and don't
+            # advance summary_prompt_version -- record_summary_version below
+            # never runs on this early-return path.
+            if job_id and _state._job_store is not None:
+                waiters = await _state._job_store.find_waiting_after(job_id)
+                if waiters:
+                    await _finish_resummarize(
+                        job, "done",
+                        f"preempted by index work after {job['processed_files']}/{total} chunks",
+                    )
+                    return
+
             source = await _state._source_repo.get_by_id(source_id)
             if source is None:
                 await _finish_resummarize(job, "done", "source deleted")

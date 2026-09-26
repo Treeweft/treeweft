@@ -21,7 +21,7 @@ function group(over: Partial<JobGroupSummary>): JobGroupSummary {
     created_at: 1_750_000_000,
     created_by: "user_1",
     task_count: 0,
-    status_counts: { queued: 0, running: 0, done: 0, failed: 0, dead_letter: 0 },
+    status_counts: { queued: 0, running: 0, waiting: 0, done: 0, failed: 0, dead_letter: 0 },
     progress: { processed_files: 0, total_files: 0 },
     status: "queued",
     ...over,
@@ -143,16 +143,17 @@ describe("jobStatusCounts", () => {
 });
 
 describe("taskBuckets", () => {
-  it("buckets running/queued into inprogress, done, and failed/dead_letter", () => {
+  it("buckets running/queued/waiting into inprogress, done, and failed/dead_letter", () => {
     const tasks = [
       task({ id: "a", status: "running" }),
       task({ id: "b", status: "queued" }),
+      task({ id: "f", status: "waiting" }),
       task({ id: "c", status: "done" }),
       task({ id: "d", status: "failed" }),
       task({ id: "e", status: "dead_letter" }),
     ];
     const out = taskBuckets(tasks);
-    expect(out.inprogress.map((t) => t.id)).toEqual(["a", "b"]);
+    expect(out.inprogress.map((t) => t.id)).toEqual(["a", "b", "f"]);
     expect(out.done.map((t) => t.id)).toEqual(["c"]);
     expect(out.failed.map((t) => t.id)).toEqual(["d", "e"]);
   });
@@ -173,8 +174,20 @@ describe("taskStatusCounts", () => {
     expect(taskStatusCounts(tasks)).toEqual({
       running: 1,
       queued: 0,
+      waiting: 0,
       done: 1,
       failed: 2,
+    });
+  });
+
+  it("counts waiting separately from queued/running", () => {
+    const tasks = [task({ status: "waiting" }), task({ status: "waiting" })];
+    expect(taskStatusCounts(tasks)).toEqual({
+      running: 0,
+      queued: 0,
+      waiting: 2,
+      done: 0,
+      failed: 0,
     });
   });
 });

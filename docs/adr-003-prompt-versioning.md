@@ -472,3 +472,8 @@ Made on 2026-09-25 while planning the implementation
    around each write so a deleted source is not resurrected by a Milvus
    upsert, and a refresh overtaken by a pin change is followed by one to the
    new target.
+9. After code review (2026-09-26): index work preempts an active refresh
+   instead of being deduplicated against it. A queued refresh is cancelled; a
+   running one gets a `waiting` index job behind it and stops at its next
+   batch. Waiting jobs run in arrival order, and the refresh is re-enqueued if
+   the source is still stale. Migration 022 indexes waiting jobs.

@@ -11,6 +11,7 @@ export function statusVariant(
     case "running":
       return "default";
     case "queued":
+    case "waiting":
       return "muted";
     case "failed":
     case "dead_letter":
