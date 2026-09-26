@@ -18,8 +18,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from treeweft.adapters.llm_api import llm_adapter, llm_caller
+from treeweft.adapters.llm_api import llm_adapter, llm_caller, prompts
 from treeweft.domain.circuit_breaker import CircuitBreaker
+
+_SUMMARY_PV = prompts.get("chunk_summary", 3)
 
 
 # ---------------------------------------------------------------------------
@@ -28,15 +30,15 @@ from treeweft.domain.circuit_breaker import CircuitBreaker
 
 @pytest.mark.parametrize("phrase", ["This code", "Here is"])
 def test_summary_prompt_names_rejected_openers(phrase):
-    assert phrase.lower() in llm_caller._SUMMARY_SCHEMA.forbidden_phrases
-    assert f'"{phrase}"' in llm_adapter._SUMMARY_SYSTEM  # quoted, as an explicit ban
+    assert phrase.lower() in _SUMMARY_PV.schema.forbidden_phrases
+    assert f'"{phrase}"' in _SUMMARY_PV.system  # quoted, as an explicit ban
 
 
 def test_summary_prompt_does_not_itself_use_a_forbidden_phrase():
     """The old prompt asked for a sentence 'describing what this code does',
     priming the model with the exact phrase the validator rejects."""
-    prompt = llm_adapter._SUMMARY_SYSTEM.lower()
-    for phrase in llm_caller._SUMMARY_SCHEMA.forbidden_phrases:
+    prompt = _SUMMARY_PV.system.lower()
+    for phrase in _SUMMARY_PV.schema.forbidden_phrases:
         # allow only the explicit quoted ban itself
         assert prompt.replace(f'"{phrase.lower()}"', "").count(phrase.lower()) == 0, phrase
 
@@ -65,7 +67,7 @@ def _summary_call():
         messages=[{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
         max_tokens=60,
         operation=Operation.CHUNK_SUMMARY,
-        validator=ResponseValidator(llm_caller._SUMMARY_SCHEMA),
+        validator=ResponseValidator(_SUMMARY_PV.response_schema()),
     )
 
 
@@ -102,13 +104,13 @@ class _FakeCache:
     def __init__(self):
         self.rows: dict[str, str] = {}
 
-    async def get_many(self, sha1s, prompt_version=None, include_rejected=False):
+    async def get_many(self, sha1s, prompt_version, include_rejected=False):
         return {
             k: v for k, v in self.rows.items()
             if k in sha1s and (v or include_rejected)
         }
 
-    async def put(self, sha1, summary):
+    async def put(self, sha1, summary, *, prompt_version):
         self.rows[sha1] = summary
 
 
@@ -123,7 +125,7 @@ def fake_cache(monkeypatch):
 def _stub_generation(monkeypatch, result):
     calls = []
 
-    async def _gen(chunk_text, language, file_path):
+    async def _gen(chunk_text, language, file_path, *, version):
         calls.append(chunk_text)
         return result
 
@@ -134,17 +136,21 @@ def _stub_generation(monkeypatch, result):
 @pytest.mark.asyncio
 async def test_rejected_summary_is_negative_cached_and_not_regenerated(fake_cache, monkeypatch):
     calls = _stub_generation(monkeypatch, (None, "rejected"))
-    assert await llm_adapter.summarize_with_cache("def f(): pass", "python", "a.py") is None
+    out = await llm_adapter.summarize_with_cache("def f(): pass", "python", "a.py", version=3)
+    assert out == (None, "rejected")
     assert fake_cache.rows == {llm_adapter.chunk_cache_key("def f(): pass"): ""}
-    assert await llm_adapter.summarize_with_cache("def f(): pass", "python", "a.py") is None
-    assert len(calls) == 1  # second call served by the negative marker
+    out2 = await llm_adapter.summarize_with_cache("def f(): pass", "python", "a.py", version=3)
+    assert out2 == (None, "cached")  # served by the negative marker
+    assert len(calls) == 1  # second call served by the negative marker, not regenerated
 
 
 @pytest.mark.asyncio
 async def test_llm_error_is_not_cached(fake_cache, monkeypatch):
     calls = _stub_generation(monkeypatch, (None, "error"))
-    await llm_adapter.summarize_with_cache("def f(): pass", "python", "a.py")
-    await llm_adapter.summarize_with_cache("def f(): pass", "python", "a.py")
+    assert await llm_adapter.summarize_with_cache(
+        "def f(): pass", "python", "a.py", version=3) == (None, "error")
+    assert await llm_adapter.summarize_with_cache(
+        "def f(): pass", "python", "a.py", version=3) == (None, "error")
     assert fake_cache.rows == {}
     assert len(calls) == 2  # transient failure: retried next time
 
@@ -152,7 +158,8 @@ async def test_llm_error_is_not_cached(fake_cache, monkeypatch):
 @pytest.mark.asyncio
 async def test_successful_summary_is_cached(fake_cache, monkeypatch):
     _stub_generation(monkeypatch, ("Defines f.", "simple"))
-    assert await llm_adapter.summarize_with_cache("def f(): pass", "python", "a.py") == "Defines f."
+    out = await llm_adapter.summarize_with_cache("def f(): pass", "python", "a.py", version=3)
+    assert out == ("Defines f.", "generated")
     assert list(fake_cache.rows.values()) == ["Defines f."]
 
 
@@ -193,8 +200,8 @@ async def test_cache_get_many_hides_rejection_markers_by_default(monkeypatch):
         return _FakePool(rows)
 
     monkeypatch.setattr(llm_adapter, "get_pool", _get_pool)
-    assert await llm_adapter.cache_get_many(["a", "b"]) == {"a": "Defines a."}
-    assert await llm_adapter.cache_get_many(["a", "b"], include_rejected=True) == {
+    assert await llm_adapter.cache_get_many(["a", "b"], 3) == {"a": "Defines a."}
+    assert await llm_adapter.cache_get_many(["a", "b"], 3, include_rejected=True) == {
         "a": "Defines a.", "b": "",
     }
 
@@ -221,9 +228,9 @@ async def test_summaries_for_chunks_treats_marker_as_cached_none(monkeypatch):
 
     generated = []
 
-    async def _summarize(*args):
-        generated.append(args)
-        return "should not be called"
+    async def _summarize(*args, **kwargs):
+        generated.append((args, kwargs))
+        return "should not be called", "generated"
 
     monkeypatch.setattr(llm, "cache_get_many", _get_many)
     monkeypatch.setattr(llm, "summarize_with_cache", _summarize)

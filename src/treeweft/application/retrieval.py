@@ -1008,8 +1008,19 @@ async def graph_search(
             })
             if tail_shas:
                 try:
+                    # T017 rewrites this to resolve the source's version
+                    # properly (research R8); until then, fall back to the
+                    # deployment/override pin when no per-request override
+                    # was given, same as before `prompt_version` was
+                    # required.
+                    from treeweft.application import prompt_pins
+
+                    resolved_version = (
+                        summary_prompt_version
+                        or prompt_pins.effective("chunk_summary")
+                    )
                     summary_by_sha = await llm.cache_get_many(
-                        tail_shas, prompt_version=summary_prompt_version)
+                        tail_shas, prompt_version=resolved_version)
                 except Exception:
                     # Summary cache unavailable -> every tail chunk falls back
                     # to its full snippet (never an empty body).

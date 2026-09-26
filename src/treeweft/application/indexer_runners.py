@@ -502,12 +502,18 @@ def _collect_files(path: str, skip_patterns: list[str] | None = None) -> list[st
 
 
 async def _summaries_for_chunks(chunks: list[dict]) -> list[str | None]:
+    from treeweft.application import prompt_pins
+
+    # T016 rewrites this to take the job's target version as a parameter
+    # (research R6); until then it resolves the deployment/override version
+    # itself, same as `generate_summary()` does for other callers.
+    version = prompt_pins.effective("chunk_summary")
     keys = [llm.chunk_cache_key(c["text"]) for c in chunks]
     with tracer.start_as_current_span(
         "summaries.cache_lookup",
         attributes={"treeweft.keys_requested": len(keys)},
     ) as span:
-        cached = await llm.cache_get_many(keys, include_rejected=True)
+        cached = await llm.cache_get_many(keys, version, include_rejected=True)
         span.set_attribute("treeweft.cache_hits", len(cached))
         span.set_attribute("treeweft.cache_misses", len(keys) - len(cached))
     out: list[str | None] = [None] * len(chunks)
@@ -528,12 +534,16 @@ async def _summaries_for_chunks(chunks: list[dict]) -> list[str | None]:
                         "treeweft.llm_model": os.environ.get("LLM_MODEL", ""),
                     },
                 ):
-                    return i, await llm.summarize_with_cache(
-                        chunks[i]["text"], chunks[i].get("language", ""), chunks[i]["file_path"]
+                    summary, _strategy = await llm.summarize_with_cache(
+                        chunks[i]["text"], chunks[i].get("language", ""),
+                        chunks[i]["file_path"], version=version,
                     )
-            return i, await llm.summarize_with_cache(
-                chunks[i]["text"], chunks[i].get("language", ""), chunks[i]["file_path"]
+                    return i, summary
+            summary, _strategy = await llm.summarize_with_cache(
+                chunks[i]["text"], chunks[i].get("language", ""),
+                chunks[i]["file_path"], version=version,
             )
+            return i, summary
 
         with tracer.start_as_current_span(
             "summaries.generate_batch",

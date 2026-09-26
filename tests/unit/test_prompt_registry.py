@@ -16,9 +16,30 @@ from pathlib import Path
 
 import pytest
 
-from treeweft.adapters.llm_api import llm_caller, prompts
+from treeweft.adapters.llm_api import prompts
+from treeweft.domain.response_validator import ResponseSchema
 
 FIXTURE_PATH = Path(__file__).parent / "fixtures" / "prompt_hashes.json"
+
+# Copied verbatim from `llm_caller.py:54-71` before T004/T012 deleted
+# `_HYDE_SCHEMA`/`_SUMMARY_SCHEMA` in favor of the registry.
+_SUMMARY_SCHEMA_TODAY = ResponseSchema(
+    min_length=5,
+    max_length=500,
+    forbidden_phrases=[
+        "I can't", "I don't know", "as an AI",
+        "here is", "this code",
+    ],
+)
+
+_HYDE_SCHEMA_TODAY = ResponseSchema(
+    min_length=5,
+    max_length=8000,
+    forbidden_phrases=[
+        "I can't", "I don't know", "I cannot", "as an AI",
+        "```json", "here's",
+    ],
+)
 
 # Bare texts (no `_NO_THINK_SUFFIX`), copied verbatim from
 # `llm_adapter.py:41-54` before T004 deletes `_SUMMARY_SYSTEM`/`_HYDE_SYSTEM`.
@@ -193,12 +214,12 @@ def _assert_schema_fields_match(actual, today):
 
 def test_summary_schema_matches_today_field_by_field():
     reg = prompts.get("chunk_summary", 3).response_schema()
-    _assert_schema_fields_match(reg, llm_caller._SUMMARY_SCHEMA)
+    _assert_schema_fields_match(reg, _SUMMARY_SCHEMA_TODAY)
 
 
 def test_hyde_schema_matches_today_field_by_field():
     reg = prompts.get("hyde", 1).response_schema()
-    _assert_schema_fields_match(reg, llm_caller._HYDE_SCHEMA)
+    _assert_schema_fields_match(reg, _HYDE_SCHEMA_TODAY)
 
 
 # ---------------------------------------------------------------------------

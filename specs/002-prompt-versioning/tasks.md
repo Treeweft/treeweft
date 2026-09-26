@@ -157,7 +157,7 @@ summary and HyDE paths. Every story needs them.
 
 ### Versioned LLM paths
 
-- [ ] T011 [P] Write `tests/unit/test_summary_versioning.py` (research R2):
+- [X] T011 [P] Write `tests/unit/test_summary_versioning.py` (research R2):
   - `cache_put(sha1, s, prompt_version=4)` writes `prompt_version = 4`.
   - `cache_get_many` requires `prompt_version` and filters on it.
   - `summarize_with_cache(..., version=4)` uses v4's prompt and schema (registry monkeypatched
@@ -167,7 +167,7 @@ summary and HyDE paths. Every story needs them.
   - `generate_hyde` uses `prompt_pins.effective("hyde")`, and its cache key starts with the
     version: the same query under two HyDE pins makes two LLM calls.
   - `generate_summary()` still returns `str | None`.
-- [ ] T012 Update `src/treeweft/adapters/llm_api/llm_adapter.py` and `llm_caller.py`:
+- [X] T012 Update `src/treeweft/adapters/llm_api/llm_adapter.py` and `llm_caller.py`:
   - delete `PROMPT_VERSION`, `_SUMMARY_SYSTEM`, `_HYDE_SYSTEM`, `_SUMMARY_SCHEMA` and
     `_HYDE_SCHEMA`;
   - route through `prompts` and `prompt_pins`, keeping `_build_summary_user_message` and the
