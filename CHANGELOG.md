@@ -28,6 +28,22 @@ Added, Fixed.
 - `contracts/index_schema.json`: a committed snapshot of the index
   schema, checked by CI so a schema-changing PR must bump
   `INDEX_SCHEMA_VERSION` and the SemVer major.
+- The prompt registry (`adapters/llm_api/prompts.py`) and admin-controlled
+  pins (ADR-003): `GET /prompt-versions`, and `/prompt-pins/*` endpoints to
+  set the deployment pin and per-source chunk-summary overrides, each
+  accepting `?dry_run=true` to preview the sources and chunk counts a
+  change would refresh before writing anything. `POST
+  /sources/{source_id}/resummarize` requests a manual refresh.
+- A `resummarize` job kind that refreshes one source's chunk-summary
+  vectors and their embeddings to a new prompt version without
+  re-indexing; two or more refreshes triggered by one pin change share a
+  `prompt-refresh` job group.
+- A **Prompts** page next to Backends: per-operation registered versions,
+  notes and the deployment pin, and a sources table with built version,
+  target version, a stale badge, an override control and a refresh
+  action.
+- `GET /sources` gains `summary_prompt_version`, `summary_refresh_target`
+  and `summary_stale`.
 
 ### Operator configuration
 
@@ -36,6 +52,15 @@ Added, Fixed.
   model; this needs the embedding service reachable. Until it succeeds,
   the index reports `unverified`: search keeps working, but new index
   jobs are refused. See `docs/upgrading.md`.
+- Migration 021 adds `prompt_pins` and the `source_records` columns
+  `summary_prompt_version`/`summary_refresh_target`. Prompt pins are
+  seeded on first start: an existing deployment's sources were built with
+  chunk_summary v3 and hyde v1, so it seeds there; a fresh install seeds
+  the latest registered version of each. Nothing changes until an admin
+  moves a pin. `PROMPT_PINS_REFRESH_SECONDS` (default 5) controls how
+  often each indexer process reloads the pins. Startup fails, naming the
+  pin and the versions this build registers, if a stored pin names a
+  version it does not know (for example after a downgrade).
 
 ## 1.0.0 — 2026.9.24
 

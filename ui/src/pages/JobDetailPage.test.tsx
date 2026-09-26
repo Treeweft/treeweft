@@ -123,4 +123,25 @@ describe("JobDetailPage", () => {
     expect(await screen.findByText("Job not found")).toBeTruthy();
     expect(screen.getByText(/No job with id "nope"/)).toBeTruthy();
   });
+
+  it("labels overall progress \"chunks\" for a resummarize job", async () => {
+    getMock.mockResolvedValue({
+      ...detail([task({ id: "a", source: "org/repo", status: "running" })]),
+      kind: "resummarize",
+      progress: { processed_files: 6, total_files: 12 },
+    });
+    await renderDetail("grp_1");
+    expect(await screen.findByText(/6 \/ 12 chunks/)).toBeTruthy();
+    expect(screen.queryByText(/6 \/ 12 files/)).toBeNull();
+  });
+
+  it("labels a multi-source prompt-refresh group \"chunks\"", async () => {
+    getMock.mockResolvedValue({
+      ...detail([task({ id: "a", source: "org/repo", status: "running" })]),
+      kind: "prompt-refresh",
+      progress: { processed_files: 2, total_files: 8 },
+    });
+    await renderDetail("grp_1");
+    expect(await screen.findByText(/2 \/ 8 chunks/)).toBeTruthy();
+  });
 });

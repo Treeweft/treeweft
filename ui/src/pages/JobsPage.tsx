@@ -69,6 +69,15 @@ export function JobsPage() {
 
   const overall = overallActiveProgress(groups);
   const counts = jobStatusCounts(groups);
+  const refreshKinds = ["resummarize", "prompt-refresh"];
+  const running = groups.filter((g) => g.status === "running");
+  const refreshing = running.filter((g) => refreshKinds.includes(g.kind ?? ""));
+  const unit =
+    running.length > 0 && refreshing.length === running.length
+      ? "chunks"
+      : refreshing.length > 0
+        ? "items"
+        : "files";
 
   return (
     <section>
@@ -80,7 +89,9 @@ export function JobsPage() {
           <span className="text-sm font-medium">Active progress</span>
           <span className="text-sm tabular-nums text-muted-foreground">
             {overall.processed.toLocaleString()} /{" "}
-            {overall.total.toLocaleString()} files ({overall.percent}%)
+            {overall.total.toLocaleString()}{" "}
+            {unit} (
+            {overall.percent}%)
           </span>
         </div>
         <Progress value={overall.percent} className="mt-3" />

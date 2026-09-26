@@ -473,11 +473,11 @@ Confirm sends the real request.
 
 ### Tests for User Story 4 (write first, confirm they fail)
 
-- [ ] T037 [P] [US4] Write `ui/src/api/prompts.test.ts`, covering the pure helpers:
+- [X] T037 [P] [US4] Write `ui/src/api/prompts.test.ts`, covering the pure helpers:
   - the stale count;
   - the total-chunks formatting;
   - parsing `valid_versions` from an `ApiError` body.
-- [ ] T038 [P] [US4] Write `ui/src/pages/PromptsPage.test.tsx`, modelled on
+- [X] T038 [P] [US4] Write `ui/src/pages/PromptsPage.test.tsx`, modelled on
   `BackendsPage.test.tsx` (`vi.mock("@/api/client")`):
   - It renders each operation's versions, notes, latest version and deployment pin, and each
     source's built/target version, stale badge and override control.
@@ -492,12 +492,12 @@ Confirm sends the real request.
 
 ### Implementation for User Story 4
 
-- [ ] T039 [US4] Implement `ui/src/api/prompts.ts` (types from
+- [X] T039 [US4] Implement `ui/src/api/prompts.ts` (types from
   [contracts/http-api.md](contracts/http-api.md), fetchers, helpers) and
   `ui/src/pages/PromptsPage.tsx`, with an inline confirmation panel. Register `{ path:
   "prompts" }` in `ui/src/routes/router.tsx`, and add the Prompts tab after Backends in
   `ui/src/components/layout/AppShell.tsx`.
-- [ ] T040 [P] [US4] In `ui/src/pages/JobDetailPage.tsx` and `JobsPage.tsx`, label progress units
+- [X] T040 [P] [US4] In `ui/src/pages/JobDetailPage.tsx` and `JobsPage.tsx`, label progress units
   "chunks" when `kind === "resummarize"` (research R12), with a test in each page's existing test
   file.
 
@@ -507,7 +507,7 @@ Confirm sends the real request.
 
 ## Phase 7: Polish & Cross-Cutting Concerns
 
-- [ ] T041 [P] Write `tests/integration/test_resummarize_milvus.py` (`@pytest.mark.slow`, skipped
+- [X] T041 [P] Write `tests/integration/test_resummarize_milvus.py` (`@pytest.mark.slow`, skipped
   unless `MILVUS_TEST_URI`):
   - Use a per-run collection `itest_resum_<hex>` through `MilvusAdapter(collection_name=…)`,
     never the module wrappers. Drop it before and after.
@@ -519,7 +519,7 @@ Confirm sends the real request.
     - `vector`, `chunk_text` and the dynamic field are unchanged;
     - dense and BM25 search still return the chunks;
     - the snapshot iterator honours `Strong`.
-- [ ] T042 [P] Write `tests/integration/test_prompt_pins_pg.py` (`slow`, skipped unless
+- [X] T042 [P] Write `tests/integration/test_prompt_pins_pg.py` (`slow`, skipped unless
   `POSTGRES_TEST_URL`). Use only uniquely prefixed scopes (`itest-<hex>-…`) and delete them in
   teardown. Assert:
   - `NOTIFY` reaches a second connection's listener;
@@ -527,7 +527,7 @@ Confirm sends the real request.
   - a concurrent `seed_if_absent` from two connections leaves one row.
 
   Never touch the `deployment` rows.
-- [ ] T043 [P] Update `docs/engineering-notes.md:325`: replace "Bump `PROMPT_VERSION`…" with the
+- [X] T043 [P] Update `docs/engineering-notes.md:325`: replace "Bump `PROMPT_VERSION`…" with the
   registry rule and the rollout flow, and describe the pins, the refresh job and staleness.
   Write the new runbook `docs/prompt-versions.md`:
   - trial with an override, compare, promote, and watch the `prompt-refresh` group;
@@ -537,11 +537,11 @@ Confirm sends the real request.
   - fail-loud startup after a downgrade.
 
   Cross-link it from `docs/engineering-notes.md`.
-- [ ] T044 [P] Add a `CLAUDE.md` Invariant: "Never edit a registered prompt version in
+- [X] T044 [P] Add a `CLAUDE.md` Invariant: "Never edit a registered prompt version in
   `adapters/llm_api/prompts.py`. Add a new version and its `tests/unit/fixtures/prompt_hashes.json`
   entry. `test_prompt_registry.py` guards this. Making a new version a fresh install's default
   needs a benchmark run (constitution III)."
-- [ ] T045 [P] Update ADR-003's status to "Accepted and implemented (1.1.0)" in
+- [X] T045 [P] Update ADR-003's status to "Accepted and implemented (1.1.0)" in
   `docs/adr-003-prompt-versioning.md`, and add `## Unreleased` entries to `CHANGELOG.md`:
   - **Added**: the prompt registry and pins, `GET /prompt-versions`, the `/prompt-pins/*`
     endpoints with `dry_run`, `POST /sources/{id}/resummarize`, the `resummarize` job, the

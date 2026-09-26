@@ -6,6 +6,7 @@ import { JobDetailPage } from "@/pages/JobDetailPage";
 import { SourcesPage } from "@/pages/SourcesPage";
 import { SubmitPage } from "@/pages/SubmitPage";
 import { BackendsPage } from "@/pages/BackendsPage";
+import { PromptsPage } from "@/pages/PromptsPage";
 import { TokensPage } from "@/pages/TokensPage";
 import { UsersPage } from "@/pages/UsersPage";
 
@@ -20,6 +21,7 @@ export const router = createBrowserRouter([
       { path: "sources", element: <SourcesPage /> },
       { path: "submit", element: <SubmitPage /> },
       { path: "backends", element: <BackendsPage /> },
+      { path: "prompts", element: <PromptsPage /> },
       { path: "tokens", element: <TokensPage /> },
       { path: "users", element: <UsersPage /> },
       { path: "*", element: <Navigate to="/jobs" replace /> },

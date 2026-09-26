@@ -10,6 +10,7 @@ const TABS = [
   { value: "sources", label: "Sources", path: "/sources" },
   { value: "submit", label: "Submit", path: "/submit" },
   { value: "backends", label: "Backends", path: "/backends" },
+  { value: "prompts", label: "Prompts", path: "/prompts" },
   { value: "tokens", label: "Tokens", path: "/tokens" },
   { value: "users", label: "Users", path: "/users" },
 ] as const;

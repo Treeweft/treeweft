@@ -1,7 +1,7 @@
 # ADR-003: Prompt Versioning with Admin Pins and Summary-Only Refresh
 
-- Status: Accepted (amended 2026-09-25 during planning of spec
-  `specs/002-prompt-versioning`; implementation in progress)
+- Status: Accepted and implemented (1.1.0) (amended 2026-09-25 during
+  planning of spec `specs/002-prompt-versioning`)
 - Date: 2026-09-23
 - Owner: indexer / LLM adapter
 
