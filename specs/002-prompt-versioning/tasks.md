@@ -556,7 +556,7 @@ Confirm sends the real request.
 - [X] T046 Run the full unit suite, `env -u PYTHONPATH python -m pytest tests/unit -q`, and
   `cd ui && npm test && npm run build`. Record the pass and fail counts, including
   `test_contracts.py`'s version check.
-- [ ] T047 Run quickstart §3's integration tests against the homelab Milvus and Postgres
+- [X] T047 Run quickstart §3's integration tests against the homelab Milvus and Postgres
   (10.16.1.226). If a host is unreachable, say so and ask; do not work around it. Record the
   results, or the reason for a skip.
 - [ ] T048 Run quickstart §4's live end-to-end check, after verifying the served LLM, embedding
