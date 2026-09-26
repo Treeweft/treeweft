@@ -59,7 +59,7 @@ connect to it.
   - The skip reason for each service names both its variable and `TREEWEFT_ITEST_CONTAINERS=1`.
 - [X] T003 Implement `tests/integration/_services.py`: `compose_image`, `bind_loopback`,
   `resolve_mode` and the per-service skip reasons. Parse the compose file with PyYAML.
-- [ ] T004 Implement `tests/integration/conftest.py` per
+- [X] T004 Implement `tests/integration/conftest.py` per
   [contracts/fixtures.md](contracts/fixtures.md), research R5–R9, and R12.
   - **Fixtures**: session-scoped, synchronous `docker_available`, `postgres_url`, `milvus_uri` and
     `neo4j_conn` (`Neo4jConn`), plus the function-scoped `neo4j_graph_store`.
@@ -98,7 +98,7 @@ skip, the real stack is unchanged, and no test containers remain (quickstart §2
 
 ### Tests for User Story 1 (write first)
 
-- [ ] T005 [US1] Write `tests/integration/test_provisioning.py` (`slow`; skips unless the fixture
+- [X] T005 [US1] Write `tests/integration/test_provisioning.py` (`slow`; skips unless the fixture
   resolved to `container`, R10). For each service it requests:
   - the running container publishes only on `127.0.0.1` (read the port bindings from the Docker
     API through the container object);
