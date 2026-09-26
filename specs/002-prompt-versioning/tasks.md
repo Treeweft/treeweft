@@ -559,7 +559,7 @@ Confirm sends the real request.
 - [X] T047 Run quickstart §3's integration tests against the homelab Milvus and Postgres
   (10.16.1.226). If a host is unreachable, say so and ask; do not work around it. Record the
   results, or the reason for a skip.
-- [ ] T048 Run quickstart §4's live end-to-end check, after verifying the served LLM, embedding
+- [X] T048 Run quickstart §4's live end-to-end check, after verifying the served LLM, embedding
   model and reranker. Record each step's HTTP codes and observed values for the PR, including
   SC-001's identical top-10 for 3 queries, SC-002's counters, SC-003's approximately zero LLM
   calls, and SC-008's two-process convergence.
