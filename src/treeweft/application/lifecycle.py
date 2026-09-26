@@ -572,7 +572,14 @@ async def startup(app):
                 continue
             checked_after_ids.add(after_id)
             ref = await _state._job_store.get(after_id)
-            if ref is not None and ref.status in (JobStatus.QUEUED, JobStatus.RUNNING):
+            # A 'waiting' ref is not orphaned (code-review finding D): its
+            # own head will be promoted (by this same loop, on some other
+            # iteration, or later) and its followers chain behind it then.
+            # Promoting them here too would leave two queued jobs for one
+            # source.
+            if ref is not None and ref.status in (
+                JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.WAITING,
+            ):
                 continue
             promoted += len(await prompt_refresh.promote_waiting_after(after_id))
         if promoted:

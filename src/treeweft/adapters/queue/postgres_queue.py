@@ -130,6 +130,17 @@ class PostgresJobQueue(JobQueue):
             logger.warning("Worker %d: claimed job_id=%s not in JobStore; skipping", worker_id, job_id)
             return
 
+        if job.status in (JobStatus.DONE, JobStatus.FAILED, JobStatus.DEAD_LETTER):
+            # Defensive (cancel/claim race, code-review finding B): a
+            # cancel_if_queued that lost the job_queue row to us can still
+            # have marked this job 'done' just before we fetched it here.
+            # It is already terminal — never re-run or re-persist it.
+            logger.warning(
+                "Worker %d: claimed job_id=%s already terminal (status=%s); skipping",
+                worker_id, job_id, job.status.value,
+            )
+            return
+
         # ADR-004 §3 (research R5 §2): persist `running` BEFORE the
         # authoritative dispatch_allowed() check, so a concurrent rebuild's
         # blocker re-check is guaranteed to see this job if it started first.

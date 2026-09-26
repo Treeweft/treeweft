@@ -32,7 +32,9 @@ from treeweft.application import indexer_runners as runners
 from treeweft.application import indexer_state as _state
 from treeweft.application import prompt_pins
 from treeweft.application import routes_webhook as _routes_webhook
+from treeweft.domain.jobs import JobStatus
 from treeweft.domain.prompt_pins import is_stale
+from treeweft.infrastructure import metrics
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +326,10 @@ async def preempt_active_refresh(
         refresh_id, message=f"preempted by {job.get('kind') or 'index'} job",
     )
     if canceled:
+        # The cancelled refresh was counted by `_new_job` and will now never
+        # run to its own decrement — drop it here so queue_depth doesn't
+        # drift upward on every preemption.
+        metrics.queue_depth.dec()
         await runners._persist_job(job)
         await _state._job_queue.enqueue(job["job_id"])
         return PreemptOutcome(job=job, mode="queued", preempted_job_id=refresh_id)
@@ -334,6 +340,16 @@ async def preempt_active_refresh(
     job["payload"] = {**(job.get("payload") or {}), "after_job": refresh_id}
     job["message"] = "queued after the running summary refresh"
     await runners._persist_job(job)
+
+    # Lost-wakeup guard: the refresh may have reached a terminal status (and
+    # its own post-job hook found no waiters yet, since this job didn't
+    # exist) between our check above and the persist just above. Re-read it
+    # and promote immediately rather than leaving this job stranded until
+    # the next unrelated job for the source finishes, or forever.
+    refreshed = await _state._job_store.get(refresh_id)
+    if refreshed is None or refreshed.status not in (JobStatus.QUEUED, JobStatus.RUNNING):
+        await promote_waiting_after(refresh_id)
+
     return PreemptOutcome(job=job, mode="waiting", preempted_job_id=refresh_id)
 
 
@@ -343,25 +359,18 @@ async def promote_waiting_after(after_job_id: str) -> list[str]:
 
     Superseding older requests would lose work: two incremental pushes carry
     different changed files. Returns the promoted job_id ([] if none).
+
+    Delegates to `JobStore.promote_next_waiting`, which does the read,
+    the active-source check, the conditional promote, the relink, and the
+    job_queue insert in ONE transaction (code-review findings C/E): reading
+    the waiting rows here and upserting them back as separate round trips
+    could relink an already-stranded chain onto a stale snapshot, race a
+    concurrent plain enqueue into `jobs_active_source_uniq`, or double
+    promote under two concurrent callers.
     """
     store = _state._job_store
     if store is None or not after_job_id:
         return []
 
-    waiting = await store.find_waiting_after(after_job_id)
-    if not waiting:
-        return []
-
-    waiting.sort(key=lambda j: j.start_time)
-    first, *rest = waiting
-
-    for j in rest:
-        jd = j.to_dict()
-        jd["payload"] = {**(jd.get("payload") or {}), "after_job": first.id}
-        await runners._persist_job(jd)
-
-    jd = first.to_dict()
-    jd["status"] = "queued"
-    await runners._persist_job(jd)
-    await _state._job_queue.enqueue(first.id)
-    return [first.id]
+    promoted = await store.promote_next_waiting(after_job_id)
+    return [promoted] if promoted else []
