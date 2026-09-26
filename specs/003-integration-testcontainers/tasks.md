@@ -124,7 +124,7 @@ skip, the real stack is unchanged, and no test containers remain (quickstart §2
   `tests/integration/test_neo4j_orphan_cleanup.py` to `neo4j_graph_store`. Replace
   `os.environ["NEO4J_URI"] = …` with the fixture's patched module. Keep their `_META_ID` patching,
   run prefixes and scoped teardown.
-- [ ] T009 [US1] Run the full self-provisioned suite with the local stack up (quickstart §2–§3).
+- [X] T009 [US1] Run the full self-provisioned suite with the local stack up (quickstart §2–§3).
   Record:
   - pass/skip counts (expect 0 skipped);
   - wall time (SC-001);
@@ -138,7 +138,7 @@ skip, the real stack is unchanged, and no test containers remain (quickstart §2
 **Checkpoint**: US1's acceptance scenarios 1, 2 and 4 are verified. Scenario 3 (crash) is covered
 in T010.
 
-- [ ] T010 [US1] Crash cleanup (FR-005): start the suite in self-provisioned mode, kill the pytest
+- [X] T010 [US1] Crash cleanup (FR-005): start the suite in self-provisioned mode, kill the pytest
   process (SIGKILL) once the containers are up, and wait 15 s. Confirm that no
   `org.testcontainers`-labelled containers remain. Record the observed time.
 
@@ -152,13 +152,13 @@ clear reason.
 **Independent Test**: with the switch off and only `POSTGRES_TEST_URL` set, the Postgres tests run
 against it and the rest skip with two-option reasons.
 
-- [ ] T011 [US3] Verify explicit mode (quickstart §4). Start a throwaway Postgres by hand on a free
+- [X] T011 [US3] Verify explicit mode (quickstart §4). Start a throwaway Postgres by hand on a free
   loopback port, run `-k maintenance_lock` with `POSTGRES_TEST_URL` set and the switch off, and
   confirm the test ran against it with no container started by the suite. Then run with the
   switch on as well, and confirm the explicit URL still wins (FR-007). With nothing set, confirm
   every integration test skips and its reason names both options (FR-008). Remove the hand-started
   container.
-- [ ] T012 [US3] Verify the failure paths (quickstart §5):
+- [X] T012 [US3] Verify the failure paths (quickstart §5):
   - the switch on with `DOCKER_HOST=unix:///nonexistent.sock` → the run fails with "Docker is
     required", with no skips (FR-006);
   - an unpullable image, simulated by monkeypatching `compose_image` in a scratch run → the run
@@ -174,7 +174,7 @@ against it and the rest skip with two-option reasons.
 failure. It is ordered after US3 only because it needs the finished suite; it has the same
 priority as US1.
 
-- [ ] T013 [US2] Add the `integration` job to `.github/workflows/ci.yml` per
+- [X] T013 [US2] Add the `integration` job to `.github/workflows/ci.yml` per
   [contracts/fixtures.md](contracts/fixtures.md) "CI job" and research R11:
   - `name: integration` (static), `needs: changes`, `if: needs.changes.outputs.code == 'true'`,
     `runs-on: ubuntu-latest`;
@@ -196,7 +196,7 @@ priority as US1.
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T015 [P] Docs (FR-015, R14):
+- [X] T015 [P] Docs (FR-015, R14):
   - `CLAUDE.md` Tests section: the self-provisioned command, and the note that the explicit
     variables still work;
   - `CONTRIBUTING.md`: a short "Integration tests" section;

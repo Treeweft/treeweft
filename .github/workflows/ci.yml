@@ -8,6 +8,12 @@ name: CI
 # changed — a skipped required job counts as passing. A skipped job reports
 # under its `name:` WITHOUT evaluating matrix expressions, so every required
 # job needs a static name (no matrix-derived name).
+#
+# `integration` is advisory: it deliberately is NOT in the repository
+# ruleset's required checks yet (FR-014), so a container-runtime flake can't
+# block a merge. Its name is still static (no matrix-derived name) so the
+# maintainer can promote it into the required checks later without the name
+# changing underneath the ruleset.
 on:
   push:
     branches: [main]
@@ -144,3 +150,39 @@ jobs:
         run: npm run build
       - name: Unit tests
         run: npm test
+
+  # Advisory (not in the repository ruleset — FR-014): a container-runtime
+  # flake on the shared runner must not block a merge. The name stays static
+  # so the maintainer can add it to the ruleset later without it changing.
+  # Steps mirror `unit-tests` (checkout, setup-uv, install, quickstart env)
+  # but diverge on the last two (Testcontainers env var, slow-marked
+  # integration suite, and a log upload on failure), so they are written out
+  # rather than reusing `*unit-test-steps`.
+  integration:
+    name: integration
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: "3.11"
+          enable-cache: true
+      - name: Install
+        run: uv sync --locked --extra dev --extra all-backends --extra simple
+      - name: Provide the quickstart env
+        run: cp .env.example .env
+      - name: Integration tests
+        env:
+          TREEWEFT_ITEST_CONTAINERS: "1"
+        run: uv run --locked --no-sync pytest tests/integration -m slow -q
+      - name: Upload integration test logs
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: itest-logs
+          path: .itest-logs/
+          if-no-files-found: ignore
+          retention-days: 7
