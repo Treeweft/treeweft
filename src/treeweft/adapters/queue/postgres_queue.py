@@ -204,26 +204,68 @@ class PostgresJobQueue(JobQueue):
                 metrics.dead_letter_jobs_total.inc()
                 metrics.incremental_jobs_total.labels(status="dead_letter").inc()
                 await self._maybe_enqueue_refresh(worker_id, job)
-        elif exc_raised is None:
+        elif exc_raised is not None:
+            # A non-retryable kind raised out of its runner. Every runner
+            # normally catches its own exceptions and calls `_fail_job`
+            # internally (so this is a defensive fallback), which means the
+            # terminal status was never persisted -- do that here, awaited,
+            # before the hook: otherwise `enqueue_if_stale` could still find
+            # this job "active" and refuse to enqueue the replacement.
+            jd = job.to_dict()
+            jd["status"] = "failed"
+            jd["error"] = f"{type(exc_raised).__name__}: {exc_raised}"
+            jd["finished_at"] = time.time()
+            await idx_runners._persist_job(jd)
+            await self._maybe_enqueue_refresh(worker_id, job)
+        else:
             # A clean finish (done, or done with errors -- the runner
             # itself already persisted the terminal status/error count).
             await self._maybe_enqueue_refresh(worker_id, job)
 
     async def _maybe_enqueue_refresh(self, worker_id: int, job) -> None:
-        """After every terminal status of a non-`resummarize` job (research
-        R4), enqueue a chunk-summary refresh for its source if it is now
-        stale. Never runs after a `resummarize` job itself -- that would
-        let a refresh that keeps failing requeue itself in a loop.
+        """After every terminal status of a job (research R4, amended by
+        review finding #2), enqueue a chunk-summary refresh for its source
+        if it is now stale.
+
+        For a `resummarize` job itself, this only fires when the deployment
+        pin moved past the target this job was chasing: after an
+        authoritative `prompt_pins.reload()`, the source's effective version
+        is compared against the job's own `payload["target_version"]`
+        (re-read from the job store so a payload the runner updated mid-run
+        is seen, not this stale in-memory `job`). Equal versions mean the
+        pin never moved past what this refresh already targeted, so
+        re-enqueuing would just requeue the same failing refresh forever.
 
         A failure here is logged and never changes the finished job
         (constitution V): the job's own status/error was already persisted
         before this runs, and nothing below touches it.
         """
-        if job.kind == "resummarize":
-            return
         source_id = getattr(job, "source_id", None)
         if not source_id:
             return
+
+        if job.kind == "resummarize":
+            try:
+                from treeweft.application import indexer_state as idx_state
+                from treeweft.application import prompt_pins
+                from treeweft.application import prompt_refresh
+
+                await prompt_pins.reload()
+                store = idx_state._job_store
+                fresh = await store.get(job.id) if store is not None else None
+                payload = (fresh.payload if fresh is not None else job.payload) or {}
+                target = payload.get("target_version")
+                current = prompt_pins.effective("chunk_summary", source_id)
+                if current == target:
+                    return
+                await prompt_refresh.enqueue_if_stale(source_id)
+            except Exception:
+                logger.exception(
+                    "Worker %d: resummarize overtaken-check for %s failed after job %s",
+                    worker_id, source_id, job.id,
+                )
+            return
+
         try:
             from treeweft.application import prompt_refresh
             await prompt_refresh.enqueue_if_stale(source_id)

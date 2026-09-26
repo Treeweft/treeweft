@@ -193,10 +193,11 @@ any real request, and that cancelling sends nothing.
   the source as in progress toward its target when it starts, and only a clean finish clears the
   mark (FR-015). While the mark is set, the source is stale whatever its target, so reverting the
   pin re-enqueues it rather than hiding the mixed vectors.
-- **Incremental and full index jobs during a migration.** Incremental jobs (webhooks) summarize
-  their changed files at the source's target version. A full index job re-summarizes every chunk
-  at the target. Only a full index job or a clean refresh may advance the recorded version
-  (FR-010).
+- **Incremental and full index jobs during a migration.** Incremental jobs (webhooks) insert their
+  changed files' chunks with no summary vectors at all and never change the recorded version; a
+  later refresh or a full index job fills them in. A full index job re-summarizes every chunk at
+  the target and does advance the recorded version. Only a full index job or a clean refresh may
+  advance the recorded version (FR-010).
 - **The index is not writable** (ADR-004 `reindex_required`, `unverified`, or stores being
   recreated during a rebuild). Refresh jobs write vectors, so they are refused like any other index
   job. A pin change is still stored. The response says which refreshes could not be enqueued and
@@ -268,8 +269,8 @@ any real request, and that cancelling sends nothing.
   completes cleanly (FR-014). A clean full index job with summary vectors off, or on a vector
   store without them, MUST record the version as unknown, because the source then holds no
   summary vectors. An **incremental** index job MUST NOT change it, because it
-  re-summarizes only changed files. *(Amends ADR-003 §2, which also set it on incremental
-  completion.)*
+  inserts changed files' chunks with no summary vectors at all. *(Amends ADR-003 §2, which also
+  set it on incremental completion.)*
 - **FR-011**: A source MUST be reported stale when its recorded version is known and differs from
   its effective chunk-summary version, and when FR-015 says so.
 - **FR-012**: Deleting a source MUST delete its override.
@@ -291,11 +292,14 @@ any real request, and that cancelling sends nothing.
     path (cache hits and rejection markers reused);
   - embed the summaries through the existing embedding path;
   - write each chunk back with its new summary vector and every other stored field unchanged;
-  - give a chunk with no summary the store's own no-summary value, as at index time (a zero
-    vector on Milvus, NULL on LanceDB);
+  - give a chunk whose summary was rejected the store's own no-summary value, as at index time
+    (a zero vector on Milvus, NULL on LanceDB); a chunk whose summary failed transiently keeps
+    its existing summary vector;
   - report progress as chunks processed out of total through the existing job fields;
   - advance the recorded version to the target only when every chunk got a summary or a
-    rejection marker. Otherwise it ends as done with errors and leaves the version unchanged;
+    rejection marker. Otherwise it ends as done with errors (failed, if every chunk failed) and
+    leaves the version unchanged;
+  - write nothing, and remove anything it just wrote, once the source has been deleted;
   - run no parsing, code embedding or graph work.
 - **FR-015**: A refresh left partly applied, or overtaken by a pin change, MUST NOT let the source
   be reported current while its summary vectors are mixed. When a refresh starts, before it writes
@@ -310,7 +314,10 @@ any real request, and that cancelling sends nothing.
   if stale), and on an admin's manual request. A source already at its target MUST get no job. A
   refresh MUST obey the one-active-job-per-source rule. A source with an active job MUST be
   reported as deferred and get its refresh when that job finishes, if still stale. An interrupted
-  refresh MUST be resumed after an indexer restart.
+  refresh MUST be resumed after an indexer restart. A refresh overtaken by a pin change while it
+  ran MUST be followed by a refresh to the new target when it finishes. Decisions about a pin
+  (a refresh's target, a pin change's no-op check, the post-job hook) MUST use the stored pins,
+  not a process's cached view.
 - **FR-017**: A refresh MUST be refused, like any other job that writes vectors, while the index is
   not writable (ADR-004 index guard). A pin change made then MUST still be stored, and its response
   MUST list the refreshes that could not be enqueued and why.

@@ -98,6 +98,16 @@ _periodic_task: asyncio.Task | None = None
 _listener_conn = None
 _stopping = False
 
+# Serializes reload()'s fetch-build-swap so an older read started before a
+# newer one can never complete after it and clobber the fresher view.
+_reload_lock = asyncio.Lock()
+
+# Strong references to the NOTIFY callback's fire-and-forget reload() tasks.
+# asyncio only holds a weak reference to a task created via create_task; with
+# nothing else referencing it, the task can be garbage-collected mid-flight
+# (see the asyncio.create_task docs). Each task removes itself on completion.
+_notify_tasks: set[asyncio.Task] = set()
+
 
 def view() -> PinView:
     return _view
@@ -185,27 +195,42 @@ async def load_and_seed() -> None:
 async def reload() -> None:
     """Re-read every pin and swap the view.
 
-    Never raises: an unregistered stored pin (or any other read failure) is
-    logged at ERROR and the previous view is kept — startup is where
-    validation fails loud.
+    Never raises: an unregistered stored pin, a stored pin set that is
+    missing a deployment row for a registered operation (e.g. a hand-deleted
+    row), or any other read failure is logged at ERROR and the previous view
+    is kept — startup is where validation fails loud.
+
+    Concurrent reloads (the NOTIFY listener, the periodic loop, and a caller
+    swapping its own view right after a write can all race) are serialized
+    by `_reload_lock` so an older read that happens to finish last can never
+    overwrite a newer view with stale data.
     """
     if not _state.DATABASE_URL:
         return
 
     global _view
-    try:
-        rows = await _pin_store.list_all()
-        new_view = _build_view(rows)
-    except Exception as exc:
-        logger.error("prompt pin reload failed, keeping previous view: %s", exc)
-        return
+    async with _reload_lock:
+        try:
+            rows = await _pin_store.list_all()
+            new_view = _build_view(rows)
+        except Exception as exc:
+            logger.error("prompt pin reload failed, keeping previous view: %s", exc)
+            return
 
-    old_hyde = _view.deployment.get("hyde")
-    _view = new_view
-    if new_view.deployment.get("hyde") != old_hyde:
-        from treeweft.adapters.llm_api.llm_adapter import _HYDE_CACHE
+        missing = [op for op in prompts.REGISTRY if op not in new_view.deployment]
+        if missing:
+            logger.error(
+                "prompt pin reload missing deployment pin(s) for %s, keeping previous view",
+                missing,
+            )
+            return
 
-        _HYDE_CACHE.clear()
+        old_hyde = _view.deployment.get("hyde")
+        _view = new_view
+        if new_view.deployment.get("hyde") != old_hyde:
+            from treeweft.adapters.llm_api.llm_adapter import _HYDE_CACHE
+
+            _HYDE_CACHE.clear()
 
 
 async def _listener_supervisor(dsn: str) -> None:
@@ -217,7 +242,9 @@ async def _listener_supervisor(dsn: str) -> None:
             _listener_conn = await asyncpg.connect(dsn)
 
             def _on_notify(_conn, _pid, _channel, _payload):
-                asyncio.create_task(reload())
+                task = asyncio.create_task(reload())
+                _notify_tasks.add(task)
+                task.add_done_callback(_notify_tasks.discard)
 
             await _listener_conn.add_listener(NOTIFY_CHANNEL, _on_notify)
             logger.info("[prompt_pins] listening on Postgres channel %r", NOTIFY_CHANNEL)
@@ -364,6 +391,12 @@ async def set_pin(
     if not prompts.is_registered(operation, version):
         raise UnknownPromptVersionError(operation, version, prompts.versions(operation))
 
+    # Authoritative read: this process's view can lag another process's
+    # write by up to PROMPT_PINS_REFRESH_SECONDS. Reload before the
+    # no-op check and the plan so both are decided from Postgres's current
+    # pins, not a stale local view.
+    await reload()
+
     if scope == "deployment":
         previous_version = _view.deployment.get(operation)
         sources = [
@@ -427,6 +460,9 @@ async def clear_override(source_id: str, *, updated_by: str | None, dry_run: boo
     source = await _source_repo.get_by_id(source_id)
     if source is None:
         raise UnknownSourceError(source_id)
+
+    # Authoritative read: see set_pin's comment above.
+    await reload()
 
     previous_version = _view.overrides.get(source_id)
     if previous_version is None:

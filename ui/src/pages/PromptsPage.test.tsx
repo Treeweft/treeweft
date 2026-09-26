@@ -214,6 +214,37 @@ describe("PromptsPage", () => {
     expect(within(panel).getByText(/19,186/)).toBeTruthy();
   });
 
+  it("renders — for a null previous_version and a null current_version", async () => {
+    getMock.mockResolvedValue(versionsResponse());
+    const unknownVersionResult: PinResult = {
+      ...dryRunPinResult(),
+      previous_version: null,
+      enqueued: [
+        {
+          source_id: "src_1",
+          current_version: null,
+          target_version: 4,
+          chunk_count: 18234,
+        },
+      ],
+      deferred: [],
+      not_enqueued: [],
+    };
+    putMock.mockResolvedValueOnce(unknownVersionResult);
+    await renderPrompts();
+    await screen.findByText("chunk_summary");
+
+    fireEvent.change(screen.getByLabelText(/chunk_summary deployment pin/i), {
+      target: { value: "4" },
+    });
+
+    const panel = await screen.findByRole("region", {
+      name: /confirm prompt change/i,
+    });
+    expect(within(panel).getByText(/chunk_summary: v— → v4/)).toBeTruthy();
+    expect(within(panel).getByText(/src_1: v— → v4/)).toBeTruthy();
+  });
+
   it("cancel sends no further request", async () => {
     getMock.mockResolvedValue(versionsResponse());
     putMock.mockResolvedValueOnce(dryRunPinResult());

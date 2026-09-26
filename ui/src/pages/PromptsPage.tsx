@@ -5,6 +5,7 @@ import { ApiError } from "@/api/client";
 import {
   clearOverride,
   formatChunks,
+  formatVersion,
   getPromptVersions,
   resummarize,
   setDeploymentPin,
@@ -331,7 +332,8 @@ function ConfirmPanel({
       className="mt-4 rounded-lg border border-warning/40 bg-warning/10 p-4"
     >
       <p className="text-sm font-medium">
-        {result.operation}: v{result.previous_version} → v{result.version}
+        {result.operation}: v{formatVersion(result.previous_version)} → v
+        {result.version}
         {pending.sourceId ? ` (source ${pending.sourceId})` : ""}
       </p>
       {result.effect && (
@@ -382,8 +384,8 @@ function ResultGroup({
       <ul className="mt-1 space-y-1">
         {items.map((item) => (
           <li key={item.source_id} className="text-muted-foreground">
-            {item.source_id}: v{item.current_version} → v{item.target_version} (
-            {formatChunks(item.chunk_count)} chunks)
+            {item.source_id}: v{formatVersion(item.current_version)} → v
+            {item.target_version} ({formatChunks(item.chunk_count)} chunks)
             {item.job_id ? ` — job ${item.job_id}` : ""}
             {showBlocking && item.blocking_job_id
               ? ` — waiting on job ${item.blocking_job_id}`
@@ -400,7 +402,8 @@ function LastResultSummary({ result }: { result: PinResult }) {
   return (
     <div className="mt-4 rounded-lg border border-success/40 bg-success/10 p-4 text-sm">
       <p className="font-medium">
-        Applied {result.operation}: v{result.previous_version} → v{result.version}
+        Applied {result.operation}: v{formatVersion(result.previous_version)} →
+        v{result.version}
       </p>
       <ResultGroup title="Enqueued" items={result.enqueued} />
       <ResultGroup title="Deferred" items={result.deferred} showBlocking />

@@ -50,7 +50,7 @@ def _rows(n: int, source_id: str = "src-1") -> list[dict]:
 
 
 class _FakeSourceRepo:
-    def __init__(self, call_order=None, existence=True):
+    def __init__(self, call_order=None, existence=True, record=None):
         self._call_order = call_order if call_order is not None else []
         if isinstance(existence, bool):
             self._existence_seq = None
@@ -58,6 +58,7 @@ class _FakeSourceRepo:
         else:
             self._existence_seq = list(existence)
             self._existence_always = False
+        self._record = record
         self.marked: list[tuple[str, int | None]] = []
         self.recorded: list[tuple[str, int | None]] = []
 
@@ -66,7 +67,9 @@ class _FakeSourceRepo:
             exists = self._existence_seq.pop(0) if self._existence_seq else False
         else:
             exists = self._existence_always
-        return object() if exists else None
+        if not exists:
+            return None
+        return self._record if self._record is not None else object()
 
     async def mark_summary_refresh(self, source_id, target):
         self._call_order.append("mark")
@@ -402,8 +405,14 @@ async def test_count_mismatch_fails_job_naming_both_counts(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_source_deleted_mid_job_done_no_further_writes(monkeypatch):
+    # One existence check up front (the already-current short-circuit), then
+    # each successfully-written batch checks existence three times (top of
+    # loop, immediately before the write, immediately after it) -- batch 1
+    # sees the source present the whole way, batch 2's top-of-loop check
+    # finds it gone before ever fetching.
     job, store, repo, job_errors, fake_llm, call_order = _setup(
-        monkeypatch, rows=_rows(4), target=5, embed_batch_size=2, existence=[True, False],
+        monkeypatch, rows=_rows(4), target=5, embed_batch_size=2,
+        existence=[True, True, True, True, False],
     )
     await svc._run_resummarize_job(job)
 
@@ -411,6 +420,148 @@ async def test_source_deleted_mid_job_done_no_further_writes(monkeypatch):
     assert job["message"] == "source deleted"
     assert len(store.write_batches) == 1
     assert store.count_calls == 0
+    assert repo.recorded == []
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: source deleted between fetch and write must not write (Milvus
+# upsert would resurrect the row under a stale source_id)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_source_deleted_between_fetch_and_write_skips_write(monkeypatch):
+    # existence: already-current check, top-of-loop, then gone by the
+    # pre-write re-check.
+    job, store, repo, job_errors, fake_llm, call_order = _setup(
+        monkeypatch, rows=_rows(2), target=5, existence=[True, True, False],
+    )
+    await svc._run_resummarize_job(job)
+
+    assert job["status"] == "done"
+    assert job["message"] == "source deleted"
+    assert store.write_batches == []
+    assert repo.recorded == []
+
+
+# ---------------------------------------------------------------------------
+# Fix 4: source deleted right after a write must delete the just-written
+# batch (best-effort, whole-source) and stop -- no next batch.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_source_deleted_right_after_write_deletes_batch_and_stops(monkeypatch):
+    # existence: already-current check, top-of-loop, pre-write, then gone by
+    # the post-write re-check.
+    job, store, repo, job_errors, fake_llm, call_order = _setup(
+        monkeypatch, rows=_rows(4), target=5, embed_batch_size=2,
+        existence=[True, True, True, False],
+    )
+    deleted: list[str] = []
+    monkeypatch.setattr(svc, "delete_chunks_by_source", lambda sid: deleted.append(sid))
+
+    await svc._run_resummarize_job(job)
+
+    assert job["status"] == "done"
+    assert job["message"] == "source deleted"
+    assert len(store.write_batches) == 1
+    assert deleted == ["src-1"]
+    assert repo.recorded == []
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: a transient error writes back the row's existing summary_vector,
+# not None -- a rejection (deterministic) still gets None.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_error_outcome_preserves_existing_summary_vector(monkeypatch):
+    rows = _rows(2)
+    rows[0]["summary_vector"] = [9.9, 9.9]
+    fail_text = rows[0]["chunk_text"]
+    job, store, repo, job_errors, fake_llm, call_order = _setup(
+        monkeypatch, rows=rows, target=5, fail_texts={fail_text},
+    )
+    await svc._run_resummarize_job(job)
+
+    ids, vectors = store.write_batches[0]
+    assert vectors[ids.index(rows[0]["id"])] == [9.9, 9.9]
+    assert job["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# Fix 1: every chunk erroring ends the job failed, not done -- the version
+# is not recorded and the refresh mark is left set.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_all_chunks_errored_ends_failed_not_done(monkeypatch):
+    rows = _rows(2)
+    fail_texts = {r["chunk_text"] for r in rows}
+    job, store, repo, job_errors, fake_llm, call_order = _setup(
+        monkeypatch, rows=rows, target=5, fail_texts=fail_texts,
+    )
+    await svc._run_resummarize_job(job)
+
+    assert job["status"] == "failed"
+    assert repo.recorded == []
+    assert repo.marked == [("src-1", 5)]
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: the effective view is refreshed before the target is re-resolved,
+# so a worker in another process with a stale view can't override the job's
+# explicit target.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_reload_called_before_resolving_target(monkeypatch):
+    order: list[str] = []
+
+    async def _reload():
+        order.append("reload")
+
+    def _effective(op, source_id=None):
+        order.append("effective")
+        return 5
+
+    monkeypatch.setattr(prompt_pins, "reload", _reload)
+    monkeypatch.setattr(prompt_pins, "effective", _effective)
+    repo = _FakeSourceRepo()
+    monkeypatch.setattr(_state, "_source_repo", repo)
+    monkeypatch.setattr(svc, "summary_vectors_supported", lambda: False)
+    monkeypatch.setenv("VECTOR_STORE", "milvus")
+
+    job = _job("src-1", 5)
+    await svc._run_resummarize_job(job)
+
+    assert order == ["reload", "effective"]
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: a source already cleanly at the target ends done without marking
+# or writing anything.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_already_current_at_target_ends_done_without_writes(monkeypatch):
+    from types import SimpleNamespace
+
+    record = SimpleNamespace(summary_prompt_version=5, summary_refresh_target=None)
+    repo = _FakeSourceRepo(record=record)
+    monkeypatch.setattr(_state, "_source_repo", repo)
+    monkeypatch.setattr(prompt_pins, "effective", lambda op, source_id=None: 5)
+
+    def _boom(*a, **k):
+        raise AssertionError("must not touch the vector store once already current")
+
+    monkeypatch.setattr(retriever_module, "snapshot_source_row_ids", _boom, raising=False)
+
+    job = _job("src-1", 5)
+    await svc._run_resummarize_job(job)
+
+    assert job["status"] == "done"
+    assert job["message"] == "already current at chunk_summary v5"
+    assert repo.marked == []
     assert repo.recorded == []
 
 

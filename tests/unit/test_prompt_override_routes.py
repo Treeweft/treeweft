@@ -352,12 +352,38 @@ class TestOverrideDelete:
 
 
 # ---------------------------------------------------------------------------
+# Authoritative reads: clear_override must reload before the "has no
+# override" check, so a stale local view can't produce a false 404 for an
+# override Postgres still has.
+# ---------------------------------------------------------------------------
+
+class TestAuthoritativeReadOnClearOverride:
+    def test_clear_override_reload_prevents_false_404(self, env, client, monkeypatch, registry_v4):
+        _grant_admin(monkeypatch)
+        env["pin_store"].rows.append(_pin_row("chunk_summary", "src-1", 4, updated_by="alice"))
+        # Local view stale: doesn't know about the override Postgres already has.
+        monkeypatch.setattr(
+            prompt_pins, "_view",
+            prompt_pins.PinView(deployment={"chunk_summary": 3, "hyde": 1}, overrides={}),
+        )
+        _set_sources(env, [_source("src-1", version=4)])
+
+        resp = client.delete("/prompt-pins/chunk_summary/sources/src-1")
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["previous_version"] == 4
+        assert body["version"] == 3
+        assert env["pin_store"].delete_calls == [("chunk_summary", "src-1")]
+
+
+# ---------------------------------------------------------------------------
 # A deployment-pin change skips an overridden source
 # ---------------------------------------------------------------------------
 
 class TestDeploymentChangeSkipsOverriddenSource:
     def test_override_skipped_plain_source_enqueued(self, env, client, monkeypatch, registry_v4):
         _grant_admin(monkeypatch)
+        env["pin_store"].rows.append(_pin_row("chunk_summary", "src-override", 4))
         _set_overrides(monkeypatch, {"src-override": 4})
         _set_sources(env, [
             _source("src-override", version=3, chunk_count=5),
@@ -459,6 +485,30 @@ class TestSourceDeleteRemovesOverride:
         result = await idx_svc.remove_source("src-1", mocker.Mock())
         assert result["status"] == "deleted"
         assert env["pin_store"].delete_overrides_calls == ["src-1"]
+
+    @pytest.mark.asyncio
+    async def test_delete_source_skips_override_delete_without_database_url(
+        self, env, monkeypatch, mocker, caplog,
+    ):
+        monkeypatch.delenv("AUTH_ENABLED", raising=False)
+        monkeypatch.setattr(idx_state, "DATABASE_URL", "")
+        mocker.patch.object(idx_svc, "delete_chunks_by_source")
+        mocker.patch.object(idx_svc.graph_store, "delete_source", new=mocker.AsyncMock())
+        mocker.patch.object(idx_svc.graph_store, "delete_source_communities", new=mocker.AsyncMock())
+
+        env["pin_store"].rows.append(_pin_row("chunk_summary", "src-1", 4, updated_by="alice"))
+        _set_sources(env, [_source("src-1", version=4)])
+
+        with caplog.at_level(logging.WARNING):
+            result = await idx_svc.remove_source("src-1", mocker.Mock())
+
+        assert result["status"] == "deleted"
+        # No Postgres configured -> the override delete is skipped entirely,
+        # not attempted-and-logged on every single deletion.
+        assert env["pin_store"].delete_overrides_calls == []
+        assert not any(
+            "failed to delete prompt-pin overrides" in r.message for r in caplog.records
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -180,6 +180,26 @@ class JobStore:
             )
             return self._row_to_job(row) if row else None
 
+    async def find_active_for_sources(self, source_ids: list[str]) -> dict[str, Job]:
+        """Return the active (queued/running) job for each source in
+        `source_ids` that has one, keyed by source_id.
+
+        One query instead of N `find_active_for_source` calls — used by
+        `routes_prompts.get_prompt_versions`, which otherwise did one round
+        trip per listed source.
+        """
+        if not source_ids:
+            return {}
+        pool = await _require_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT DISTINCT ON (source_id) * FROM jobs "
+                "WHERE source_id = ANY($1) AND status IN ('queued', 'running') "
+                "ORDER BY source_id, start_time DESC",
+                source_ids,
+            )
+        return {row["source_id"]: self._row_to_job(row) for row in rows}
+
     async def update_status(self, job_id: str, status: JobStatus) -> None:
         pool = await _require_pool()
         async with pool.acquire() as conn:

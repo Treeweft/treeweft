@@ -196,9 +196,13 @@ and `directory` jobs insert chunks with no summary vectors. A clean `file`
 or `directory` job therefore records the source's `summary_prompt_version`
 as unknown (`NULL`), the same as a repo job run with `USE_SUMMARY_VECTOR=0`
 or on a store without summary vectors. A source with an unknown recorded
-version is never reported stale and never refreshed automatically — there
-is nothing to compare against. It becomes tracked once a `repo` job or a
-manual `resummarize` populates its summary vectors.
+version is never reported stale (`is_stale` treats an unset `recorded` with
+no refresh in flight as current) and never refreshed automatically — there
+is nothing to compare against. A manual `resummarize` against it is a
+no-op too, for the same reason: it answers `200 {"job_id": null, "reason":
+"already current at chunk_summary vN"}` without touching the source. It
+becomes tracked only once a `repo` index job populates its summary
+vectors.
 
 ## Running without Postgres
 

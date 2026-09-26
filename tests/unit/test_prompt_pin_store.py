@@ -137,6 +137,13 @@ class _FakeConn:
         q = " ".join(query.split())
         if "FROM prompt_pins" in q:
             return [dict(r) for r in self.rows]
+        if "FROM source_records" in q and "id = ANY" in q:
+            (ids,) = args
+            return [
+                {"id": r["id"], "summary_prompt_version": r.get("summary_prompt_version")}
+                for r in self.rows
+                if r.get("id") in ids
+            ]
         if "summary_prompt_version" in q and "GROUP BY" in q:
             hist: dict[int, int] = {}
             for r in self.rows:
@@ -475,3 +482,61 @@ class TestSaveDoesNotWriteNewColumns:
         insert_call = next(c for c in conn.calls if c[0] == "execute" and "INSERT INTO source_records" in c[1])
         assert "summary_prompt_version" not in insert_call[1]
         assert "summary_refresh_target" not in insert_call[1]
+
+
+class TestSummaryVersionsFor:
+    """Batch lookup replacing one get_by_id per distinct source in the
+    summary_tail read path (retrieval._recorded_versions)."""
+
+    async def test_one_query_returns_dict_keyed_by_id(self):
+        from treeweft.adapters.sources.repository import PostgreSourceRepository
+
+        conn = _source_conn()
+        conn.rows = [
+            {"id": "src-1", "summary_prompt_version": 5},
+            {"id": "src-2", "summary_prompt_version": None},
+            {"id": "src-3", "summary_prompt_version": 7},
+        ]
+        pool = _source_pool(conn)
+        repo = PostgreSourceRepository(pool=pool)
+
+        result = await repo.summary_versions_for(["src-1", "src-2", "src-9"])
+
+        assert result == {"src-1": 5, "src-2": None}
+        fetch_calls = [c for c in conn.calls if c[0] == "fetch"]
+        assert len(fetch_calls) == 1
+        assert "id = ANY" in fetch_calls[0][1]
+
+    async def test_empty_input_returns_empty_without_querying(self):
+        from treeweft.adapters.sources.repository import PostgreSourceRepository
+
+        conn = _source_conn()
+        pool = _source_pool(conn)
+        repo = PostgreSourceRepository(pool=pool)
+
+        assert await repo.summary_versions_for([]) == {}
+        assert conn.calls == []
+
+    async def test_no_pool_returns_empty_dict(self, monkeypatch):
+        from treeweft.adapters.sources import repository as repo_mod
+
+        async def _get_pool():
+            return None
+
+        monkeypatch.setattr(repo_mod, "get_pool", _get_pool)
+        repo = repo_mod.PostgreSourceRepository()
+
+        assert await repo.summary_versions_for(["src-1"]) == {}
+
+    async def test_database_error_is_logged_not_raised(self):
+        from treeweft.adapters.sources.repository import PostgreSourceRepository
+
+        conn = _source_conn()
+
+        async def _boom(*_a, **_k):
+            raise ConnectionError("db down")
+
+        conn.fetch = _boom
+        repo = PostgreSourceRepository(pool=_source_pool(conn))
+
+        assert await repo.summary_versions_for(["src-1"]) == {}

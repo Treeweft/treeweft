@@ -119,6 +119,21 @@ async def test_transient_summary_error_does_not_record(fake_repo, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_finalize_uses_payload_summary_errors_when_top_level_missing(fake_repo, monkeypatch):
+    # FR-010: a resumed job's dict comes back from Job.from_dict() with no
+    # top-level "summary_errors" key (not a Job dataclass field/DB column) --
+    # only payload["summary_errors"] survives the round trip through Postgres.
+    monkeypatch.setattr(svc, "USE_SUMMARY_VECTOR", True)
+    monkeypatch.setattr(svc, "summary_vectors_supported", lambda: True)
+    job = _base_job("repo", "s-resumed", 5)
+    job["payload"]["summary_errors"] = 1
+    assert "summary_errors" not in job
+    await svc._finalize_job(job, 3, 1, "ok")
+    assert job["status"] == "done"
+    assert fake_repo.recorded == []
+
+
+@pytest.mark.asyncio
 async def test_summary_vectors_off_records_none(fake_repo, monkeypatch):
     monkeypatch.setattr(svc, "USE_SUMMARY_VECTOR", False)
     monkeypatch.setattr(svc, "summary_vectors_supported", lambda: True)
@@ -279,11 +294,21 @@ async def test_process_file_counts_error_outcomes_into_job_summary_errors(tmp_pa
 
     monkeypatch.setattr(svc, "_summaries_for_chunks", _fake_summaries)
 
+    persisted = []
+
+    async def _persist(j):
+        persisted.append(dict(j))
+
+    monkeypatch.setattr(svc, "_persist_job", _persist)
+
     job = {"payload": {"summary_version": 11}}
     n = await svc._process_file(str(tmp_path / "a.py"), "src", version=11, job=job)
     assert n == 1
     assert job["summary_errors"] == 1
     assert job["payload"]["summary_errors"] == 1
+    # FR-010: persisted immediately so a crash right after doesn't lose the
+    # count (it lives only in payload once round-tripped through the DB).
+    assert persisted and persisted[-1]["payload"]["summary_errors"] == 1
 
 
 # ---------------------------------------------------------------------------

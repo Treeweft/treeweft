@@ -180,8 +180,8 @@ one-active-job-per-source rule does not queue a second job behind an active
 one; it refuses it. So a refresh for a source with an active job is
 **deferred**: the triggering response lists it with the blocking job, and when
 any job other than a `resummarize` finishes, the source is re-checked and a
-refresh is enqueued if it is still stale. A finished refresh never re-enqueues
-itself. Startup crash recovery re-enqueues an interrupted `resummarize`
+refresh is enqueued if it is still stale. A finished refresh re-triggers only
+when a pin change overtook it, so a refresh that keeps failing cannot loop. Startup crash recovery re-enqueues an interrupted `resummarize`
 instead of treating it as superseded by the source's earlier index job
 (amended 2026-09-25).
 
@@ -465,3 +465,10 @@ Made on 2026-09-25 while planning the implementation
    (§1; R8).
 7. A post-refresh row count check guards against duplicates from Milvus
    re-keying (§3; R10).
+8. After code review (2026-09-26): a transient summary failure during a
+   refresh keeps the chunk's existing summary vector (only a rejection gets the
+   no-summary value), and a run in which every chunk fails ends `failed`. A
+   refresh re-reads the pins before resolving its target, re-checks the source
+   around each write so a deleted source is not resurrected by a Milvus
+   upsert, and a refresh overtaken by a pin change is followed by one to the
+   new target.

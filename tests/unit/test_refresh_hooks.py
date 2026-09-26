@@ -49,8 +49,11 @@ pytestmark = pytest.mark.asyncio
 
 
 def _job(job_id="job-1", *, kind="repo", source_id="src-1", group_id=None,
-         status=JobStatus.QUEUED) -> Job:
-    return Job(id=job_id, kind=kind, source_id=source_id, status=status, group_id=group_id)
+         status=JobStatus.QUEUED, payload=None) -> Job:
+    return Job(
+        id=job_id, kind=kind, source_id=source_id, status=status, group_id=group_id,
+        payload=payload,
+    )
 
 
 async def _probe_none():
@@ -118,8 +121,39 @@ class TestRunOneRefreshHook:
 
         assert calls == ["src-2"]
 
-    async def test_hook_not_called_when_finished_job_is_resummarize(self, monkeypatch):
-        job = _job(kind="resummarize", source_id="src-3")
+    async def test_hook_not_called_when_resummarize_finishes_at_current_target(
+        self, monkeypatch
+    ):
+        """Fix 2: the effective version still equals the job's own target --
+        the pin didn't move past what this refresh was already chasing, so
+        re-enqueuing would just requeue the same failing refresh forever."""
+        job = _job(kind="resummarize", source_id="src-3", payload={"target_version": 5})
+
+        async def ok_coro():
+            return None
+
+        calls: list[str] = []
+        reload_calls: list[int] = []
+
+        async def fake_enqueue_if_stale(source_id):
+            calls.append(source_id)
+            return None
+
+        async def fake_reload():
+            reload_calls.append(1)
+
+        monkeypatch.setattr(prompt_refresh, "enqueue_if_stale", fake_enqueue_if_stale)
+        monkeypatch.setattr(prompt_pins, "reload", fake_reload)
+        monkeypatch.setattr(prompt_pins, "effective", lambda op, source_id=None: 5)
+        await self._run(monkeypatch, job, coro_factory=lambda j: ok_coro())
+
+        assert reload_calls == [1]
+        assert calls == []
+
+    async def test_hook_called_when_resummarize_overtaken_by_pin_change(self, monkeypatch):
+        """Fix 2: the pin moved away from the target this job was chasing --
+        the source must not be left stranded on the abandoned target."""
+        job = _job(kind="resummarize", source_id="src-3", payload={"target_version": 5})
 
         async def ok_coro():
             return None
@@ -130,10 +164,15 @@ class TestRunOneRefreshHook:
             calls.append(source_id)
             return None
 
+        async def fake_reload():
+            return None
+
         monkeypatch.setattr(prompt_refresh, "enqueue_if_stale", fake_enqueue_if_stale)
+        monkeypatch.setattr(prompt_pins, "reload", fake_reload)
+        monkeypatch.setattr(prompt_pins, "effective", lambda op, source_id=None: 7)
         await self._run(monkeypatch, job, coro_factory=lambda j: ok_coro())
 
-        assert calls == []
+        assert calls == ["src-3"]
 
     async def test_hook_called_after_dispatch_refusal(self, monkeypatch):
         job = _job(kind="repo", source_id="src-4")
@@ -291,6 +330,72 @@ class TestRunOneRefreshHook:
 
         assert calls == []
 
+    async def test_hook_called_when_non_retryable_job_raises_out_of_its_runner(
+        self, monkeypatch
+    ):
+        """Fix 6a: a kind outside `_RETRYABLE_KINDS` that raises past its own
+        runner (defensive path -- normal runners catch internally and call
+        `_fail_job`) is still a terminal outcome and must not skip the hook."""
+        job = _job(kind="repo", source_id="src-10")
+
+        async def boom_coro():
+            raise RuntimeError("escaped the runner")
+
+        calls: list[str] = []
+
+        async def fake_enqueue_if_stale(source_id):
+            calls.append(source_id)
+            return None
+
+        monkeypatch.setattr(prompt_refresh, "enqueue_if_stale", fake_enqueue_if_stale)
+        persisted = await self._run(monkeypatch, job, coro_factory=lambda j: boom_coro())
+
+        assert calls == ["src-10"]
+        assert persisted[-1]["status"] == "failed"
+
+    async def test_fail_job_persists_terminal_status_before_hook_runs(self, monkeypatch):
+        """Fix 6b: `_fail_job` must await its persistence, not fire-and-
+        forget it, so the hook never races a still-in-flight write -- or
+        `enqueue_if_stale` could see this job as still active and refuse the
+        replacement refresh."""
+        job = _job(kind="repo", source_id="src-11")
+
+        persisted: list[dict] = []
+
+        async def fake_persist(jd):
+            persisted.append(dict(jd))
+
+        async def failing_coro():
+            # Mirrors a runner's own except block: catches internally, calls
+            # _fail_job, and returns normally (no exception escapes).
+            await runners._fail_job(
+                {"job_id": job.id, "source_id": job.source_id}, RuntimeError("boom"),
+            )
+
+        order: list[str] = []
+
+        async def fake_enqueue_if_stale(source_id):
+            order.append("hook")
+            assert persisted and persisted[-1]["status"] == "failed"
+            return None
+
+        monkeypatch.setattr(prompt_refresh, "enqueue_if_stale", fake_enqueue_if_stale)
+
+        q = PostgresJobQueue(max_workers=1)
+        store = AsyncMock()
+        store.get = AsyncMock(return_value=job)
+
+        monkeypatch.setattr(idx_state, "_job_store", store)
+        monkeypatch.setattr(runners, "_persist_job", fake_persist)
+        monkeypatch.setattr(ig, "dispatch_allowed", AsyncMock(return_value=True))
+        monkeypatch.setattr(ig, "refusal_detail", lambda job_id: "refused")
+        monkeypatch.setattr(runners, "dispatch_job", lambda j: failing_coro())
+
+        await q._run_one(worker_id=0, job_id=job.id)
+
+        assert order == ["hook"]
+        assert persisted[-1]["status"] == "failed"
+
 
 # ---------------------------------------------------------------------------
 # enqueue_if_stale's own contract (not covered by test_prompt_routes.py,
@@ -394,6 +499,75 @@ class TestEnqueueIfStaleContract:
         assert job_id is not None
         assert queue.enqueued == [job_id]
         assert job_store.upserted[0].kind == "resummarize"
+
+
+# ---------------------------------------------------------------------------
+# Authoritative read (finding #1): enqueue_if_stale must reload before
+# deciding staleness, so a stale local view can't hide a pin move another
+# process already committed.
+# ---------------------------------------------------------------------------
+
+def _reload_pin_row(operation: str, version: int):
+    from datetime import datetime, timezone
+
+    from treeweft.adapters.postgresql.prompt_pin_store import PinRow
+
+    return PinRow(
+        operation=operation, scope="deployment", version=version,
+        updated_at=datetime.now(timezone.utc), updated_by=None,
+    )
+
+
+class _FakeReloadPinStore:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def list_all(self):
+        return list(self._rows)
+
+
+class TestEnqueueIfStaleAuthoritativeRead:
+    async def test_uses_stored_pin_not_stale_local_view(self, monkeypatch):
+        """Postgres already holds chunk_summary=4 (a peer process moved the
+        pin), but this process's local view is stale and still thinks it's
+        at 3. The source is recorded at v3, so a stale-view read would
+        wrongly call it current and skip the refresh; a fresh read must
+        catch that it is stale toward v4."""
+        from treeweft.adapters.llm_api import prompts
+
+        monkeypatch.setitem(
+            prompts.REGISTRY,
+            "chunk_summary",
+            {
+                3: prompts.REGISTRY["chunk_summary"][3],
+                4: prompts.PromptVersion(
+                    operation="chunk_summary", version=4, system="v4",
+                    schema=prompts.FrozenResponseSchema(min_length=1), notes="test v4",
+                ),
+            },
+        )
+        monkeypatch.setattr(idx_state, "_source_repo", _FakeSourceRepo([_source(version=3)]))
+        monkeypatch.setattr(idx_state, "DATABASE_URL", "postgresql://fake")
+        monkeypatch.setattr(
+            prompt_pins, "_view",
+            prompt_pins.PinView(deployment={"chunk_summary": 3, "hyde": 1}, overrides={}),
+        )
+        monkeypatch.setattr(
+            prompt_pins, "_pin_store",
+            _FakeReloadPinStore([_reload_pin_row("chunk_summary", 4), _reload_pin_row("hyde", 1)]),
+        )
+        job_store = _FakeRefreshJobStore()
+        queue = _FakeRefreshQueue()
+        monkeypatch.setattr(idx_state, "_job_store", job_store)
+        monkeypatch.setattr(idx_state, "_job_group_store", None)
+        monkeypatch.setattr(idx_state, "_job_queue", queue)
+        monkeypatch.setattr(ig, "_status", ig.IndexStatus("ok"))
+
+        job_id = await prompt_refresh.enqueue_if_stale("src-1")
+
+        assert job_id is not None
+        assert queue.enqueued == [job_id]
+        assert prompt_pins.view().deployment["chunk_summary"] == 4
 
 
 # ---------------------------------------------------------------------------

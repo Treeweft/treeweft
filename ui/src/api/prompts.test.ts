@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { ApiError } from "@/api/client";
 import {
   formatChunks,
+  formatVersion,
   staleCount,
   validVersionsFromError,
   type PromptSourceRow,
@@ -49,6 +50,20 @@ describe("formatChunks", () => {
 
   it("formats zero", () => {
     expect(formatChunks(0)).toBe("0");
+  });
+});
+
+describe("formatVersion", () => {
+  it("renders a known version as a plain number string", () => {
+    expect(formatVersion(4)).toBe("4");
+  });
+
+  it("renders null as an em dash", () => {
+    expect(formatVersion(null)).toBe("—");
+  });
+
+  it("renders zero as \"0\", not the null placeholder", () => {
+    expect(formatVersion(0)).toBe("0");
   });
 });
 

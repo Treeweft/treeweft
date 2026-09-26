@@ -30,8 +30,7 @@ from treeweft.application import indexer_authz as authz
 from treeweft.application import indexer_state as _state
 from treeweft.application import prompt_pins
 from treeweft.application import prompt_refresh
-from treeweft.application import routes_webhook as _routes_webhook
-from treeweft.domain.prompt_pins import is_stale
+from treeweft.domain.prompt_pins import PinView, is_stale, resolve
 
 logger = logging.getLogger(__name__)
 
@@ -93,14 +92,32 @@ async def get_prompt_versions(request: Request):
             ),
         }
 
+    # Build the view from the rows this request just read, not the
+    # process-local `prompt_pins.view()`, which can lag another process's
+    # write by up to PROMPT_PINS_REFRESH_SECONDS. This keeps effective_version
+    # and stale consistent with the pins reported above in the same response.
+    fresh_view = PinView(
+        deployment={op: row["version"] for op, row in deployment_pins.items()},
+        overrides={
+            scope: row["version"]
+            for scope, row in override_pins.get("chunk_summary", {}).items()
+        },
+    )
+
+    sources = await _state._source_repo.list_all()
+    active_by_source: dict[str, dict] = {}
+    if _state._job_store is not None:
+        bulk = await _state._job_store.find_active_for_sources([s.id for s in sources])
+        active_by_source = {sid: job.to_dict() for sid, job in bulk.items()}
+
     sources_out = []
-    for source in await _state._source_repo.list_all():
+    for source in sources:
         override_row = override_pins.get("chunk_summary", {}).get(source.id)
-        effective_version = prompt_pins.effective("chunk_summary", source.id)
+        effective_version = resolve(fresh_view, "chunk_summary", source.id)
         stale = is_stale(
             source.summary_prompt_version, source.summary_refresh_target, effective_version
         )
-        active = await _routes_webhook._find_active_job_for_source(source.id)
+        active = active_by_source.get(source.id)
         sources_out.append(
             {
                 "source_id": source.id,
@@ -144,8 +161,6 @@ async def put_prompt_pin(operation: str, req: PinRequest, request: Request, dry_
             status_code=400,
             content={"detail": str(exc), "valid_versions": list(exc.valid_versions)},
         )
-    except RuntimeError:
-        return _no_postgres()
 
     return result
 
@@ -170,8 +185,6 @@ async def put_prompt_pin_override(
         )
     except prompt_pins.UnknownSourceError:
         raise HTTPException(404, f"unknown source: {source_id}")
-    except RuntimeError:
-        return _no_postgres()
 
     return result
 
@@ -200,8 +213,6 @@ async def delete_prompt_pin_override(source_id: str, request: Request, dry_run: 
         )
     except (prompt_pins.UnknownSourceError, prompt_pins.NoOverrideError):
         raise HTTPException(404, f"no chunk_summary override for source: {source_id}")
-    except RuntimeError:
-        return _no_postgres()
 
     return result
 

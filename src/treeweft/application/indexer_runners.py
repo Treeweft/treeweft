@@ -41,14 +41,18 @@ from treeweft.infrastructure.config import (
 )
 from treeweft.infrastructure.fileio import read_source
 from treeweft.retriever import delete_chunks_by_file
-from treeweft.retriever import init_collection, insert_chunks, delete_chunks_by_source
-from treeweft.retriever import summary_vectors_supported
-
-_SUMMARIZING_KINDS = frozenset({"repo"})
+from treeweft.retriever import (
+    delete_chunks_by_source,
+    init_collection,
+    insert_chunks,
+    summary_vectors_supported,
+)
 from dataclasses import dataclass
 from typing import Any, Coroutine
 import asyncio
 import os
+
+_SUMMARIZING_KINDS = frozenset({"repo"})
 
 
 # The chunker singleton. Lived in indexer_service, which this leaf may not
@@ -654,6 +658,9 @@ async def _process_file(
             job_payload = job.get("payload") or {}
             job_payload["summary_errors"] = (job_payload.get("summary_errors") or 0) + error_count
             job["payload"] = job_payload
+            # FR-010: persist as soon as the count increases -- only the
+            # payload copy survives a crash/resume (see _finalize_job).
+            await _persist_job(job)
         to_embed = [s for s in summaries if s]
         if to_embed:
             with tracer.start_as_current_span(
@@ -976,7 +983,14 @@ async def _finalize_job(job: dict, total_chunks: int, total_files: int, message:
             # Only repo jobs summarize (via _process_file); file and directory
             # jobs insert without summary vectors, so they record "unknown".
             if kind in _SUMMARIZING_KINDS and USE_SUMMARY_VECTOR and summary_vectors_supported():
-                summary_errors = int(job.get("summary_errors") or 0)
+                # FR-010: the payload copy is authoritative. A resumed job's
+                # dict comes back from Job.from_dict() with no top-level
+                # "summary_errors" key -- it isn't a Job field/DB column, so
+                # only the payload's copy survives the round trip.
+                summary_errors = max(
+                    int(job.get("summary_errors") or 0),
+                    int((job.get("payload") or {}).get("summary_errors") or 0),
+                )
                 if errors == 0 and summary_errors == 0:
                     version = (job.get("payload") or {}).get("summary_version")
                     await _state._source_repo.record_summary_version(job["source_id"], version)
@@ -991,7 +1005,7 @@ async def _finalize_job(job: dict, total_chunks: int, total_files: int, message:
     await _persist_job(job)
 
 
-def _fail_job(job: dict, exc: BaseException):
+async def _fail_job(job: dict, exc: BaseException):
     import traceback as tb
 
     job["status"] = "failed"
@@ -1002,7 +1016,11 @@ def _fail_job(job: dict, exc: BaseException):
         # operators can diagnose without hunting through container logs.
         job["error"] += f"\n{tb_str[-4000:]}"
     job["finished_at"] = time.time()
-    _persist_job_sync(job)
+    # Awaited (not `_persist_job_sync`'s fire-and-forget): the worker's
+    # refresh hook runs right after this returns and must see the terminal
+    # status already stored, or `enqueue_if_stale` can find this job still
+    # "active" and refuse to enqueue the replacement refresh.
+    await _persist_job(job)
     metrics.active_jobs.dec()
     metrics.queue_depth.dec()
     # Structured log
@@ -1055,6 +1073,10 @@ async def _run_resummarize_job(job: dict):
     metrics.queue_depth.dec()
 
     try:
+        # Fix 3 / research R10: reload first so a worker in another process
+        # with a stale view can't override the job's explicit target with an
+        # out-of-date pin.
+        await prompt_pins.reload()
         current = prompt_pins.effective("chunk_summary", source_id)
         if current != target:
             target = current
@@ -1068,6 +1090,17 @@ async def _run_resummarize_job(job: dict):
         if not summary_vectors_supported():
             store_name = os.environ.get("VECTOR_STORE", "milvus")
             await _finish_resummarize(job, "done", f"not supported by {store_name}")
+            return
+
+        source = await _state._source_repo.get_by_id(source_id)
+        if (
+            source is not None
+            and getattr(source, "summary_prompt_version", None) == target
+            and getattr(source, "summary_refresh_target", None) is None
+        ):
+            await _finish_resummarize(
+                job, "done", f"already current at chunk_summary v{target}",
+            )
             return
 
         await _state._source_repo.mark_summary_refresh(source_id, target)
@@ -1107,9 +1140,15 @@ async def _run_resummarize_job(job: dict):
             else:
                 vectors = [None] * len(summaries)
 
-            for row, (_summary, strategy) in zip(rows, outcomes):
+            for i, (row, (_summary, strategy)) in enumerate(zip(rows, outcomes)):
                 if strategy == "error":
                     errors += 1
+                    # Fix 1: a transient failure must not destroy the row's
+                    # existing summary vector -- keep whatever is already
+                    # there (None on LanceDB, the store's zero vector on
+                    # Milvus). Only a deterministic "rejected" outcome gets
+                    # the store's no-summary value.
+                    vectors[i] = row.get("summary_vector")
                     await _state._job_file_error_store.record(
                         job_id=job.get("job_id", ""),
                         file_path=row.get("file_path") or "",
@@ -1117,7 +1156,31 @@ async def _run_resummarize_job(job: dict):
                         error_message="summary generation failed",
                     )
 
+            # Fix 4: re-check right before writing -- the summarize/embed
+            # calls above can take long enough for the source to be deleted
+            # since the top-of-loop check, and a write on a deleted source's
+            # rows would resurrect them (Milvus upsert inserts missing PKs).
+            source = await _state._source_repo.get_by_id(source_id)
+            if source is None:
+                await _finish_resummarize(job, "done", "source deleted")
+                return
+
             await retriever.write_summary_vectors(rows, vectors)
+
+            # Fix 4: and right after -- if the source was deleted while the
+            # write was in flight, the just-written rows are orphaned;
+            # delete them (whole-source is acceptable, the source is gone).
+            source = await _state._source_repo.get_by_id(source_id)
+            if source is None:
+                try:
+                    delete_chunks_by_source(source_id)
+                except Exception:
+                    logger.exception(
+                        "resummarize: delete_chunks_by_source failed for %s "
+                        "after a write raced a source deletion", source_id,
+                    )
+                await _finish_resummarize(job, "done", "source deleted")
+                return
 
             job["processed_files"] = job.get("processed_files", 0) + len(batch_ids)
             job["errors"] = errors
@@ -1126,6 +1189,20 @@ async def _run_resummarize_job(job: dict):
                 f"chunk_summary v{target}"
             )
             await _persist_job(job)
+
+        # Fix 1: a run where every chunk errored did no useful work at all --
+        # end it failed, not done, and leave the recorded version and the
+        # refresh mark untouched (set at step 0, above).
+        if total > 0 and errors == total:
+            job["status"] = "failed"
+            job["finished_at"] = time.time()
+            job["error"] = (
+                f"all {total} chunk(s) failed to summarize for chunk_summary v{target}"
+            )
+            job["message"] = job["error"]
+            metrics.active_jobs.dec()
+            await _persist_job(job)
+            return
 
         count = await retriever.count_source_rows(source_id)
         if count != total:
@@ -1141,7 +1218,7 @@ async def _run_resummarize_job(job: dict):
             f"refreshed {total - errors}/{total} chunks to chunk_summary v{target}",
         )
     except Exception as exc:
-        _fail_job(job, exc)
+        await _fail_job(job, exc)
 
 
 async def _run_index_file_job(job: dict, file_path: str):
@@ -1195,7 +1272,7 @@ async def _run_index_file_job(job: dict, file_path: str):
             )
         except Exception as exc:
             _mark_span_error(span, exc)
-            _fail_job(job, exc)
+            await _fail_job(job, exc)
 
 
 async def _run_index_directory_job(job: dict, directory: str, pattern: str):
@@ -1359,7 +1436,7 @@ async def _run_index_directory_job(job: dict, directory: str, pattern: str):
     except Exception as exc:
         with tracer.start_as_current_span("job.failed", attributes=job_attrs) as err_span:
             _mark_span_error(err_span, exc)
-        _fail_job(job, exc)
+        await _fail_job(job, exc)
 
 
 async def _run_index_repo_job(
@@ -1452,7 +1529,7 @@ async def _run_index_repo_job(
     except Exception as exc:
         with tracer.start_as_current_span("job.failed", attributes=job_attrs) as err_span:
             _mark_span_error(err_span, exc)
-        _fail_job(job, exc)
+        await _fail_job(job, exc)
     finally:
         if cleanup_path:
             shutil.rmtree(cleanup_path, ignore_errors=True)
@@ -1581,7 +1658,7 @@ async def _run_index_graph_job(job: dict, source_id: str):
     except Exception as exc:
         with tracer.start_as_current_span("job.failed", attributes=job_attrs) as err_span:
             _mark_span_error(err_span, exc)
-        _fail_job(job, exc)
+        await _fail_job(job, exc)
 
 
 
@@ -1753,7 +1830,7 @@ async def _run_incremental_index(
 
     except Exception as exc:
         _record_incremental_metrics(job_start, accept_time, status="failed")
-        _fail_job(job, exc)
+        await _fail_job(job, exc)
         raise  # Re-raise so the queue worker can apply retry/dead-letter logic.
     finally:
         if cleanup_path:

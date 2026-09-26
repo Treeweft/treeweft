@@ -120,8 +120,10 @@ It does not:
 - When a job of any kind other than `resummarize` finishes (done, done with errors, or failed),
   the worker calls `prompt_refresh.enqueue_if_stale(source_id)`. That enqueues a refresh if the
   source is stale, has no active job, and the index is writable.
-- The hook never runs after a `resummarize` job, so a refresh that keeps failing cannot requeue
-  itself in a loop. A retry after errors is manual, or follows the next pin change.
+- After a `resummarize` job the hook runs only when the source's effective version (re-read from
+  Postgres) differs from that job's target, i.e. the refresh was overtaken by a pin change. A
+  refresh that keeps failing toward the current pin therefore cannot requeue itself in a loop
+  (amended after code review). A retry after errors is manual, or follows the next pin change.
 
 **Rationale**: it keeps the FR-016 promise that every stale source gets a refresh. Queued jobs
 cannot be reordered, and the hook needs no new table. A full index job on a stale source
@@ -273,11 +275,18 @@ version travels in `job.payload.target_version`, resolved at enqueue. The runner
      is `merge_insert` by `id`.
    - Progress: `processed_files += len(batch)` (R12). Any `"error"` outcome adds to `errors` and
      records a `job_file_errors` row for the chunk's file (`error_kind="exception"`).
+   - **Amended after code review:** a chunk whose summary failed transiently keeps its existing
+     `summary_vector` (written back from the fetched row); only a rejection gets the store's
+     no-summary value. The source is re-checked immediately before and after each write; if it
+     was deleted, nothing more is written and the source's rows are deleted again, because a
+     Milvus upsert re-inserts missing primary keys. The job re-reads the pins before resolving
+     its target, and ends `done` without writing when the source is already cleanly at it.
 3. **Verify**: `count_source_rows(source_id)` at `Strong` must equal `len(ids)`. A mismatch fails
    the job loudly, naming the counts (constitution V). This catches duplicates or losses from
    re-keying.
 4. **Finish**: if `errors == 0`, set `summary_prompt_version = target` and clear the mark in one
-   statement. Otherwise the job ends `done` with errors and both columns stay as they are.
+   statement. Otherwise the job ends `done` with errors, or `failed` when every chunk failed, and
+   both columns stay as they are.
 5. A source deleted mid-job (`source_records` row gone) ends the job `done` with the message
    "source deleted", and nothing more is written.
 

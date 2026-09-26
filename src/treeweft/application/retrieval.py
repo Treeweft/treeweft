@@ -681,7 +681,8 @@ def _apply_response_mode(
     chunks: list[dict],
     raw_texts: list[str | None],
     response_mode: str,
-    summary_by_sha: dict[str, str] | None = None,
+    summary_by_sha: dict | None = None,
+    source_ids: list[str | None] | None = None,
 ) -> list[dict]:
     """Pure body-shaping transform over already-built chunk dicts.
 
@@ -690,6 +691,13 @@ def _apply_response_mode(
     header-prepend / blank-line-strip transforms), or None for un-summarizable
     hits (e.g. merged adjacent runs). `summary_by_sha` maps SHA1(chunk_text) ->
     cached summary, used only by summary_tail.
+
+    `source_ids`, when given, is a parallel list of each chunk's source_id;
+    `summary_by_sha` is then keyed by (source_id, sha1) instead of sha1 alone
+    -- two sources can share a byte-identical chunk (same sha1) with
+    different cached summaries, so a plain sha1 key would collide between
+    them. Omitting `source_ids` keeps the legacy plain-sha1 lookup (used by
+    callers, and tests, that have no per-chunk source to key by).
 
     - full: returned unchanged.
     - facet: drop `snippet`; surface the chunk header (already carried on each
@@ -720,7 +728,12 @@ def _apply_response_mode(
                 raw = raw_texts[i] if i < len(raw_texts) else None
                 summary = None
                 if raw is not None:
-                    summary = summary_by_sha.get(llm.chunk_cache_key(raw))
+                    sha = llm.chunk_cache_key(raw)
+                    if source_ids is not None:
+                        source_id = source_ids[i] if i < len(source_ids) else None
+                        summary = summary_by_sha.get((source_id, sha))
+                    else:
+                        summary = summary_by_sha.get(sha)
                 # Fall back to the full snippet when no summary is cached or the
                 # hit is un-summarizable (merged run) — never emit an empty body.
                 if summary:
@@ -734,50 +747,61 @@ def _apply_response_mode(
 async def _recorded_versions(source_ids: set[str]) -> dict[str, int | None]:
     """Look up each source's recorded `chunk_summary` version.
 
-    Returns `None` for a source whose record is missing or whose lookup
-    failed (Postgres unavailable) -- both mean "unknown", and the caller
-    falls back to the effective version.
+    One query for every distinct source id (`summary_versions_for`) instead
+    of one `get_by_id` per source. Returns `None` for a source whose record
+    is missing or whose lookup failed (Postgres unavailable) -- both mean
+    "unknown", and the caller falls back to the effective version.
     """
     from treeweft.application import indexer_state as _state
 
-    versions: dict[str, int | None] = {}
-    for source_id in source_ids:
-        try:
-            record = await _state._source_repo.get_by_id(source_id)
-        except Exception:
-            record = None
-        versions[source_id] = (
-            record.summary_prompt_version if record is not None else None
-        )
-    return versions
+    if not source_ids:
+        return {}
+    try:
+        found = await _state._source_repo.summary_versions_for(sorted(source_ids))
+    except Exception:
+        found = {}
+    return {source_id: found.get(source_id) for source_id in source_ids}
 
 
 async def _resolve_tail_summaries(
     tail_entries: list[tuple[str, str | None]],
     *,
     summary_prompt_version: int | None,
-) -> dict[str, str]:
+) -> dict[tuple[str | None, str], str]:
     """Resolve cached summaries for summary_tail chunks (research R8).
 
     `tail_entries` is a list of (sha1, source_id) pairs for the tail chunks.
+    The result is keyed by (source_id, sha1) rather than sha1 alone: two
+    sources can index a byte-identical chunk (same sha1) while recorded at
+    different chunk_summary versions, so each tail entry must resolve to
+    ITS OWN source's summary rather than whichever source's cache read
+    happened to run last for that sha1.
 
     - An explicit `summary_prompt_version` is passed through unchanged and
       NOT validated against the registry -- a single `cache_get_many` call.
     - Otherwise each chunk is read at its source's RECORDED version
-      (`source_records.summary_prompt_version`), falling back to the
-      source's EFFECTIVE version (`prompt_pins.effective`) for chunks missed
-      at the recorded version, and for chunks whose recorded version is
-      unknown. Calls are grouped by version: one `cache_get_many` per
-      distinct version.
+      (`source_records.summary_prompt_version`), INCLUDING a cached
+      rejection (`llm.REJECTED_SUMMARY`, the "" marker) -- a rejection at
+      the recorded version is a resolved outcome ("no summary for this
+      chunk"), not a miss, so it is honoured as-is rather than re-read at
+      the effective version. Only a true MISS at the recorded version, or a
+      chunk whose recorded version is unknown, falls back to the source's
+      EFFECTIVE version (`prompt_pins.effective`). Calls are grouped by
+      version: one `cache_get_many` per distinct version.
     """
     if not tail_entries:
         return {}
 
     if summary_prompt_version is not None:
         shas = sorted({sha for sha, _ in tail_entries})
-        return await llm.cache_get_many(
+        by_sha = await llm.cache_get_many(
             shas, prompt_version=summary_prompt_version
         )
+        return {
+            (source_id, sha): by_sha[sha]
+            for sha, source_id in tail_entries
+            if sha in by_sha
+        }
 
     from treeweft.application import prompt_pins
 
@@ -790,27 +814,42 @@ async def _resolve_tail_summaries(
         if version is not None:
             by_recorded_version.setdefault(version, set()).add(sha)
 
-    summary_by_sha: dict[str, str] = {}
+    # include_rejected=True: a cached rejection must be distinguishable from
+    # a true miss (see docstring) -- both flow through this same dict, but
+    # only a sha absent here is a miss.
+    by_sha_at_recorded: dict[int, dict[str, str]] = {}
     for version, shas in by_recorded_version.items():
-        summary_by_sha.update(
-            await llm.cache_get_many(sorted(shas), prompt_version=version)
+        by_sha_at_recorded[version] = await llm.cache_get_many(
+            sorted(shas), prompt_version=version, include_rejected=True
         )
 
-    # Chunks with an unknown recorded version, and chunks missed at their
-    # recorded version, are read again at the source's effective version.
-    by_effective_version: dict[int, set[str]] = {}
+    summaries: dict[tuple[str | None, str], str] = {}
     for sha, source_id in tail_entries:
-        if sha in summary_by_sha:
+        version = recorded.get(source_id) if source_id else None
+        if version is None:
+            continue
+        rows = by_sha_at_recorded.get(version, {})
+        if sha in rows:
+            summaries[(source_id, sha)] = rows[sha]
+
+    # Chunks with an unknown recorded version, and chunks truly MISSED at
+    # their recorded version (not merely a cached rejection), are read again
+    # at the source's effective version.
+    by_effective_version: dict[int, list[tuple[str, str | None]]] = {}
+    for sha, source_id in tail_entries:
+        if (source_id, sha) in summaries:
             continue
         version = prompt_pins.effective("chunk_summary", source_id)
-        by_effective_version.setdefault(version, set()).add(sha)
+        by_effective_version.setdefault(version, []).append((sha, source_id))
 
-    for version, shas in by_effective_version.items():
-        fallback = await llm.cache_get_many(sorted(shas), prompt_version=version)
-        for sha, summary in fallback.items():
-            summary_by_sha.setdefault(sha, summary)
+    for version, pairs in by_effective_version.items():
+        shas = sorted({sha for sha, _ in pairs})
+        fallback = await llm.cache_get_many(shas, prompt_version=version)
+        for sha, source_id in pairs:
+            if sha in fallback:
+                summaries.setdefault((source_id, sha), fallback[sha])
 
-    return summary_by_sha
+    return summaries
 
 
 # Neighbor payload cap and ranking. Neighbors arrive as raw Neo4j node dicts;
@@ -1086,7 +1125,7 @@ async def graph_search(
 
     # Opt-in body-shaping. full = no-op (byte-identical to today).
     if response_mode != "full":
-        summary_by_sha: dict[str, str] = {}
+        summary_by_sha: dict[tuple[str | None, str], str] = {}
         if response_mode == "summary_tail":
             tail_entries = [
                 (llm.chunk_cache_key(raw), hit_source_ids[i])
@@ -1107,7 +1146,8 @@ async def graph_search(
                         "tail chunks fall back to full snippets", exc_info=True,
                     )
         chunks = _apply_response_mode(
-            chunks, raw_texts, response_mode, summary_by_sha
+            chunks, raw_texts, response_mode, summary_by_sha,
+            source_ids=hit_source_ids,
         )
 
     # Query-class payload: on symbol-bearing queries the answer is

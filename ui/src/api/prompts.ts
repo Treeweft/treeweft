@@ -55,7 +55,8 @@ export interface PinResultItem {
   job_id?: string | null;
   blocking_job_id?: string;
   reason?: string;
-  current_version: number;
+  /** `null` when the source's recorded chunk_summary version is unknown. */
+  current_version: number | null;
   target_version: number;
   chunk_count: number;
 }
@@ -68,7 +69,8 @@ export interface PinResult {
   dry_run: boolean;
   operation: string;
   scope: string;
-  previous_version: number;
+  /** `null` for a new override, or a source with an unknown recorded version. */
+  previous_version: number | null;
   version: number;
   enqueued: PinResultItem[];
   deferred: PinResultItem[];
@@ -147,6 +149,15 @@ export function staleCount(sources: PromptSourceRow[]): number {
 /** Format a chunk count with thousands separators. */
 export function formatChunks(n: number): string {
   return n.toLocaleString();
+}
+
+/**
+ * Render a prompt version, or "—" for `null` -- a new override with no
+ * prior version, or a source whose recorded chunk_summary version is
+ * unknown.
+ */
+export function formatVersion(v: number | null): string {
+  return v === null ? "—" : String(v);
 }
 
 /**

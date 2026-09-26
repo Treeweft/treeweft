@@ -244,6 +244,12 @@ async def enqueue_if_stale(source_id: str) -> str | None:
     if source is None:
         return None
 
+    # Authoritative read: this process's view can lag another process's
+    # write to the pin by up to PROMPT_PINS_REFRESH_SECONDS. Reload before
+    # deciding staleness so the hook never skips a refresh a fresher read
+    # would have caught, or enqueues one against an already-superseded target.
+    await prompt_pins.reload()
+
     target = prompt_pins.effective("chunk_summary", source_id)
     if not is_stale(source.summary_prompt_version, source.summary_refresh_target, target):
         return None

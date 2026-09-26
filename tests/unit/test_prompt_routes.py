@@ -22,6 +22,8 @@ from treeweft.application import index_guard as ig
 from treeweft.application import indexer_service as idx_svc
 from treeweft.application import indexer_state as idx_state
 from treeweft.application import prompt_pins
+from treeweft.application import prompt_refresh
+from treeweft.application import routes_prompts
 from treeweft.domain.sources import SourceRecord
 
 app = idx_svc.app
@@ -102,10 +104,17 @@ class FakeJobStore:
         self.active: dict[str, dict] = {}
         self.upserted: list = []
         self.boom_for: set[str] = set()
+        self.find_active_for_source_calls: list[str] = []
+        self.find_active_for_sources_calls: list[list[str]] = []
 
     async def find_active_for_source(self, source_id):
+        self.find_active_for_source_calls.append(source_id)
         d = self.active.get(source_id)
         return _FakeActiveJob(d) if d else None
+
+    async def find_active_for_sources(self, source_ids):
+        self.find_active_for_sources_calls.append(list(source_ids))
+        return {sid: _FakeActiveJob(self.active[sid]) for sid in source_ids if sid in self.active}
 
     async def upsert(self, job):
         if job.source_id in self.boom_for:
@@ -233,6 +242,58 @@ class TestNoPostgres:
 
 
 # ---------------------------------------------------------------------------
+# Authoritative reads: set_pin must reload before deciding no-op/plan, so a
+# stale local view can't hide a change another process already made.
+# ---------------------------------------------------------------------------
+
+class TestAuthoritativeReadOnSetPin:
+    def test_set_pin_reload_prevents_wrong_no_op(self, env, client, monkeypatch, registry_v4):
+        """Postgres already holds v3 (say a peer process reverted it), but
+        this process's local view is stale and still thinks it's at v4. A
+        request to move to v4 must not be treated as a no-op: the real
+        current value (v3) differs from the target."""
+        _grant_admin(monkeypatch)
+        env["pin_store"].rows = [_pin_row("chunk_summary", "deployment", 3), _pin_row("hyde", "deployment", 1)]
+        monkeypatch.setattr(
+            prompt_pins, "_view",
+            prompt_pins.PinView(deployment={"chunk_summary": 4, "hyde": 1}, overrides={}),
+        )
+        _set_sources(env, monkeypatch, [_source("src-1", version=3, chunk_count=7)])
+
+        resp = client.put("/prompt-pins/chunk_summary", json={"version": 4})
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["previous_version"] == 3
+        assert {i["source_id"] for i in body["enqueued"]} == {"src-1"}
+        assert env["pin_store"].upsert_calls == [("chunk_summary", "deployment", 4, "admin-1")]
+        assert env["queue"].enqueued != []
+
+
+# ---------------------------------------------------------------------------
+# routes_prompts.py must not report an unrelated RuntimeError as the
+# "Postgres not configured" 503 (finding #3).
+# ---------------------------------------------------------------------------
+
+class TestUnrelatedRuntimeErrorIsNot503:
+    def test_enqueue_runtime_error_is_500_not_503_and_leaks_nothing(
+        self, env, client, monkeypatch, registry_v4
+    ):
+        _grant_admin(monkeypatch)
+        _set_sources(env, monkeypatch, [_source("src-1", version=3, chunk_count=1)])
+
+        async def _boom(plan, *, created_by):
+            raise RuntimeError("boom unrelated to postgres config")
+
+        monkeypatch.setattr(prompt_refresh, "enqueue_refreshes", _boom)
+
+        resp = client.put("/prompt-pins/chunk_summary", json={"version": 4})
+        assert resp.status_code == 500
+        assert resp.status_code != 503
+        assert routes_prompts._NO_POSTGRES_DETAIL not in resp.text
+        assert "boom unrelated to postgres config" not in resp.text
+
+
+# ---------------------------------------------------------------------------
 # GET /prompt-versions
 # ---------------------------------------------------------------------------
 
@@ -280,6 +341,53 @@ class TestGetPromptVersions:
         body = resp.json()
         override = body["sources"][0]["override"]
         assert override == {"version": 4, "updated_at": override["updated_at"], "updated_by": "alice"}
+
+    def test_active_jobs_are_looked_up_in_one_bulk_call(self, env, client, monkeypatch):
+        """Finding #4: one query for active jobs across all sources, not one
+        `find_active_for_source` call per source (N+1)."""
+        _grant_admin(monkeypatch)
+        _set_sources(env, monkeypatch, [
+            _source("src-a", version=3),
+            _source("src-b", version=3),
+            _source("src-c", version=3),
+        ])
+        env["job_store"].active["src-b"] = {"job_id": "job-active", "status": "running"}
+
+        resp = client.get("/prompt-versions")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert env["job_store"].find_active_for_source_calls == []
+        assert len(env["job_store"].find_active_for_sources_calls) == 1
+        assert set(env["job_store"].find_active_for_sources_calls[0]) == {"src-a", "src-b", "src-c"}
+
+        by_id = {s["source_id"]: s for s in body["sources"]}
+        assert by_id["src-b"]["active_job_id"] == "job-active"
+        assert by_id["src-a"]["active_job_id"] is None
+
+    def test_effective_version_and_stale_use_the_freshly_read_pins_not_the_local_view(
+        self, env, client, monkeypatch
+    ):
+        """Finding #4: stale/effective_version must reflect the pins this
+        request just read from Postgres, not the process-local view, which
+        can lag another process's write."""
+        _grant_admin(monkeypatch)
+        # Postgres already holds chunk_summary=4 (a peer process moved it).
+        env["pin_store"].rows = [_pin_row("chunk_summary", "deployment", 4), _pin_row("hyde", "deployment", 1)]
+        # This process's local view is stale and still thinks it's at 3.
+        monkeypatch.setattr(
+            prompt_pins, "_view",
+            prompt_pins.PinView(deployment={"chunk_summary": 3, "hyde": 1}, overrides={}),
+        )
+        _set_sources(env, monkeypatch, [_source("src-1", version=3)])
+
+        resp = client.get("/prompt-versions")
+        assert resp.status_code == 200
+        body = resp.json()
+
+        source = body["sources"][0]
+        assert source["effective_version"] == 4
+        assert source["stale"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +443,7 @@ class TestDryRunMatchesReal:
 
     def test_overridden_source_is_skipped(self, env, client, monkeypatch, registry_v4):
         _grant_admin(monkeypatch)
+        env["pin_store"].rows.append(_pin_row("chunk_summary", "src-override", 3))
         _set_overrides(monkeypatch, {"src-override": 3})
         _set_sources(env, monkeypatch, [_source("src-override", version=3)])
 

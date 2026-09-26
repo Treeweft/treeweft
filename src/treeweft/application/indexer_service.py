@@ -1307,13 +1307,16 @@ async def remove_source(source_id: str, request: Request):
         pass
     # A deleted source's chunk_summary override (ADR-003) would otherwise
     # outlive it, silently governing nothing. Best-effort, like the registry
-    # delete above.
-    try:
-        await prompt_pins._pin_store.delete_overrides_for_source(source_id)
-    except Exception:
-        logger.warning(
-            "failed to delete prompt-pin overrides for deleted source %s", source_id, exc_info=True
-        )
+    # delete above. Guarded on DATABASE_URL: without Postgres configured,
+    # PromptPinStore.delete_overrides_for_source always raises (no pool), so
+    # every source deletion would log a spurious warning in simple mode.
+    if _state.DATABASE_URL:
+        try:
+            await prompt_pins._pin_store.delete_overrides_for_source(source_id)
+        except Exception:
+            logger.warning(
+                "failed to delete prompt-pin overrides for deleted source %s", source_id, exc_info=True
+            )
     return {"status": "deleted", "source_id": source_id}
 
 

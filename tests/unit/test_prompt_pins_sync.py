@@ -341,6 +341,124 @@ class TestReloadDoesNotCrash:
         assert prompt_pins.view() == before
         assert any(r.levelno == logging.ERROR for r in caplog.records)
 
+    async def test_reload_missing_deployment_pin_keeps_previous_view(self, wired, caplog):
+        """A hand-deleted deployment row for a still-registered operation
+        must not install a view that would KeyError out of `effective()`."""
+        wired.pin_rows = [_pin_row("chunk_summary", "deployment", 3), _pin_row("hyde", "deployment", 1)]
+        await prompt_pins.load_and_seed()
+        before = prompt_pins.view()
+
+        wired.pin_rows = [_pin_row("chunk_summary", "deployment", 3)]  # hyde row gone
+        caplog.set_level(logging.ERROR, logger="treeweft.application.prompt_pins")
+
+        await prompt_pins.reload()
+
+        assert prompt_pins.view() == before
+        assert prompt_pins.effective("hyde") == 1  # still resolvable, no KeyError
+        error_messages = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("hyde" in m for m in error_messages)
+
+
+# ---------------------------------------------------------------------------
+# reload(): concurrent calls are serialized so an older, slower read can
+# never complete after a newer one and clobber the fresher view.
+# ---------------------------------------------------------------------------
+
+def _pin_row_obj(operation: str, scope: str, version: int) -> "store_mod.PinRow":
+    return store_mod.PinRow(
+        operation=operation, scope=scope, version=version,
+        updated_at=datetime.now(timezone.utc), updated_by=None,
+    )
+
+
+class TestReloadSerialization:
+    async def test_out_of_order_reload_completion_keeps_newest(self, wired, monkeypatch):
+        wired.pin_rows = [_pin_row("chunk_summary", "deployment", 3), _pin_row("hyde", "deployment", 1)]
+        await prompt_pins.load_and_seed()
+
+        monkeypatch.setitem(
+            prompts.REGISTRY,
+            "chunk_summary",
+            {
+                3: prompts.REGISTRY["chunk_summary"][3],
+                4: prompts.PromptVersion(
+                    operation="chunk_summary", version=4, system="v4",
+                    schema=prompts.FrozenResponseSchema(min_length=1), notes="test v4",
+                ),
+            },
+        )
+
+        calls = {"n": 0}
+
+        async def _slow_then_fast(*_a, **_kw):
+            calls["n"] += 1
+            n = calls["n"]
+            if n == 1:
+                # The first caller reads a stale snapshot (still v3) but is
+                # slow to return it -- e.g. a laggy connection.
+                await asyncio.sleep(0.05)
+                return [_pin_row_obj("chunk_summary", "deployment", 3), _pin_row_obj("hyde", "deployment", 1)]
+            # The second caller reads the fresher state and returns fast.
+            return [_pin_row_obj("chunk_summary", "deployment", 4), _pin_row_obj("hyde", "deployment", 1)]
+
+        monkeypatch.setattr(prompt_pins._pin_store, "list_all", _slow_then_fast)
+
+        t_old = asyncio.create_task(prompt_pins.reload())
+        await asyncio.sleep(0)  # let t_old start its (slow) fetch first
+        t_new = asyncio.create_task(prompt_pins.reload())
+        await asyncio.gather(t_old, t_new)
+
+        assert prompt_pins.view().deployment["chunk_summary"] == 4
+
+
+# ---------------------------------------------------------------------------
+# NOTIFY callback: the reload() task it fires must not be garbage-collected
+# before it completes.
+# ---------------------------------------------------------------------------
+
+class TestNotifyTaskReferenceHeld:
+    async def test_notify_callback_task_is_tracked_until_done(self, wired, monkeypatch):
+        import asyncpg as asyncpg_mod
+
+        wired.pin_rows = [_pin_row("chunk_summary", "deployment", 3), _pin_row("hyde", "deployment", 1)]
+        await prompt_pins.load_and_seed()
+
+        fake_conn = _FakeListenerConn()
+
+        async def _fake_connect(_dsn):
+            return fake_conn
+
+        monkeypatch.setattr(asyncpg_mod, "connect", _fake_connect)
+        monkeypatch.setattr(prompt_pins, "_LISTENER_POLL_SECONDS", 0.01)
+
+        prompt_pins._stopping = False
+        task = asyncio.create_task(prompt_pins._listener_supervisor("postgresql://fake/db"))
+        try:
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if fake_conn.listeners:
+                    break
+            assert fake_conn.listeners, "listener callback was never registered"
+            channel, callback = fake_conn.listeners[0]
+
+            assert prompt_pins._notify_tasks == set()
+            callback(fake_conn, 0, channel, "")
+            assert len(prompt_pins._notify_tasks) == 1
+
+            for _ in range(50):
+                await asyncio.sleep(0.01)
+                if not prompt_pins._notify_tasks:
+                    break
+            assert prompt_pins._notify_tasks == set()
+        finally:
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+            await prompt_pins.stop_sync()
+            prompt_pins._stopping = False
+
 
 # ---------------------------------------------------------------------------
 # Listener supervisor: reload after a simulated reconnect

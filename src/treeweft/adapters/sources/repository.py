@@ -260,6 +260,33 @@ class PostgreSourceRepository(SourceRepositoryPort):
         except Exception:
             logger.exception("record_summary_version: database update failed")
 
+    async def summary_versions_for(
+        self, source_ids: list[str]
+    ) -> dict[str, Optional[int]]:
+        """Batch-look up recorded chunk_summary versions for many sources.
+
+        One query instead of one get_by_id per distinct source (the
+        summary_tail read path's former N+1). A source id with no row in the
+        result is simply absent from the returned dict -- callers treat that
+        the same as an explicitly NULL recorded version ("unknown").
+        """
+        if not source_ids:
+            return {}
+        pool = await self._get_pool()
+        if pool is None:
+            return {}
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT id, summary_prompt_version FROM source_records "
+                    "WHERE id = ANY($1)",
+                    list(source_ids),
+                )
+                return {r["id"]: r["summary_prompt_version"] for r in rows}
+        except Exception:
+            logger.exception("summary_versions_for: database query failed")
+            return {}
+
     async def summary_version_histogram(self) -> dict[int, int]:
         """Count sources by their recorded chunk_summary version, ignoring
         rows where it is NULL (never summarized). Feeds the startup seeding
