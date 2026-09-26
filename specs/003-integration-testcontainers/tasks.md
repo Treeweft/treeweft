@@ -28,7 +28,7 @@ connect to it.
 
 ## Phase 1: Setup
 
-- [ ] T001 Add `testcontainers[postgres,neo4j,milvus]>=4.15,<4.16` to both
+- [X] T001 Add `testcontainers[postgres,neo4j,milvus]>=4.15,<4.16` to both
   `[project.optional-dependencies] dev` and `[dependency-groups] dev` in `pyproject.toml`, then
   run `uv lock` (research R3).
   - Confirm that `uv sync --locked --extra dev --extra all-backends --extra simple` succeeds, and
@@ -43,7 +43,7 @@ connect to it.
 
 **Purpose**: the pure helpers and the fixtures every story uses.
 
-- [ ] T002 [P] Write `tests/unit/test_integration_services.py` for `tests/integration/_services.py`
+- [X] T002 [P] Write `tests/unit/test_integration_services.py` for `tests/integration/_services.py`
   ([contracts/fixtures.md](contracts/fixtures.md) "Helpers"). It must not import testcontainers'
   container classes and must pass with `DOCKER_HOST=unix:///nonexistent.sock`.
   - `compose_image(service)` returns `pgvector/pgvector:pg16`, `milvusdb/milvus:v2.5.4` and
@@ -57,7 +57,7 @@ connect to it.
     - neither gives `skip`;
     - only `TREEWEFT_ITEST_CONTAINERS == "1"` counts as on.
   - The skip reason for each service names both its variable and `TREEWEFT_ITEST_CONTAINERS=1`.
-- [ ] T003 Implement `tests/integration/_services.py`: `compose_image`, `bind_loopback`,
+- [X] T003 Implement `tests/integration/_services.py`: `compose_image`, `bind_loopback`,
   `resolve_mode` and the per-service skip reasons. Parse the compose file with PyYAML.
 - [ ] T004 Implement `tests/integration/conftest.py` per
   [contracts/fixtures.md](contracts/fixtures.md), research R5–R9, and R12.
