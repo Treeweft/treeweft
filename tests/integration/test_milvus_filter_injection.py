@@ -24,10 +24,8 @@ import os
 
 import pytest
 
-URI = os.environ.get("MILVUS_TEST_URI")
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not URI, reason="set MILVUS_TEST_URI to run"),
 ]
 
 COLL = "treeweft_test_filter_injection"
@@ -43,21 +41,21 @@ INJECTION = '%" or source_id == "secret-repo'
 
 
 @pytest.fixture(scope="module")
-def adapter():
+def adapter(milvus_uri):
     os.environ.setdefault("VECTOR_DIM", "4")
     from pymilvus import MilvusClient
 
     from treeweft.adapters.milvus import vector_store as vs
 
-    raw = MilvusClient(uri=URI)
+    raw = MilvusClient(uri=milvus_uri)
     if raw.has_collection(COLL):
         raw.drop_collection(COLL)
 
-    host, _, port = URI.split("://", 1)[1].partition(":")
+    host, _, port = milvus_uri.split("://", 1)[1].partition(":")
     a = vs.MilvusAdapter(
         host=host, port=port or "19530", collection_name=COLL, vector_dim=4
     )
-    a.uri = URI  # the adapter assumes https; the local standalone is plain http
+    a.uri = milvus_uri  # the adapter assumes https; the local standalone is plain http
     asyncio.run(a.init_collection())
     asyncio.run(
         a.insert(
@@ -179,10 +177,10 @@ class TestDeletesTargetExactlyOneRow:
     """Deletion runs the same expression builder; a filter that over-matched
     here would destroy another source's chunks."""
 
-    def test_delete_by_file_then_by_source(self, adapter):
+    def test_delete_by_file_then_by_source(self, adapter, milvus_uri):
         from pymilvus import MilvusClient
 
-        raw = MilvusClient(uri=URI)
+        raw = MilvusClient(uri=milvus_uri)
         assert adapter.delete_chunks_by_file(
             "back\\slash", "/srv/back\\slash/c.py"
         ) == 1

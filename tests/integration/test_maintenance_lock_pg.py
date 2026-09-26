@@ -6,34 +6,27 @@ turns a crashed rebuild into `interrupted` with no timeout.
 
 Uses only the advisory-lock key; creates no tables, needs no migrations.
 
-Run against a standalone instance:
-
-    POSTGRES_TEST_URL=postgresql://user:pass@localhost:5432/treeweft_test \\
-      env -u PYTHONPATH python -m pytest tests/integration/test_maintenance_lock_pg.py -v
-
-Skipped unless POSTGRES_TEST_URL is set — no service, no silent pass.
+Gets its Postgres address from the `postgres_url` fixture (conftest.py):
+explicit POSTGRES_TEST_URL, else a throwaway testcontainer when
+TREEWEFT_ITEST_CONTAINERS=1, else skipped.
 """
 from __future__ import annotations
-
-import os
 
 import pytest
 import pytest_asyncio
 
-URL = os.environ.get("POSTGRES_TEST_URL")
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not URL, reason="set POSTGRES_TEST_URL to run"),
     pytest.mark.asyncio,
 ]
 
 
 @pytest_asyncio.fixture
-async def lock():
-    os.environ["DATABASE_URL"] = URL
+async def lock(postgres_url: str, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("DATABASE_URL", postgres_url)
     from treeweft.adapters.postgresql import connection, maintenance_lock
 
-    await connection.init_pool(URL)
+    await connection.init_pool(postgres_url)
     yield maintenance_lock
     await connection.close_pool()
 
@@ -74,10 +67,10 @@ class TestModeConflicts:
 
 
 class TestCrashedHolderReleasesAutomatically:
-    async def test_closing_the_connection_without_release_frees_the_lock(self, lock):
+    async def test_closing_the_connection_without_release_frees_the_lock(self, lock, postgres_url: str):
         import asyncpg
 
-        conn = await asyncpg.connect(URL)
+        conn = await asyncpg.connect(postgres_url)
         granted = await conn.fetchval(
             "SELECT pg_try_advisory_lock(hashtext('treeweft'), hashtext('index-maintenance'))"
         )

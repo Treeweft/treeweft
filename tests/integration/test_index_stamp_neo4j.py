@@ -6,26 +6,20 @@ is scoped to its own run prefix via `_clear_index_data(scope_prefix=...)`
 II), and never touches a real deployment's own stamp (which stays at the
 real `_META_ID = "index"`).
 
-Run against a standalone instance:
-
-    docker compose --profile local-infra up -d neo4j
-    NEO4J_TEST_URI=bolt://localhost:7687 NEO4J_USER=neo4j NEO4J_PASSWORD=... \\
-      env -u PYTHONPATH python -m pytest tests/integration/test_index_stamp_neo4j.py -v
-
-Skipped unless NEO4J_TEST_URI is set — no service, no silent pass.
+Run against throwaway or explicit services via `tests/integration/conftest.py`'s
+`neo4j_graph_store` fixture — self-provisioned (`TREEWEFT_ITEST_CONTAINERS=1`) or
+explicit (`NEO4J_TEST_URI` + `NEO4J_USER`/`NEO4J_PASSWORD`). Skipped with neither set
+— no service, no silent pass.
 """
 from __future__ import annotations
 
-import os
 import uuid
 
 import pytest
 import pytest_asyncio
 
-URI = os.environ.get("NEO4J_TEST_URI")
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not URI, reason="set NEO4J_TEST_URI to run"),
     pytest.mark.asyncio,
 ]
 
@@ -34,11 +28,8 @@ MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 
 @pytest_asyncio.fixture
-async def gs():
-    os.environ["NEO4J_URI"] = URI
-    from treeweft.adapters.neo4j import graph_store
-
-    graph_store._driver = None  # bind to this test's event loop
+async def gs(neo4j_graph_store):
+    graph_store = neo4j_graph_store
     original_meta_id = graph_store._META_ID
     graph_store._META_ID = RUN  # never touch a real deployment's stamp
     await graph_store.ensure_schema()

@@ -111,16 +111,16 @@ skip, the real stack is unchanged, and no test containers remain (quickstart §2
 
 ### Implementation for User Story 1
 
-- [ ] T006 [P] [US1] Convert `tests/integration/test_index_stamp_milvus.py` and
+- [X] T006 [P] [US1] Convert `tests/integration/test_index_stamp_milvus.py` and
   `tests/integration/test_milvus_filter_injection.py`:
   - remove the module-level `URI`/`skipif`;
   - take `milvus_uri`;
   - keep building `MilvusAdapter(host, port, collection_name=…, vector_dim=…)` with `a.uri =
     milvus_uri`;
   - make no other behavioural change (FR-010).
-- [ ] T007 [P] [US1] Convert `tests/integration/test_maintenance_lock_pg.py` to `postgres_url`,
+- [X] T007 [P] [US1] Convert `tests/integration/test_maintenance_lock_pg.py` to `postgres_url`,
   covering both the pool and the raw `asyncpg.connect` uses.
-- [ ] T008 [P] [US1] Convert `tests/integration/test_index_stamp_neo4j.py` and
+- [X] T008 [P] [US1] Convert `tests/integration/test_index_stamp_neo4j.py` and
   `tests/integration/test_neo4j_orphan_cleanup.py` to `neo4j_graph_store`. Replace
   `os.environ["NEO4J_URI"] = …` with the fixture's patched module. Keep their `_META_ID` patching,
   run prefixes and scoped teardown.

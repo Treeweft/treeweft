@@ -2,37 +2,31 @@
 
 Integration test: runs the real Cypher against a live Neo4j, because the
 unit tests (tests/unit/test_neo4j_orphan_cleanup.py) can only check query
-text. Skipped unless NEO4J_TEST_URI is set, e.g.
-
-    NEO4J_TEST_URI=bolt://localhost:7687 NEO4J_USER=neo4j \\
-    NEO4J_PASSWORD=... python -m pytest tests/integration/test_neo4j_orphan_cleanup.py
+text. Run against throwaway or explicit services via
+`tests/integration/conftest.py`'s `neo4j_graph_store` fixture —
+self-provisioned (`TREEWEFT_ITEST_CONTAINERS=1`) or explicit
+(`NEO4J_TEST_URI` + `NEO4J_USER`/`NEO4J_PASSWORD`). Skipped with neither set.
 
 Every node it creates carries a per-run id prefix and is removed afterwards;
 it never touches other data in the database.
 """
 from __future__ import annotations
 
-import os
 import uuid
 
 import pytest
 import pytest_asyncio
 
-URI = os.environ.get("NEO4J_TEST_URI")
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not URI, reason="set NEO4J_TEST_URI to run"),
 ]
 
 RUN = f"itest-orphan-{uuid.uuid4().hex[:8]}"
 
 
 @pytest_asyncio.fixture
-async def gs():
-    os.environ["NEO4J_URI"] = URI
-    from treeweft.adapters.neo4j import graph_store
-
-    graph_store._driver = None  # bind to this test's event loop
+async def gs(neo4j_graph_store):
+    graph_store = neo4j_graph_store
     yield graph_store
     async with graph_store._get_session() as session:
         await session.run(
