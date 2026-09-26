@@ -595,6 +595,107 @@ class MilvusAdapter(VectorStorePort):
         )
         return result.get("delete_count", 0)
 
+    # ------------------------------------------------------------------
+    # Summary-vector rewrite (research R10, ADR-003 "Verified Milvus
+    # behaviour"): Milvus 2.5 rejects a partial upsert, so a refresh
+    # snapshots every row ID for a source, fetches the full rows, and
+    # upserts them back minus `sparse_vector` (BM25 regenerates it
+    # server-side) with a rewritten `summary_vector`. Every read here uses
+    # Strong consistency: a read immediately after an upsert at the default
+    # consistency level returned the stale row (verified against 2.5.4).
+    # ------------------------------------------------------------------
+
+    async def snapshot_source_row_ids(self, source_id: str) -> list:
+        """All row IDs for a source, Strong consistency.
+
+        Streams via `query_iterator` in batches of 10,000. Like
+        `list_indexed_paths`, this is the one call site with no
+        `filter_params` support (pymilvus 3.0.0's `QueryIterator` never
+        forwards it), so the filter is interpolated through
+        `_escape_literal` instead.
+        """
+        filt = f'source_id == "{_escape_literal(source_id)}"'
+
+        def _collect(mc, coll):
+            ids: list = []
+            it = mc.query_iterator(
+                collection_name=coll,
+                batch_size=10000,
+                filter=filt,
+                output_fields=["id"],
+                consistency_level="Strong",
+            )
+            try:
+                while True:
+                    batch = it.next()
+                    if not batch:
+                        break
+                    for row in batch:
+                        ids.append(row["id"])
+            finally:
+                it.close()
+            return ids
+
+        return await self._execute_with_reconnect(_collect, self.collection_name)
+
+    async def fetch_rows(self, ids: list) -> list[dict]:
+        """Full rows for the given primary keys, Strong consistency."""
+        if not ids:
+            return []
+
+        def _fetch(mc, coll, row_ids):
+            return mc.query(
+                coll,
+                ids=row_ids,
+                output_fields=["*"],
+                consistency_level="Strong",
+            )
+
+        return await self._execute_with_reconnect(_fetch, self.collection_name, ids)
+
+    async def write_summary_vectors(
+        self, rows: list[dict], vectors: list[list[float] | None]
+    ) -> None:
+        """Rewrite each row's `summary_vector` via a full-row upsert.
+
+        A partial upsert (`{id, summary_vector}` only) is rejected on Milvus
+        2.5.4 ("Insert missed an field `chunk_text`"); a full-row upsert
+        without `sparse_vector` succeeds, re-keying the primary key. Every
+        fixed and dynamic field from the fetched row is kept as-is.
+        `vectors[i] is None` means no summary: the store's own no-summary
+        value is the zero vector (research R7), matching `insert`.
+        """
+        MAX_UPSERT_BATCH = 100
+        data = []
+        for row, vec in zip(rows, vectors):
+            new_row = {k: v for k, v in row.items() if k != "sparse_vector"}
+            new_row["summary_vector"] = vec if vec is not None else [0.0] * self.vector_dim
+            data.append(new_row)
+
+        def _upsert_batch(mc, coll, batch):
+            return mc.upsert(coll, batch)
+
+        for offset in range(0, len(data), MAX_UPSERT_BATCH):
+            batch = data[offset : offset + MAX_UPSERT_BATCH]
+            await self._execute_with_reconnect(_upsert_batch, self.collection_name, batch)
+
+    async def count_source_rows(self, source_id: str) -> int:
+        """Row count for a source, Strong consistency (post-refresh verification)."""
+
+        def _count(mc, coll):
+            rows = mc.query(
+                coll,
+                filter="source_id == {f_source_id}",
+                filter_params={"f_source_id": source_id},
+                output_fields=["count(*)"],
+                consistency_level="Strong",
+            )
+            if not rows:
+                return 0
+            return int(rows[0].get("count(*)", 0))
+
+        return await self._execute_with_reconnect(_count, self.collection_name)
+
 
 # ---------------------------------------------------------------------------
 # Module-level free functions — thin wrappers around the default adapter.
@@ -635,6 +736,22 @@ async def drop_index() -> None:
 def summary_vectors_supported() -> bool:
     """Milvus stores a non-nullable summary_vector (research R7)."""
     return True
+
+
+async def snapshot_source_row_ids(source_id: str) -> list:
+    return await _get_adapter().snapshot_source_row_ids(source_id)
+
+
+async def fetch_rows(ids: list) -> list[dict]:
+    return await _get_adapter().fetch_rows(ids)
+
+
+async def write_summary_vectors(rows: list[dict], vectors: list) -> None:
+    return await _get_adapter().write_summary_vectors(rows, vectors)
+
+
+async def count_source_rows(source_id: str) -> int:
+    return await _get_adapter().count_source_rows(source_id)
 
 
 async def insert_chunks(

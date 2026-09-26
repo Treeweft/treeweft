@@ -182,6 +182,13 @@ def dispatch_job(job) -> "Coroutine | None":
         _state._jobs[job.id] = jd
         return _run_incremental_index(source_id, repo_url, branch, changed_files, jd)
 
+    if kind == "resummarize":
+        sid = jd.get("source_id")
+        if not sid:
+            return None
+        _state._jobs[job.id] = jd
+        return _run_resummarize_job(jd)
+
     return None
 
 
@@ -200,6 +207,10 @@ INDEX_FILE_TIMEOUT = int(os.environ.get("INDEX_FILE_TIMEOUT_SECONDS", "600"))
 # of serializing on one file at a time. Sweet spot depends on backend
 # headroom — start at 8, raise toward 16-32 if the bottleneck moves further.
 INDEX_FILE_CONCURRENCY = int(os.environ.get("INDEX_FILE_CONCURRENCY", "8"))
+
+
+# A `resummarize` batch is one embedder batch (research R10 step 2).
+EMBED_BATCH_SIZE = MAX_BATCH_SIZE
 
 
 def _new_job(kind: str, source_id: str, source_label: str) -> dict:
@@ -1009,6 +1020,128 @@ def _fail_job(job: dict, exc: BaseException):
     err_type = type(exc).__name__
     if any(k in err_type for k in ("HTTP", "Connect", "Timeout", "Milvus")):
         metrics.embed_errors.inc()
+
+
+async def _finish_resummarize(job: dict, status: str, message: str):
+    """Terminal state for a `resummarize` job.
+
+    Deliberately not `_finalize_job` -- that function upserts the source into
+    the graph store and the source registry, and its record_summary_version
+    call for a non-summarizing kind would wipe the recorded version to None.
+    A refresh's registry writes are exactly `mark_summary_refresh` and
+    `record_summary_version`, both called explicitly by the runner.
+    """
+    job["status"] = status
+    job["finished_at"] = time.time()
+    job["message"] = message
+    metrics.active_jobs.dec()
+    await _persist_job(job)
+
+
+async def _run_resummarize_job(job: dict):
+    """Refresh one source's chunk-summary vectors to a new prompt version
+    (research R10 steps 0-5). Touches only summary vectors: no parsing, no
+    code embedding, no graph work.
+    """
+    from treeweft.application import prompt_pins
+    import treeweft.retriever as retriever
+
+    source_id = job.get("source_id")
+    payload = dict(job.get("payload") or {})
+    target = payload.get("target_version")
+
+    job["status"] = "running"
+    metrics.active_jobs.inc()
+    metrics.queue_depth.dec()
+
+    try:
+        current = prompt_pins.effective("chunk_summary", source_id)
+        if current != target:
+            target = current
+            payload["target_version"] = target
+            job["payload"] = payload
+            await _persist_job(job)
+
+        if not USE_SUMMARY_VECTOR:
+            await _finish_resummarize(job, "done", "summary vectors disabled")
+            return
+        if not summary_vectors_supported():
+            store_name = os.environ.get("VECTOR_STORE", "milvus")
+            await _finish_resummarize(job, "done", f"not supported by {store_name}")
+            return
+
+        await _state._source_repo.mark_summary_refresh(source_id, target)
+
+        ids = await retriever.snapshot_source_row_ids(source_id)
+        total = len(ids)
+        job["total_files"] = total
+        job["total_chunks"] = total
+        job["processed_files"] = 0
+        job["errors"] = 0
+        await _persist_job(job)
+
+        errors = 0
+        for start in range(0, total, EMBED_BATCH_SIZE):
+            source = await _state._source_repo.get_by_id(source_id)
+            if source is None:
+                await _finish_resummarize(job, "done", "source deleted")
+                return
+
+            batch_ids = ids[start:start + EMBED_BATCH_SIZE]
+            rows = await retriever.fetch_rows(batch_ids)
+            chunks = [
+                {
+                    "text": row.get("chunk_text") or row.get("text") or "",
+                    "language": row.get("language") or "",
+                    "file_path": row.get("file_path") or "",
+                }
+                for row in rows
+            ]
+            outcomes = await _summaries_for_chunks(chunks, version=target)
+            summaries = [s for s, _strategy in outcomes]
+            to_embed = [s for s in summaries if s]
+            if to_embed:
+                embs = await embed(to_embed)
+                it = iter(embs)
+                vectors = [next(it) if s else None for s in summaries]
+            else:
+                vectors = [None] * len(summaries)
+
+            for row, (_summary, strategy) in zip(rows, outcomes):
+                if strategy == "error":
+                    errors += 1
+                    await _state._job_file_error_store.record(
+                        job_id=job.get("job_id", ""),
+                        file_path=row.get("file_path") or "",
+                        error_kind="exception",
+                        error_message="summary generation failed",
+                    )
+
+            await retriever.write_summary_vectors(rows, vectors)
+
+            job["processed_files"] = job.get("processed_files", 0) + len(batch_ids)
+            job["errors"] = errors
+            job["message"] = (
+                f"refreshed {job['processed_files']}/{total} chunks to "
+                f"chunk_summary v{target}"
+            )
+            await _persist_job(job)
+
+        count = await retriever.count_source_rows(source_id)
+        if count != total:
+            raise RuntimeError(
+                f"resummarize verify: snapshot had {total} rows, "
+                f"count_source_rows found {count}"
+            )
+
+        if errors == 0:
+            await _state._source_repo.record_summary_version(source_id, target)
+        await _finish_resummarize(
+            job, "done",
+            f"refreshed {total - errors}/{total} chunks to chunk_summary v{target}",
+        )
+    except Exception as exc:
+        _fail_job(job, exc)
 
 
 async def _run_index_file_job(job: dict, file_path: str):

@@ -111,6 +111,11 @@ from treeweft.application import index_guard
 from treeweft.application import routes_auth as _routes_auth
 from treeweft.application import routes_webhook as _routes_webhook
 
+# Prompt-version and deployment-pin admin API (ADR-003, research R11).
+from treeweft.application import prompt_pins
+from treeweft.application import routes_prompts as _routes_prompts
+from treeweft.domain.prompt_pins import is_stale as _prompt_is_stale
+
 # Lifecycle hooks live in lifecycle (stage 6/6). Registered explicitly
 # below rather than re-decorated, so the binding is a visible call.
 from treeweft.application import lifecycle as _lifecycle  # noqa: F401 — keeps the import graph as before; bound in _lifespan
@@ -159,6 +164,7 @@ app.add_middleware(
 
 app.include_router(_routes_auth.router)
 app.include_router(_routes_webhook.router)
+app.include_router(_routes_prompts.router)
 # startup/shutdown are bound by `_lifespan` (see the FastAPI construction
 # above), not by event handlers.
 
@@ -1066,21 +1072,30 @@ async def get_sources(request: Request):
     try:
         records = await _state._source_repo.list_all()
         if records:
-            return [
-                {
-                    "id": r.id,
-                    "path": r.path,
-                    "url": r.url,
-                    "branch": r.branch,
-                    "indexed_at": int(r.indexed_at.timestamp()),
-                    "file_count": r.file_count,
-                    "chunk_count": r.chunk_count,
-                    "commit_sha": r.commit_sha,
-                    "graph_indexed": r.graph_indexed,
-                }
-                for r in records
-                if _visible_to_user(r.created_by)
-            ]
+            out = []
+            for r in records:
+                if not _visible_to_user(r.created_by):
+                    continue
+                effective_version = prompt_pins.effective("chunk_summary", r.id)
+                out.append(
+                    {
+                        "id": r.id,
+                        "path": r.path,
+                        "url": r.url,
+                        "branch": r.branch,
+                        "indexed_at": int(r.indexed_at.timestamp()),
+                        "file_count": r.file_count,
+                        "chunk_count": r.chunk_count,
+                        "commit_sha": r.commit_sha,
+                        "graph_indexed": r.graph_indexed,
+                        "summary_prompt_version": r.summary_prompt_version,
+                        "summary_refresh_target": r.summary_refresh_target,
+                        "summary_stale": _prompt_is_stale(
+                            r.summary_prompt_version, r.summary_refresh_target, effective_version
+                        ),
+                    }
+                )
+            return out
     except Exception:
         pass  # Degraded mode — fall through to graph store
 

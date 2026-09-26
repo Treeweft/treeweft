@@ -27,6 +27,18 @@ _NO_DATABASE_WARNING = (
     "prompt pins unavailable without DATABASE_URL; using baseline chunk_summary v3, hyde v1"
 )
 
+
+class UnknownPromptVersionError(ValueError):
+    """Raised by `set_pin` for a version that is not registered for the
+    operation. Carries `valid_versions` so the API can return the
+    contract's 400 `{"detail", "valid_versions"}` body."""
+
+    def __init__(self, operation: str, version: int, valid_versions: tuple[int, ...]):
+        super().__init__(f"unknown {operation} version {version}")
+        self.operation = operation
+        self.version = version
+        self.valid_versions = valid_versions
+
 _SCHEMA_CHECK_SQL = """
     SELECT
         to_regclass('prompt_pins') IS NOT NULL AS has_table,
@@ -252,3 +264,102 @@ async def stop_sync() -> None:
         except Exception:
             pass
         _listener_conn = None
+
+
+def _empty_result(operation: str, scope: str, previous_version, version: int, dry_run: bool) -> dict:
+    return {
+        "dry_run": dry_run,
+        "operation": operation,
+        "scope": scope,
+        "previous_version": previous_version,
+        "version": version,
+        "enqueued": [],
+        "deferred": [],
+        "not_enqueued": [],
+        "group_id": None,
+        "total_chunks": 0,
+        "effect": "takes effect on the next query" if operation == "hyde" else None,
+    }
+
+
+def _log_pin_change(
+    dry_run: bool,
+    caller: str | None,
+    operation: str,
+    scope: str,
+    previous_version,
+    version: int,
+    result: dict,
+) -> None:
+    log = logger.info if dry_run else logger.warning
+    log(
+        "event=prompt_pin_change dry_run=%s caller=%s operation=%s scope=%s "
+        "previous_version=%s version=%s enqueued=%s deferred=%s not_enqueued=%s",
+        dry_run, caller, operation, scope, previous_version, version,
+        [i["source_id"] for i in result["enqueued"]],
+        [i["source_id"] for i in result["deferred"]],
+        [i["source_id"] for i in result["not_enqueued"]],
+    )
+
+
+async def set_pin(
+    operation: str, scope: str, version: int, *, updated_by: str | None, dry_run: bool
+) -> dict:
+    """Set the deployment pin for `operation` (US2: `scope == "deployment"`
+    only — per-source overrides are added by US3).
+
+    Validates the version against the registry (raising
+    `UnknownPromptVersionError` on a miss, for both a dry run and a real
+    call). Setting the pin to its already-current version is a no-op: no
+    row is written, `NOTIFY`d, or logged as a change.
+
+    A real (non dry-run) call writes the pin, swaps this process's own view
+    immediately (`reload()`, which also clears `llm_adapter._HYDE_CACHE` on
+    a HyDE change), and enqueues every affected source's refresh. A dry run
+    computes the identical plan and writes nothing (SC-004).
+    """
+    if scope != "deployment":
+        raise NotImplementedError("prompt_pins.set_pin only supports scope='deployment' so far")
+
+    if not prompts.is_registered(operation, version):
+        raise UnknownPromptVersionError(operation, version, prompts.versions(operation))
+
+    previous_version = _view.deployment.get(operation)
+    if previous_version == version:
+        return _empty_result(operation, scope, previous_version, version, dry_run)
+
+    if operation == "hyde":
+        if not dry_run:
+            await _pin_store.upsert(operation, scope, version, updated_by)
+            await reload()
+        result = _empty_result(operation, scope, previous_version, version, dry_run)
+        _log_pin_change(dry_run, updated_by, operation, scope, previous_version, version, result)
+        return result
+
+    from treeweft.application import prompt_refresh
+
+    sources = [
+        s for s in await _source_repo.list_all() if s.id not in _view.overrides
+    ]
+    plan = await prompt_refresh.plan_refreshes(sources, lambda _sid: version)
+
+    if not dry_run:
+        await _pin_store.upsert(operation, scope, version, updated_by)
+        await reload()
+        plan = await prompt_refresh.enqueue_refreshes(plan, created_by=updated_by)
+
+    result = {
+        "dry_run": dry_run,
+        "operation": operation,
+        "scope": scope,
+        "previous_version": previous_version,
+        "version": version,
+        "enqueued": [i.enqueued_dict() for i in plan.enqueued],
+        "deferred": [i.deferred_dict() for i in plan.deferred],
+        "not_enqueued": [i.not_enqueued_dict() for i in plan.not_enqueued],
+        "group_id": plan.group_id if not dry_run else None,
+        "total_chunks": plan.total_chunks,
+        "effect": None,
+    }
+    _log_pin_change(dry_run, updated_by, operation, scope, previous_version, version, result)
+    return result

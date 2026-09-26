@@ -267,7 +267,7 @@ dry run and then for real:
 
 ### Tests for User Story 2 (write first, confirm they fail)
 
-- [ ] T020 [P] [US2] Write `tests/unit/test_lancedb_summary_rewrite.py`, on a real LanceDB table
+- [X] T020 [P] [US2] Write `tests/unit/test_lancedb_summary_rewrite.py`, on a real LanceDB table
   in `tmp_path` built with `_schema(dim)`:
   - `snapshot_source_row_ids` returns only that source's IDs, and `fetch_rows` returns full rows;
   - `write_summary_vectors(rows, [v, None, …])` updates `summary_vector` in place, and `None`
@@ -277,7 +277,7 @@ dry run and then for real:
 
   First try a partial-column `merge_insert` (`id`, `summary_vector`). If lancedb 0.33.0 rejects
   it, the test pins the full-row fallback (research R7).
-- [ ] T021 [P] [US2] Extend `tests/unit/test_store_shim_exports.py` `names` with
+- [X] T021 [P] [US2] Extend `tests/unit/test_store_shim_exports.py` `names` with
   `snapshot_source_row_ids`, `fetch_rows`, `write_summary_vectors`
   and `count_source_rows` for milvus, lancedb and chromadb. Add Milvus unit tests to
   `tests/unit/test_milvus_summary_rewrite.py` with a mocked `MilvusClient`:
@@ -289,7 +289,7 @@ dry run and then for real:
   - `count_source_rows` uses `Strong`.
 
   ChromaDB: `summary_vectors_supported()` is False.
-- [ ] T022 [P] [US2] Write `tests/unit/test_resummarize_job.py` (research R10), with a fake
+- [X] T022 [P] [US2] Write `tests/unit/test_resummarize_job.py` (research R10), with a fake
   vector store, fake LLM and embedder, and a fake source repo:
   - The no-op check runs first: disabled or ChromaDB gives done with a reason message, and
     neither column changes.
@@ -322,7 +322,7 @@ dry run and then for real:
   - Two processes racing to enqueue for one source (the hook in both, or a hook against a pin
     change): the second insert's unique violation on `jobs_active_source_uniq` is caught and
     reported as deferred or already queued, never a 500. Exactly one job exists afterwards.
-- [ ] T024 [P] [US2] Write `tests/unit/test_prompt_routes.py` for `GET /prompt-versions` and
+- [X] T024 [P] [US2] Write `tests/unit/test_prompt_routes.py` for `GET /prompt-versions` and
   `PUT /prompt-pins/{operation}` ([contracts/http-api.md](contracts/http-api.md)):
   - Non-admins get 401 or 403 on both.
   - Without Postgres, both return 503.
@@ -358,19 +358,19 @@ dry run and then for real:
 
 ### Implementation for User Story 2
 
-- [ ] T025 [P] [US2] Milvus: add `MilvusAdapter.snapshot_source_row_ids`, `fetch_rows`,
+- [X] T025 [P] [US2] Milvus: add `MilvusAdapter.snapshot_source_row_ids`, `fetch_rows`,
   `write_summary_vectors` and `count_source_rows`, plus module wrappers, in `src/treeweft/adapters/milvus/vector_store.py`.
   - Use `_execute_with_reconnect` and `consistency_level="Strong"`.
   - The iterator filter is interpolated through `_escape_literal`, because `QueryIterator`
     drops `filter_params`.
-- [ ] T026 [P] [US2] LanceDB: add the same four functions in
+- [X] T026 [P] [US2] LanceDB: add the same four functions in
   `src/treeweft/adapters/lancedb/vector_store.py` (`asyncio.to_thread`; `merge_insert("id")`, or
   the fallback T020 settled; predicates escaped with `_esc`).
-- [ ] T027 [P] [US2] ChromaDB: add the unsupported stubs per
+- [X] T027 [P] [US2] ChromaDB: add the unsupported stubs per
   [contracts/store-ports.md](contracts/store-ports.md) in
   `src/treeweft/adapters/chromadb/vector_store.py`, and export the four new functions for every backend in
   `src/treeweft/retriever.py`.
-- [ ] T028 [US2] Implement `src/treeweft/application/prompt_refresh.py`:
+- [X] T028 [US2] Implement `src/treeweft/application/prompt_refresh.py`:
   - `plan_refreshes(source_ids, target_for)`, which sorts sources into enqueue, defer and refuse
     using `_find_active_job_for_source` and `index_guard.require_writable()`;
   - `enqueue_refreshes(plan, *, created_by)`, which builds `resummarize` jobs with
@@ -385,7 +385,7 @@ dry run and then for real:
   dry_run)`. It validates, computes the plan, and (if not a dry run) writes, `NOTIFY`s, swaps its
   own view immediately, and enqueues. It returns the contract's result shape, and logs the
   change per FR-026.
-- [ ] T029 [US2] In `src/treeweft/application/indexer_runners.py`:
+- [X] T029 [US2] In `src/treeweft/application/indexer_runners.py`:
   - add `kind == "resummarize"` to `dispatch_job`;
   - implement `_run_resummarize_job(job)` per research R10 steps 0–5, using T016's
     `_summaries_for_chunks`, the embedding path `_process_file` uses, and the job counters from
@@ -396,7 +396,7 @@ dry run and then for real:
   (`_run_one`, including the dead-letter path), guarded so that a failure there is logged and
   never fails the finished job. Exempt `kind == "resummarize"` from the "superseded" rule in
   `src/treeweft/application/lifecycle.py` (`:492-500`).
-- [ ] T031 [US2] Create `src/treeweft/application/routes_prompts.py` with `GET /prompt-versions`
+- [X] T031 [US2] Create `src/treeweft/application/routes_prompts.py` with `GET /prompt-versions`
   and `PUT /prompt-pins/{operation}` (`authz._require_admin`, `_caller_id`, `dry_run: bool =
   False`, 200 for both). Return 400 as `JSONResponse({"detail", "valid_versions"})`, and 503
   without Postgres. Register the router next to `indexer_service.py:160`. Add the three summary

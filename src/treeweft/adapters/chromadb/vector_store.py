@@ -371,3 +371,20 @@ async def drop_index() -> None:
 def summary_vectors_supported() -> bool:
     """ChromaDB has no summary vector: insert_chunks drops it (research R7)."""
     return False
+
+
+async def snapshot_source_row_ids(source_id: str) -> list:
+    """No summary vectors on chromadb (research R7): nothing to snapshot."""
+    return []
+
+
+async def fetch_rows(ids: list) -> list[dict]:
+    return []
+
+
+async def write_summary_vectors(rows: list[dict], vectors: list) -> None:
+    raise NotImplementedError("chromadb stores no summary vectors")
+
+
+async def count_source_rows(source_id: str) -> int:
+    return 0
