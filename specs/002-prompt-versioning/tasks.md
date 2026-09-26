@@ -31,14 +31,14 @@ settled it during planning, with evidence. Re-check it only if a task adds a con
 
 **Purpose**: Configuration and schema that everything else reads.
 
-- [ ] T001 [P] Add `PROMPT_PINS_REFRESH_SECONDS` (default 5, a positive number) to
+- [X] T001 [P] Add `PROMPT_PINS_REFRESH_SECONDS` (default 5, a positive number) to
   `src/treeweft/infrastructure/config.py`:
   - An invalid value fails `validate_config()` with a message naming the setting
     (constitution V).
   - Add a commented default to `.env.example`.
   - Test in `tests/unit/test_config.py`: the default, an override, and an invalid value
     rejected.
-- [ ] T002 [P] Write `src/treeweft/adapters/postgresql/migrations/021_prompt_versions.sql` per
+- [X] T002 [P] Write `src/treeweft/adapters/postgresql/migrations/021_prompt_versions.sql` per
   [data-model.md](data-model.md) "Migration 021":
   - `prompt_pins (operation TEXT NOT NULL, scope TEXT NOT NULL, version INTEGER NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_by TEXT, PRIMARY KEY (operation,
@@ -64,7 +64,7 @@ summary and HyDE paths. Every story needs them.
 
 ### Registry
 
-- [ ] T003 [P] Write `tests/unit/test_prompt_registry.py` (research R1):
+- [X] T003 [P] Write `tests/unit/test_prompt_registry.py` (research R1):
   - Every registered version's `sha256(json.dumps({"system", "schema": asdict(...)},
     sort_keys=True, ensure_ascii=False))` equals `tests/unit/fixtures/prompt_hashes.json`.
   - The test fails, naming the version, when:
@@ -78,7 +78,7 @@ summary and HyDE paths. Every story needs them.
     registry copies are frozen (mutation raises).
   - `latest()`, `versions()` and `is_registered()` behave as specified; an unknown operation
     raises `KeyError`.
-- [ ] T004 Implement `src/treeweft/adapters/llm_api/prompts.py`:
+- [X] T004 Implement `src/treeweft/adapters/llm_api/prompts.py`:
   - `PromptVersion` is a frozen dataclass: `operation`, `version`, bare `system`, a frozen
     `schema`, `notes`.
   - `REGISTRY` holds `chunk_summary` v3 and `hyde` v1, with the texts and schemas copied byte for
@@ -89,7 +89,7 @@ summary and HyDE paths. Every story needs them.
 
 ### Pure rules
 
-- [ ] T005 [P] Write `tests/unit/test_prompt_pins_domain.py`:
+- [X] T005 [P] Write `tests/unit/test_prompt_pins_domain.py`:
   - `resolve(view, "chunk_summary", source_id)`: an override beats the deployment pin, and the
     deployment pin applies without an override. `resolve(view, "hyde")` returns the deployment
     pin.
@@ -103,12 +103,12 @@ summary and HyDE paths. Every story needs them.
     - existing sources: the most common non-NULL version, with ties going to the higher version;
     - sources but all NULL: latest;
     - `hyde` with sources: 1.
-- [ ] T006 Implement `src/treeweft/domain/prompt_pins.py`: `PinView` (frozen), `resolve`,
+- [X] T006 Implement `src/treeweft/domain/prompt_pins.py`: `PinView` (frozen), `resolve`,
   `is_stale` and `seed_version`, with no adapter imports (constitution IV).
 
 ### Postgres storage
 
-- [ ] T007 [P] Write `tests/unit/test_prompt_pin_store.py`, with a fake pool:
+- [X] T007 [P] Write `tests/unit/test_prompt_pin_store.py`, with a fake pool:
   - `PromptPinStore.upsert` and `delete` run `NOTIFY prompt_pins_changed` **inside** the same
     transaction as the write (assert the order within one `transaction()` block).
   - `seed_if_absent` issues `INSERT … ON CONFLICT DO NOTHING`.
@@ -119,7 +119,7 @@ summary and HyDE paths. Every story needs them.
     `summary_refresh_target = NULL` in one `UPDATE`.
   - `summary_version_histogram()` groups the non-NULL versions.
   - `save()` still does not write either new column.
-- [ ] T008 Implement `src/treeweft/adapters/postgresql/prompt_pin_store.py`
+- [X] T008 Implement `src/treeweft/adapters/postgresql/prompt_pin_store.py`
   (`NOTIFY_CHANNEL = "prompt_pins_changed"`, `list_all`, `upsert`, `delete`, `seed_if_absent`,
   `delete_overrides_for_source`). Add the three methods to
   `src/treeweft/adapters/sources/repository.py`. Add `summary_prompt_version` and

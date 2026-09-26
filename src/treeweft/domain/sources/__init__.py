@@ -45,6 +45,14 @@ class SourceRecord:
     # graph data does not (operator hasn't run /index-graph yet).
     graph_indexed: bool = True
     graph_indexed_at: Optional[datetime] = None
+    # ADR-003 prompt versioning. `summary_prompt_version` is the chunk_summary
+    # version the stored summary vectors were built with (NULL: unknown or
+    # never summarized). `summary_refresh_target` is set while a
+    # summary-only refresh toward that version is unfinished. Both are
+    # written only through PostgreSourceRepository.mark_summary_refresh and
+    # .record_summary_version -- save() never touches them.
+    summary_prompt_version: Optional[int] = None
+    summary_refresh_target: Optional[int] = None
 
 
 class SourceRepositoryPort(ABC):
