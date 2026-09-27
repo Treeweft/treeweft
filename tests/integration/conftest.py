@@ -27,7 +27,13 @@ from testcontainers.community.neo4j import Neo4jContainer
 from testcontainers.community.postgres import PostgresContainer
 from testcontainers.core.config import testcontainers_config as tc_config
 
-from tests.integration._services import bind_loopback, compose_image, resolve_mode, skip_reason
+from tests.integration._services import (
+    apply_startup_timeout,
+    bind_loopback,
+    compose_image,
+    resolve_mode,
+    skip_reason,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LOG_DIR = REPO_ROOT / ".itest-logs"
@@ -85,17 +91,33 @@ def _startup_timeout_seconds(seconds: float) -> Iterator[None]:
         tc_config.max_tries = original
 
 
+def _stop_quietly(container) -> None:
+    try:
+        container.stop()
+    except Exception:  # never started, or already gone
+        logger.warning("could not stop a container that failed to start", exc_info=True)
+
+
 def _start_container(name: str, container, image: str, timeout: float) -> None:
+    """Start `container`, failing the run with its logs if it is not ready
+    within `timeout` seconds. A container that fails to start is stopped and
+    its full log written to .itest-logs/ here: the session teardown that
+    would otherwise do both is only registered once the start succeeds."""
     start = time.monotonic()
+    apply_startup_timeout(container, timeout)
     try:
         with _startup_timeout_seconds(timeout):
             container.start()
     except TimeoutError:
+        tail = _tail_logs(container)
+        _write_failure_log(name, container)
+        _stop_quietly(container)
         pytest.fail(
             f"{name} container ({image}) did not become ready within {timeout:.0f}s. "
-            f"Last 200 log lines:\n{_tail_logs(container)}"
+            f"Full log in {LOG_DIR.name}/{name}.log. Last 200 log lines:\n{tail}"
         )
     except docker.errors.DockerException as exc:
+        _stop_quietly(container)
         pytest.fail(f"Failed to start {name} container (image {image}): {exc}")
     logger.info("%s container ready in %.1fs (image %s)", name, time.monotonic() - start, image)
 
@@ -165,6 +187,11 @@ class Neo4jConn:
 def neo4j_conn(request: pytest.FixtureRequest, _itest_containers: dict) -> Neo4jConn:
     mode = resolve_mode("neo4j", os.environ)
     if mode == "explicit":
+        # The user and password may be set only in `.env`, which treeweft
+        # loads into os.environ on first import. Nothing may have imported
+        # it yet (the Milvus and Postgres tests skipped, or one file run).
+        import treeweft  # noqa: F401
+
         return Neo4jConn(
             uri=os.environ["NEO4J_TEST_URI"],
             user=os.environ.get("NEO4J_USER", "neo4j"),

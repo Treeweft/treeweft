@@ -56,3 +56,17 @@ def skip_reason(service: str) -> str:
         f"{name} not configured: set {var}, or {SWITCH}=1 to start a throwaway one "
         "(needs Docker)"
     )
+
+
+def apply_startup_timeout(container, seconds: float) -> None:
+    """Give a wait strategy the container built in its constructor `seconds`.
+
+    testcontainers reads its global startup timeout when a wait strategy is
+    created. MilvusContainer creates its strategy in `__init__`, before the
+    global override in conftest's `_start_container` applies, so without
+    this it keeps the library default (120 s). Postgres and Neo4j create
+    theirs inside `start()` and have no strategy yet; nothing to do.
+    """
+    strategy = getattr(container, "_wait_strategy", None)
+    if strategy is not None:
+        strategy.with_startup_timeout(seconds)

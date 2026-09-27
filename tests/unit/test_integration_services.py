@@ -5,6 +5,7 @@ import pytest
 from tests.integration._services import (
     SERVICE_VARS,
     SWITCH,
+    apply_startup_timeout,
     bind_loopback,
     compose_image,
     resolve_mode,
@@ -120,3 +121,37 @@ class TestSkipReason:
         reason = skip_reason("neo4j")
         assert "NEO4J_TEST_URI" in reason
         assert f"{SWITCH}=1" in reason
+
+
+class _FakeStrategy:
+    def __init__(self):
+        self.timeout = 120.0
+
+    def with_startup_timeout(self, seconds):
+        self.timeout = seconds
+        return self
+
+
+class _FakeContainer:
+    def __init__(self, strategy=None):
+        self._wait_strategy = strategy
+
+
+class TestApplyStartupTimeout:
+    def test_sets_the_timeout_on_a_strategy_built_in_the_constructor(self):
+        """MilvusContainer builds its wait strategy in __init__, which reads
+        the library's global timeout then; the per-start override is too late."""
+        strategy = _FakeStrategy()
+
+        apply_startup_timeout(_FakeContainer(strategy), 180)
+
+        assert strategy.timeout == 180
+
+    def test_container_without_a_strategy_is_left_alone(self):
+        """Postgres and Neo4j build theirs inside start(), after the global
+        override is in place."""
+        container = _FakeContainer()
+
+        apply_startup_timeout(container, 60)
+
+        assert container._wait_strategy is None
