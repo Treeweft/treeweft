@@ -426,6 +426,9 @@ async def startup(app):
 
         pool = await init_pool(_state.DATABASE_URL)
         if pool is not None:
+            # No try/except (constitution V): a failed migration raises
+            # MigrationError and must abort startup, not leave the indexer
+            # serving requests on a partial schema.
             await run_migrations()
 
     # Ensure graph-store constraints + indexes exist. Idempotent and online,
