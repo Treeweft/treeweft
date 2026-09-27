@@ -4,7 +4,7 @@ import os
 import secrets
 import re
 import time
-from typing import Literal
+from typing import Callable, Literal
 
 import httpx
 
@@ -81,9 +81,12 @@ async def _chat(
     operation: str = "",
     request_timeout: float | None = None,
     priority: Priority = Priority.BACKGROUND,
+    on_slot: Callable[[], None] | None = None,
 ) -> str | None:
     """`request_timeout` bounds the request only — it starts once an
-    LLM_CONCURRENCY slot is acquired, so queue wait never counts against it."""
+    LLM_CONCURRENCY slot is acquired, so queue wait never counts against it.
+    `on_slot` is called when the slot is acquired, just before the request
+    is sent."""
     from treeweft.infrastructure.tracing import get_tracer
 
     slots = _get_slots()
@@ -109,6 +112,8 @@ async def _chat(
         },
     ) as _span:
         async with slots.hold(priority):
+            if on_slot is not None:
+                on_slot()
             try:
                 resp = await asyncio.wait_for(
                     _get_client().post(f"{LLM_URL}/chat/completions", json=body),
@@ -178,14 +183,12 @@ async def generate_hyde(query: str, language: str | None = None) -> str | None:
         timeout=LLM_HYDE_TIMEOUT,
         priority=Priority.INTERACTIVE,
     )
-    if out is None and strategy == "fallback:vector_only":
-        out = _hyde_cache_get(cache_key)
-    elif out:
+    if out:
         _hyde_cache_put(cache_key, out)
-    if not out:
+    else:
         # The search goes on without the expansion (vector search on the
         # query alone). Count it: nothing else tells an operator.
-        reason = strategy if strategy in ("error", "rejected") else "other"
+        reason = "rejected" if strategy == "rejected" else "error"
         metrics.hyde_fallbacks.labels(reason=reason).inc()
     return out
 

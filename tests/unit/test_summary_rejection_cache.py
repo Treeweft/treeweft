@@ -74,7 +74,7 @@ def _summary_call():
 async def test_every_attempt_rejected_reports_rejected(isolated_caller, monkeypatch):
     calls = []
 
-    async def _chat(messages, max_tokens, *, operation="", priority=None):
+    async def _chat(messages, max_tokens, *, operation="", **_kw):
         calls.append(1)
         return "This code defines a thing."
 
@@ -87,7 +87,7 @@ async def test_every_attempt_rejected_reports_rejected(isolated_caller, monkeypa
 
 @pytest.mark.asyncio
 async def test_llm_failure_still_reports_error(isolated_caller, monkeypatch):
-    async def _chat(messages, max_tokens, *, operation="", priority=None):
+    async def _chat(messages, max_tokens, *, operation="", **_kw):
         return None
 
     monkeypatch.setattr(llm_caller, "_chat", _chat)

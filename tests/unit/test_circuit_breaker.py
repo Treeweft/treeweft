@@ -101,3 +101,49 @@ class TestCircuitBreaker:
         assert cb.state == CircuitState.CLOSED
         cb.record_failure()
         assert cb.state == CircuitState.OPEN
+
+
+class TestAbandonProbe:
+    """A HALF_OPEN probe whose call ended with no answer about the provider."""
+
+    def _half_open(self) -> CircuitBreaker:
+        cb = CircuitBreaker(CircuitConfig(failure_threshold=1, recovery_seconds=0.05))
+        cb.record_failure()
+        time.sleep(0.08)
+        assert cb.state == CircuitState.HALF_OPEN
+        return cb
+
+    def test_unresolved_probe_keeps_the_breaker_rejecting(self):
+        cb = self._half_open()
+
+        assert not cb.is_open()  # the one probe is admitted
+        assert cb.is_open()      # and until it resolves, nothing else is
+
+    def test_abandoned_probe_lets_the_next_caller_probe(self):
+        cb = self._half_open()
+        assert not cb.is_open()
+
+        cb.abandon_probe()
+
+        assert cb.state == CircuitState.HALF_OPEN
+        assert not cb.is_open()
+
+    def test_abandoning_is_not_a_failure(self):
+        cb = CircuitBreaker(CircuitConfig(failure_threshold=2))
+        cb.record_failure()
+
+        for _ in range(5):
+            cb.abandon_probe()
+
+        assert cb.state == CircuitState.CLOSED
+        cb.record_failure()
+        assert cb.state == CircuitState.OPEN
+
+    def test_abandoning_without_a_probe_admits_no_extra_probes(self):
+        cb = self._half_open()
+
+        cb.abandon_probe()
+        cb.abandon_probe()
+
+        assert not cb.is_open()
+        assert cb.is_open()

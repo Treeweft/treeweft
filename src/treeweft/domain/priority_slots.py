@@ -6,6 +6,13 @@ later waits behind all of them. Here the capacity is the same, but when a
 slot frees it goes to the waiting caller with the highest priority; callers
 of equal priority are served in arrival order.
 
+Background work is not starved: while it has a caller waiting, interactive
+callers hold at most `capacity - 1` slots between them (all of them when
+the capacity is 1).
+
+A slot is handed to a waiter the moment it frees, so a free slot and a
+waiting caller never exist together.
+
 Not thread-safe: use from one event loop, like `asyncio.Semaphore`.
 """
 
@@ -36,14 +43,14 @@ class PrioritySlots:
         if capacity < 1:
             raise ValueError(f"capacity must be at least 1, got {capacity}")
         self._capacity = capacity
-        self._in_use = 0
+        self._held = {p: 0 for p in Priority}
         self._waiters: dict[Priority, deque[asyncio.Future[None]]] = {
-            p: deque() for p in sorted(Priority)
+            p: deque() for p in Priority
         }
 
     @property
     def in_use(self) -> int:
-        return self._in_use
+        return sum(self._held.values())
 
     def waiting(self, priority: Priority | None = None) -> int:
         """Callers waiting for a slot, at one priority or at all of them."""
@@ -51,8 +58,8 @@ class PrioritySlots:
         return sum(1 for q in queues for fut in q if not fut.done())
 
     async def acquire(self, priority: Priority) -> None:
-        if self._in_use < self._capacity and not self._outranked(priority):
-            self._in_use += 1
+        if self.in_use < self._capacity:
+            self._held[priority] += 1
             return
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._waiters[priority].append(fut)
@@ -62,13 +69,17 @@ class PrioritySlots:
             if fut.done() and not fut.cancelled():
                 # The slot was handed over just before the cancellation
                 # arrived. Pass it on, or it is lost for good.
-                self.release()
+                self.release(priority)
             else:
-                self._waiters[priority].remove(fut)
+                try:
+                    self._waiters[priority].remove(fut)
+                except ValueError:
+                    pass  # A release already dropped it from the queue.
             raise
 
-    def release(self) -> None:
-        self._in_use -= 1
+    def release(self, priority: Priority) -> None:
+        """Give back a slot acquired at `priority`."""
+        self._held[priority] -= 1
         self._hand_over()
 
     @asynccontextmanager
@@ -77,28 +88,31 @@ class PrioritySlots:
         try:
             yield
         finally:
-            self.release()
-
-    def _outranked(self, priority: Priority) -> bool:
-        """True if a caller of the same or a higher priority is already
-        waiting, so a free slot belongs to that caller first."""
-        return any(self.waiting(p) for p in Priority if p <= priority)
+            self.release(priority)
 
     def _hand_over(self) -> None:
-        # The slot is counted as in use from here, on the waiter's behalf, so
-        # a caller that arrives before the waiter runs cannot take it.
-        while self._in_use < self._capacity:
-            fut = self._next_waiter()
-            if fut is None:
+        # The slot counts as held from here, on the waiter's behalf, so a
+        # caller that arrives before the waiter runs cannot take it.
+        while self.in_use < self._capacity:
+            priority = self._next_priority()
+            if priority is None:
                 return
-            self._in_use += 1
-            fut.set_result(None)
+            self._held[priority] += 1
+            self._waiters[priority].popleft().set_result(None)
 
-    def _next_waiter(self) -> asyncio.Future[None] | None:
-        for priority in sorted(Priority):
-            queue = self._waiters[priority]
-            while queue:
-                fut = queue.popleft()
-                if not fut.done():
-                    return fut
+    def _next_priority(self) -> Priority | None:
+        """The priority whose first waiter gets the free slot."""
+        for queue in self._waiters.values():
+            while queue and queue[0].done():  # cancelled while waiting
+                queue.popleft()
+        interactive = bool(self._waiters[Priority.INTERACTIVE])
+        background = bool(self._waiters[Priority.BACKGROUND])
+        if interactive and background:
+            limit = max(1, self._capacity - 1)
+            if self._held[Priority.INTERACTIVE] >= limit:
+                return Priority.BACKGROUND
+        if interactive:
+            return Priority.INTERACTIVE
+        if background:
+            return Priority.BACKGROUND
         return None

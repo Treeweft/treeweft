@@ -94,9 +94,10 @@ async def call_with_control_layer(
         timeout_includes_queue: True (default) makes `timeout` the budget
             for the whole call: the wait for an LLM_CONCURRENCY slot, every
             attempt and the backoff between them. An attempt that times out
-            has used the budget, so it is not retried. False bounds each
-            request on its own, from when it gets a slot (background work
-            that may queue).
+            has used the budget, so it is not retried, and a failed attempt
+            is retried only if half the budget would be left for the next
+            one. False bounds each request on its own, from when it gets a
+            slot (background work that may queue).
         priority: Who gets a freed LLM_CONCURRENCY slot first. INTERACTIVE
             for a call a user is waiting on; BACKGROUND (default) otherwise.
 
@@ -117,7 +118,12 @@ async def call_with_control_layer(
     )
 
     def _time_for_retry(delay_seconds: float) -> bool:
-        return deadline is None or time.monotonic() + delay_seconds < deadline
+        """Under a budget, retry only if the attempt after the backoff would
+        have half the budget: less is a request sent to be abandoned."""
+        if deadline is None:
+            return True
+        left = deadline - (time.monotonic() + delay_seconds)
+        return left >= effective_timeout / 2
 
     # ── Attempt loop ───────────────────────────────────────────────
     for attempt in range(1, _retry._config.max_attempts + 1):
@@ -141,6 +147,13 @@ async def call_with_control_layer(
 
         # 2. Call the LLM
         t0 = time.monotonic()
+        sent = False
+        timed_out = False
+
+        def _on_slot() -> None:
+            nonlocal sent
+            sent = True
+
         try:
             if deadline is not None:
                 # What is left of the budget, queue wait included (HyDE).
@@ -150,6 +163,7 @@ async def call_with_control_layer(
                         max_tokens=max_tokens,
                         operation=op_name,
                         priority=priority,
+                        on_slot=_on_slot,
                     ),
                     timeout=max(deadline - t0, 0.0),
                 )
@@ -165,12 +179,23 @@ async def call_with_control_layer(
                 )
         except asyncio.TimeoutError:
             raw = None
+            timed_out = True
+        except BaseException:
+            # Cancelled, or an error from outside the LLM call: nothing was
+            # learned about the provider, so neither success nor failure.
+            breaker.abandon_probe()
+            raise
         latency = (time.monotonic() - t0) * 1000
 
         # 3. Handle failure (timeout or None)
         if raw is None:
             fm = FailureMode.TIMEOUT if raw is None else FailureMode.LLM_ERROR
-            breaker.record_failure()
+            if timed_out and not sent:
+                # The budget ran out in the queue for a slot. The provider
+                # was never asked, so this says nothing about its health.
+                breaker.abandon_probe()
+            else:
+                breaker.record_failure()
             _audit.log(
                 audit_id=audit_id,
                 operation=operation,

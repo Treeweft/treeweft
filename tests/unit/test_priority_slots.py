@@ -163,7 +163,7 @@ class TestCancellation:
 
         # No await between the two: the slot is granted to `doomed`, which
         # is cancelled before it has run.
-        slots.release()
+        slots.release(Priority.BACKGROUND)
         doomed.task.cancel()
         await _settle()
 
@@ -186,3 +186,69 @@ class TestCancellation:
         assert slots.in_use == 0
         await asyncio.wait_for(slots.acquire(Priority.BACKGROUND), timeout=0.1)
         assert slots.in_use == 1
+
+
+class TestReviewFindings:
+    async def test_waiter_cancelled_just_before_a_release_still_raises_cancelled(self):
+        """A latency-bound caller times out in the queue, and a slot is
+        released before its task wakes. It must see CancelledError (which
+        wait_for turns into TimeoutError), not an error from the queue."""
+        slots = PrioritySlots(1)
+        await slots.acquire(Priority.BACKGROUND)  # held by the test itself
+        waiter = asyncio.create_task(slots.acquire(Priority.INTERACTIVE))
+        await _settle()
+
+        waiter.cancel()   # cancels its queue entry at once ...
+        slots.release(Priority.BACKGROUND)  # ... which the release skips over and drops
+        result = (await asyncio.gather(waiter, return_exceptions=True))[0]
+
+        assert isinstance(result, asyncio.CancelledError)
+        assert slots.in_use == 0
+        assert slots.waiting() == 0
+
+
+class TestBackgroundIsNotStarved:
+    async def test_interactive_callers_leave_one_slot_to_waiting_background_work(self):
+        """A steady stream of searches: every slot is held by one, more are
+        queued, and so is a chunk summary. The next free slot is the
+        summary's."""
+        slots = PrioritySlots(3)
+        order: list[str] = []
+        holders = [_Worker(slots, f"search{i}", Priority.INTERACTIVE, order) for i in range(3)]
+        await _settle()
+        more = [_Worker(slots, f"search{i}", Priority.INTERACTIVE, order) for i in range(3, 6)]
+        summary = _Worker(slots, "summary", Priority.BACKGROUND, order)
+        await _settle()
+
+        holders[0].finish.set()
+        await _settle()
+        assert order[-1] == "summary"
+
+        holders[1].finish.set()
+        await _settle()
+        assert order[-1] == "search3"  # summaries hold their one slot; searches get the rest
+
+        await _drain(*holders, *more, summary)
+        assert slots.in_use == 0
+
+    async def test_interactive_callers_use_every_slot_when_no_background_work_waits(self):
+        slots = PrioritySlots(3)
+        order: list[str] = []
+        searches = [_Worker(slots, f"search{i}", Priority.INTERACTIVE, order) for i in range(3)]
+        await _settle()
+
+        assert order == ["search0", "search1", "search2"]
+        await _drain(*searches)
+
+    async def test_with_one_slot_interactive_callers_still_go_first(self):
+        slots = PrioritySlots(1)
+        order: list[str] = []
+        first = _Worker(slots, "search0", Priority.INTERACTIVE, order)
+        await _settle()
+        summary = _Worker(slots, "summary", Priority.BACKGROUND, order)
+        second = _Worker(slots, "search1", Priority.INTERACTIVE, order)
+        await _settle()
+
+        await _drain(first, second, summary)
+
+        assert order == ["search0", "search1", "summary"]
