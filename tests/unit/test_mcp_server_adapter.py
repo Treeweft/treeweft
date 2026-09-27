@@ -428,8 +428,10 @@ async def test_mcp_indexer_unreachable_find_definition(mocker):
 
     result = await find_definition(name="MyClass")
 
-    assert isinstance(result, dict)
-    assert "error" in result
+    # A list, as the tool's output schema declares: FastMCP rejects a dict
+    # from it, and the agent would get a validation error in its place.
+    assert isinstance(result, list) and len(result) == 1
+    assert "error" in result[0]
 
 
 @pytest.mark.asyncio
@@ -443,8 +445,10 @@ async def test_mcp_indexer_unreachable_find_callers(mocker):
 
     result = await find_callers(name_or_id="my_func")
 
-    assert isinstance(result, dict)
-    assert "error" in result
+    # A list, as the tool's output schema declares: FastMCP rejects a dict
+    # from it, and the agent would get a validation error in its place.
+    assert isinstance(result, list) and len(result) == 1
+    assert "error" in result[0]
 
 
 @pytest.mark.asyncio
@@ -458,8 +462,10 @@ async def test_mcp_indexer_unreachable_find_references(mocker):
 
     result = await find_references(name_or_id="my_func")
 
-    assert isinstance(result, dict)
-    assert "error" in result
+    # A list, as the tool's output schema declares: FastMCP rejects a dict
+    # from it, and the agent would get a validation error in its place.
+    assert isinstance(result, list) and len(result) == 1
+    assert "error" in result[0]
 
 
 @pytest.mark.asyncio
