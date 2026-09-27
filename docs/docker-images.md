@@ -113,9 +113,24 @@ To use a service compose does not run, set its `DOCKER_*` variable in `.env`:
 | `DOCKER_LLM_URL` | `LLM_URL` unchanged. `.env.example` sets `http://host.docker.internal:11434/v1`, for an LLM on the Docker host |
 | `DOCKER_OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4317` |
 
+Every service address the container uses comes from this table, never from
+the host addresses in `.env`, even when those already point at another
+machine: with Neo4j and Milvus elsewhere (no `local-infra` profile), set
+`DOCKER_NEO4J_URI` and `DOCKER_MILVUS_*`, or the indexer looks for `neo4j`
+and `milvus` hosts that do not exist.
+
 An unreachable LLM does not stop the indexer: it runs without HyDE and chunk
 summaries. After changing `DOCKER_LLM_URL`, check the indexer's log for LLM
 errors.
+
+The embedding addresses are copied into Postgres (the `embedding_backends`
+table) the first time an indexer starts against an empty database, and the
+database wins after that. If an indexer on the host used the same Postgres
+first, the table holds its `localhost` addresses and the container's
+`DOCKER_EMBEDDING_URL` has no effect. Check and change the stored backends
+with the admin API: `GET /embedding-backends`, then `DELETE` the stale entry
+and `POST` the container address (`docs/engineering-notes.md`, "Embedding
+backends live in Postgres").
 
 Running the indexer from its image outside compose, pass container addresses
 the same way, for example with `-e MILVUS_URI=http://milvus.example:19530`

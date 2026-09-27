@@ -117,8 +117,10 @@ services:
     restart: unless-stopped
 
   # Self-contained local infra for the quickstart (COMPOSE_PROFILES=local-infra).
-  # Production/dev deployments that already run Neo4j and Milvus elsewhere just
-  # drop the profile and point NEO4J_URI / MILVUS_URI at them in .env.
+  # Deployments that already run Neo4j and Milvus elsewhere drop the profile
+  # and set them in .env: NEO4J_URI / MILVUS_* for a host-run indexer, and
+  # DOCKER_NEO4J_URI / DOCKER_MILVUS_* for the indexer container, which
+  # otherwise looks for these services.
   neo4j:
     profiles: ["local-infra"]
     image: neo4j:5-community
@@ -140,7 +142,8 @@ services:
     restart: unless-stopped
 
   # Milvus standalone with embedded etcd + local storage (single container,
-  # no etcd/minio sidecars). Plain HTTP — set MILVUS_URI=http://localhost:19530.
+  # no etcd/minio sidecars). Plain HTTP: a host-run indexer needs
+  # MILVUS_URI=http://localhost:19530; the indexer container uses http://milvus:19530.
   milvus:
     profiles: ["local-infra"]
     image: milvusdb/milvus:v2.5.4
