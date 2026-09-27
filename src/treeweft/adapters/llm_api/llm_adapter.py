@@ -10,6 +10,8 @@ import httpx
 
 from treeweft.adapters.postgresql.connection import get_pool
 from treeweft.config import require_env
+from treeweft.domain.priority_slots import Priority, PrioritySlots
+from treeweft.infrastructure import metrics
 
 
 LLM_URL = require_env("LLM_URL")
@@ -51,7 +53,7 @@ def _strip_thinking(text: str) -> str:
 
 
 _client: httpx.AsyncClient | None = None
-_semaphore: asyncio.Semaphore | None = None
+_slots: PrioritySlots | None = None
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -62,11 +64,14 @@ def _get_client() -> httpx.AsyncClient:
     return _client
 
 
-def _get_semaphore() -> asyncio.Semaphore:
-    global _semaphore
-    if _semaphore is None:
-        _semaphore = asyncio.Semaphore(LLM_CONCURRENCY)
-    return _semaphore
+def _get_slots() -> PrioritySlots:
+    """The LLM_CONCURRENCY limit. A freed slot goes to a waiting search
+    (HyDE) before a queued chunk summary, so an index job's queue cannot
+    hold up a search; the number of concurrent requests is unchanged."""
+    global _slots
+    if _slots is None:
+        _slots = PrioritySlots(LLM_CONCURRENCY)
+    return _slots
 
 
 async def _chat(
@@ -75,12 +80,13 @@ async def _chat(
     *,
     operation: str = "",
     request_timeout: float | None = None,
+    priority: Priority = Priority.BACKGROUND,
 ) -> str | None:
     """`request_timeout` bounds the request only — it starts once an
     LLM_CONCURRENCY slot is acquired, so queue wait never counts against it."""
     from treeweft.infrastructure.tracing import get_tracer
 
-    sem = _get_semaphore()
+    slots = _get_slots()
     body = {
         "model": LLM_MODEL,
         "messages": messages,
@@ -102,7 +108,7 @@ async def _chat(
             "treeweft.max_tokens": max_tokens,
         },
     ) as _span:
-        async with sem:
+        async with slots.hold(priority):
             try:
                 resp = await asyncio.wait_for(
                     _get_client().post(f"{LLM_URL}/chat/completions", json=body),
@@ -167,12 +173,20 @@ async def generate_hyde(query: str, language: str | None = None) -> str | None:
         max_tokens=LLM_HYDE_MAX_TOKENS,
         operation=Operation.HYDE,
         validator=validator,
+        # The budget for the whole call: the wait for a slot, every attempt
+        # and the backoff between them. A search waits this long at most.
         timeout=LLM_HYDE_TIMEOUT,
+        priority=Priority.INTERACTIVE,
     )
     if out is None and strategy == "fallback:vector_only":
-        return _hyde_cache_get(cache_key)
-    if out:
+        out = _hyde_cache_get(cache_key)
+    elif out:
         _hyde_cache_put(cache_key, out)
+    if not out:
+        # The search goes on without the expansion (vector search on the
+        # query alone). Count it: nothing else tells an operator.
+        reason = strategy if strategy in ("error", "rejected") else "other"
+        metrics.hyde_fallbacks.labels(reason=reason).inc()
     return out
 
 
@@ -261,6 +275,7 @@ async def _generate_summary(
         # Background indexing fans out every uncached chunk at once; waiting
         # for an LLM_CONCURRENCY slot is expected and must not time out.
         timeout_includes_queue=False,
+        priority=Priority.BACKGROUND,
     )
 
 

@@ -19,7 +19,6 @@ from unittest.mock import MagicMock
 import pytest
 
 from treeweft.adapters.llm_api import llm_adapter, llm_caller, prompts
-from treeweft.domain.circuit_breaker import CircuitBreaker
 
 _SUMMARY_PV = prompts.get("chunk_summary", 3)
 
@@ -50,7 +49,7 @@ def test_summary_prompt_does_not_itself_use_a_forbidden_phrase():
 @pytest.fixture
 def isolated_caller(monkeypatch):
     """Fresh breaker, silent audit, no retry backoff."""
-    monkeypatch.setattr(llm_caller, "_breaker", CircuitBreaker())
+    monkeypatch.setattr(llm_caller, "_breakers", {})
     monkeypatch.setattr(llm_caller, "_audit", MagicMock())
 
     async def _no_sleep(_s):
@@ -75,7 +74,7 @@ def _summary_call():
 async def test_every_attempt_rejected_reports_rejected(isolated_caller, monkeypatch):
     calls = []
 
-    async def _chat(messages, max_tokens, *, operation=""):
+    async def _chat(messages, max_tokens, *, operation="", priority=None):
         calls.append(1)
         return "This code defines a thing."
 
@@ -88,7 +87,7 @@ async def test_every_attempt_rejected_reports_rejected(isolated_caller, monkeypa
 
 @pytest.mark.asyncio
 async def test_llm_failure_still_reports_error(isolated_caller, monkeypatch):
-    async def _chat(messages, max_tokens, *, operation=""):
+    async def _chat(messages, max_tokens, *, operation="", priority=None):
         return None
 
     monkeypatch.setattr(llm_caller, "_chat", _chat)

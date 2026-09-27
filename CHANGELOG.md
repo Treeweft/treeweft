@@ -66,6 +66,9 @@ Added, Fixed.
   often each indexer process reloads the pins. Startup fails, naming the
   pin and the versions this build registers, if a stored pin names a
   version it does not know (for example after a downgrade).
+- New metric `treeweft_hyde_fallbacks_total{reason}`: searches that asked
+  for HyDE and ran without it. `LLM_HYDE_TIMEOUT` is now the limit for
+  the whole HyDE step of a search, not for each attempt.
 - A failed Postgres migration now stops the indexer at startup. It used to
   log the error and start anyway. The message names the migration file and
   the database error; fix the cause and restart, and the migrations resume
@@ -73,6 +76,13 @@ Added, Fixed.
 
 ### Fixed
 
+- Searching during an index job took about 18 seconds and ran without
+  HyDE (#22). The HyDE request waited behind the job's queued chunk
+  summaries, timed out and was retried twice. A search's HyDE request now
+  takes the next free LLM slot ahead of queued chunk summaries, and
+  `LLM_HYDE_TIMEOUT` limits the whole HyDE step, retries included.
+- HyDE and chunk summaries no longer share a circuit breaker, so a run of
+  failed HyDE requests cannot make an index job skip chunk summaries.
 - A failed Postgres migration was logged and ignored: the migrations after
   it were skipped and the indexer started on a partial schema (#28). Each
   migration is now committed in one transaction with its tracking row, so

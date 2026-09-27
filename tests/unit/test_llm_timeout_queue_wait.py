@@ -18,7 +18,7 @@ import pytest
 from unittest.mock import MagicMock
 
 from treeweft.adapters.llm_api import llm_adapter, llm_caller
-from treeweft.domain.circuit_breaker import CircuitBreaker
+from treeweft.domain.priority_slots import PrioritySlots
 from treeweft.domain.retry_engine import RetryConfig, RetryEngine
 
 REQUEST_SECONDS = 0.2
@@ -42,9 +42,9 @@ class _SlowClient:
 @pytest.fixture
 def one_slot(monkeypatch):
     """LLM_CONCURRENCY=1, a slow-but-healthy LLM, one attempt, no audit/breaker state."""
-    monkeypatch.setattr(llm_adapter, "_semaphore", asyncio.Semaphore(1))
+    monkeypatch.setattr(llm_adapter, "_slots", PrioritySlots(1))
     monkeypatch.setattr(llm_adapter, "_get_client", lambda: _SlowClient())
-    monkeypatch.setattr(llm_caller, "_breaker", CircuitBreaker())
+    monkeypatch.setattr(llm_caller, "_breakers", {})
     monkeypatch.setattr(llm_caller, "_audit", MagicMock())
     monkeypatch.setattr(llm_caller, "_retry", RetryEngine(RetryConfig(max_attempts=1)))
 
@@ -83,7 +83,7 @@ async def test_request_timeout_still_bounds_a_hung_request(monkeypatch):
         async def post(self, url, json=None):
             await asyncio.sleep(5)
 
-    monkeypatch.setattr(llm_adapter, "_semaphore", asyncio.Semaphore(1))
+    monkeypatch.setattr(llm_adapter, "_slots", PrioritySlots(1))
     monkeypatch.setattr(llm_adapter, "_get_client", lambda: _Hung())
     loop = asyncio.get_running_loop()
     t0 = loop.time()

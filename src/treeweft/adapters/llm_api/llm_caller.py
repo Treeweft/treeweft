@@ -15,8 +15,9 @@ import time
 from typing import Any, Callable, Coroutine, Optional
 
 from treeweft.domain.audit import AuditRecord, FailureMode, Operation
-from treeweft.domain.circuit_breaker import CircuitBreaker, CircuitConfig
+from treeweft.domain.circuit_breaker import CircuitBreaker, CircuitConfig, CircuitState
 from treeweft.domain.fallback_router import FallbackRouter
+from treeweft.domain.priority_slots import Priority
 from treeweft.domain.response_validator import ResponseValidator
 from treeweft.domain.retry_engine import RetryConfig, RetryEngine
 from treeweft.infrastructure.audit import JSONLAuditLogger
@@ -32,10 +33,24 @@ from treeweft.adapters.llm_api.llm_adapter import (
     _HYDE_CACHE,
 )
 
-# Circuit breaker: 5 consecutive failures → OPEN, 30s recovery
-_breaker = CircuitBreaker(
-    CircuitConfig(failure_threshold=5, recovery_seconds=30.0)
-)
+# Circuit breakers, one per operation: 5 consecutive failures → OPEN, 30s
+# recovery. Separate, because a HyDE call that runs out of its latency budget
+# says nothing about whether a chunk summary would succeed; on a shared
+# breaker a burst of searches could make an index job drop its summaries.
+_breakers: dict[str, CircuitBreaker] = {}
+
+
+def _operation_name(operation: Operation) -> str:
+    return str(getattr(operation, "value", operation) or "")
+
+
+def _breaker_for(operation: Operation) -> CircuitBreaker:
+    name = _operation_name(operation)
+    if name not in _breakers:
+        _breakers[name] = CircuitBreaker(
+            CircuitConfig(failure_threshold=5, recovery_seconds=30.0)
+        )
+    return _breakers[name]
 
 # Retry engine: 3 total attempts, 1s base backoff, ±50% jitter
 _retry = RetryEngine(
@@ -65,6 +80,7 @@ async def call_with_control_layer(
     audit_id: str = "",
     timeout: Optional[float] = None,
     timeout_includes_queue: bool = True,
+    priority: Priority = Priority.BACKGROUND,
 ) -> tuple[Optional[str], str]:
     """Call the LLM through the full control layer stack.
 
@@ -75,9 +91,14 @@ async def call_with_control_layer(
         validator: Optional ResponseValidator for output checking.
         audit_id: Optional correlation ID (auto-generated if empty).
         timeout: Optional per-call timeout override.
-        timeout_includes_queue: True (default) makes `timeout` a total
-            deadline including the wait for an LLM_CONCURRENCY slot; False
-            bounds only the request itself (background work that may queue).
+        timeout_includes_queue: True (default) makes `timeout` the budget
+            for the whole call: the wait for an LLM_CONCURRENCY slot, every
+            attempt and the backoff between them. An attempt that times out
+            has used the budget, so it is not retried. False bounds each
+            request on its own, from when it gets a slot (background work
+            that may queue).
+        priority: Who gets a freed LLM_CONCURRENCY slot first. INTERACTIVE
+            for a call a user is waiting on; BACKGROUND (default) otherwise.
 
     Returns:
         (response_text, strategy_name) where strategy_name is:
@@ -89,11 +110,19 @@ async def call_with_control_layer(
     input_hash = _hash_messages(messages)
     call_model = LLM_MODEL
     effective_timeout = timeout or LLM_TIMEOUT
+    breaker = _breaker_for(operation)
+    op_name = _operation_name(operation)
+    deadline = (
+        time.monotonic() + effective_timeout if timeout_includes_queue else None
+    )
+
+    def _time_for_retry(delay_seconds: float) -> bool:
+        return deadline is None or time.monotonic() + delay_seconds < deadline
 
     # ── Attempt loop ───────────────────────────────────────────────
     for attempt in range(1, _retry._config.max_attempts + 1):
         # 1. Circuit breaker check
-        if _breaker.is_open():
+        if breaker.is_open():
             _audit.log(
                 audit_id=audit_id,
                 operation=operation,
@@ -112,13 +141,17 @@ async def call_with_control_layer(
 
         # 2. Call the LLM
         t0 = time.monotonic()
-        op_name = str(getattr(operation, "value", operation) or "")
         try:
-            if timeout_includes_queue:
-                # Total deadline, queue wait included: a latency budget (HyDE).
+            if deadline is not None:
+                # What is left of the budget, queue wait included (HyDE).
                 raw = await asyncio.wait_for(
-                    _chat(messages, max_tokens=max_tokens, operation=op_name),
-                    timeout=effective_timeout,
+                    _chat(
+                        messages,
+                        max_tokens=max_tokens,
+                        operation=op_name,
+                        priority=priority,
+                    ),
+                    timeout=max(deadline - t0, 0.0),
                 )
             else:
                 # Bound only the request, from when an LLM_CONCURRENCY slot
@@ -128,16 +161,16 @@ async def call_with_control_layer(
                     max_tokens=max_tokens,
                     operation=op_name,
                     request_timeout=effective_timeout,
+                    priority=priority,
                 )
-            latency = (time.monotonic() - t0) * 1000
         except asyncio.TimeoutError:
-            latency = effective_timeout * 1000
             raw = None
+        latency = (time.monotonic() - t0) * 1000
 
         # 3. Handle failure (timeout or None)
         if raw is None:
             fm = FailureMode.TIMEOUT if raw is None else FailureMode.LLM_ERROR
-            _breaker.record_failure()
+            breaker.record_failure()
             _audit.log(
                 audit_id=audit_id,
                 operation=operation,
@@ -149,18 +182,18 @@ async def call_with_control_layer(
                 input_hash=input_hash,
             )
             decision = _retry.evaluate(attempt, fm)
-            if decision.should_retry:
+            if decision.should_retry and _time_for_retry(decision.delay_seconds):
                 _inject_mutation_hint(messages, decision.mutation_hint)
                 await asyncio.sleep(decision.delay_seconds)
                 continue
-            # Retries exhausted — try fallback
+            # Retries or budget exhausted — try fallback
             result, strategy, _ = _fallback.execute(messages, fm, attempt)
             if result is not None:
                 return result, f"fallback:{strategy}"
             return None, "error"
 
         # 4. Validate response
-        _breaker.record_success()
+        breaker.record_success()
         if validator is not None:
             validation = validator.validate(raw)
             if not validation.passed:
@@ -175,7 +208,7 @@ async def call_with_control_layer(
                     input_hash=input_hash,
                 )
                 decision = _retry.evaluate(attempt, validation.failure_mode)
-                if decision.should_retry:
+                if decision.should_retry and _time_for_retry(decision.delay_seconds):
                     _inject_mutation_hint(messages, decision.mutation_hint)
                     await asyncio.sleep(decision.delay_seconds)
                     continue
@@ -246,12 +279,16 @@ def get_audit_stats() -> dict:
 
 
 def get_breaker_state() -> str:
-    """Get current circuit breaker state (for /health endpoint)."""
-    return _breaker.state.name
+    """The most severe state among the per-operation circuit breakers
+    (for /health endpoint): OPEN, else HALF_OPEN, else CLOSED."""
+    states = {breaker.state for breaker in _breakers.values()}
+    for state in (CircuitState.OPEN, CircuitState.HALF_OPEN):
+        if state in states:
+            return state.name
+    return CircuitState.CLOSED.name
 
 
 # Re-export singletons for testing
-_circuit_breaker = _breaker
 _retry_engine = _retry
 _audit_logger = _audit
 _fallback_router = _fallback
