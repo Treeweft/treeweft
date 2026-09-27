@@ -236,13 +236,21 @@ it with the snapshots, and classifies the difference:
 
 | Change | Classification | Requirement |
 |---|---|---|
-| Removed endpoint, method or tool; removed or renamed parameter or response field; optional → required; type change; an input that no longer accepts null or has a tighter limit (`maxLength`, `minimum`, ...); an output that may now be null or has a looser limit; any change the classifier does not recognise | Breaking | `pyproject` major > released major |
-| New endpoint or tool; new optional parameter or response field; an input that now accepts null or has a looser limit; an output that can no longer be null or has a tighter limit | Additive | `pyproject` > released version at minor level or above |
+| Removed endpoint, method or tool; removed or renamed parameter or response field; optional → required; type change; an input that no longer accepts null or has a tighter limit (`maxLength`, `minimum`, ...); an output that may now be null or has a looser limit; a value removed from an enum; any change the classifier does not recognise | Breaking | `pyproject` major > released major |
+| New endpoint or tool; new optional parameter or response field; an input that now accepts null or has a looser limit; an output that can no longer be null or has a tighter limit; a value added to an enum, in an input or an output | Additive | `pyproject` > released version at minor level or above |
 | Any change to the index schema | Index-breaking | `INDEX_SCHEMA_VERSION` > recorded value, and a major bump |
 | Nothing | — | any version |
 
 A failure names each change, its classification and the minimum version
 required.
+
+Enums are the one place the classification does not follow direction. A
+value added to an enum in a response is additive, although it widens what a
+client receives: clients must accept an enum value they do not know, and
+treat it as they would any value they have no special handling for. This
+keeps a new status or kind from needing a major bump, and so from waiting
+for the first release of a month. Removing a value stays breaking in both
+directions (issue #32).
 
 **Release procedure:**
 
