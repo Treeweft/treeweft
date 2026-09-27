@@ -5,7 +5,12 @@ from treeweft import versions
 from treeweft.infrastructure import contracts as c
 
 OBJ = lambda props, req=(): {"type": "object", "properties": props, "required": list(req)}  # noqa: E731
-STR, INT = {"type": "string"}, {"type": "integer"}
+STR, INT, NULL = {"type": "string"}, {"type": "integer"}, {"type": "null"}
+
+
+def optional(schema, **outer):
+    """Optional[T] as pydantic writes it."""
+    return {"anyOf": [schema, NULL], **outer}
 
 
 def kinds(changes):
@@ -59,12 +64,156 @@ def test_default_change_is_additive():
     assert kinds(c.diff_schema({"type": "integer", "default": 5}, {"type": "integer", "default": 10}, "d", "input")) == [("additive", "d")]
 
 
-def test_unrecognised_change_is_conservatively_breaking():
-    old = {"anyOf": [STR, {"type": "null"}]}
-    new = {"anyOf": [INT, {"type": "null"}]}
-    changes = c.diff_schema(old, new, "u", "input")
+@pytest.mark.parametrize("direction", ["input", "output"])
+def test_unrecognised_change_is_conservatively_breaking(direction):
+    old = {"type": "string", "pattern": "^[a-z]+$"}
+    new = {"type": "string", "pattern": "^[a-z0-9]+$"}
+    changes = c.diff_schema(old, new, "u", direction)
     assert kinds(changes) == [("breaking", "u")]
     assert "unclassified" in changes[0].what
+
+
+# ── diff_schema: Optional (pydantic writes Optional[T] as anyOf [T, null]) ──
+
+def test_input_widened_to_optional_is_additive():
+    changes = c.diff_schema(OBJ({"top_k": INT}), OBJ({"top_k": optional(INT)}), "body", "input")
+    assert kinds(changes) == [("additive", "body.top_k")]
+    assert changes[0].what == "now nullable"
+
+
+def test_input_no_longer_optional_is_breaking():
+    changes = c.diff_schema(OBJ({"top_k": optional(INT)}), OBJ({"top_k": INT}), "body", "input")
+    assert kinds(changes) == [("breaking", "body.top_k")]
+    assert changes[0].what == "no longer nullable"
+
+
+def test_output_becoming_nullable_is_breaking_and_the_reverse_is_additive():
+    assert kinds(c.diff_schema(OBJ({"a": STR}), OBJ({"a": optional(STR)}), "r", "output")) == [("breaking", "r.a")]
+    assert kinds(c.diff_schema(OBJ({"a": optional(STR)}), OBJ({"a": STR}), "r", "output")) == [("additive", "r.a")]
+
+
+def test_optional_with_a_different_type_is_breaking():
+    changes = c.diff_schema(optional(STR), optional(INT), "u", "input")
+    assert kinds(changes) == [("breaking", "u")]
+    assert "'string' -> 'integer'" in changes[0].what
+
+
+def test_widening_to_optional_does_not_hide_a_type_change():
+    assert kinds(c.diff_schema(STR, optional(INT), "u", "input")) == [("additive", "u"), ("breaking", "u")]
+
+
+def test_order_of_the_null_branch_does_not_matter():
+    assert c.diff_schema({"anyOf": [INT, NULL]}, {"anyOf": [NULL, INT]}, "u", "input") == []
+    assert kinds(c.diff_schema(INT, {"anyOf": [NULL, INT]}, "u", "input")) == [("additive", "u")]
+
+
+def test_optional_with_a_default_as_pydantic_writes_it():
+    old = {"type": "integer", "default": 10}
+    new = optional(INT, default=None)
+    assert kinds(c.diff_schema(old, new, "u", "input")) == [("additive", "u"), ("additive", "u")]
+
+
+def test_optional_union_gaining_null_is_additive_for_inputs():
+    old = {"anyOf": [STR, INT]}
+    new = {"anyOf": [STR, INT, NULL]}
+    assert kinds(c.diff_schema(old, new, "u", "input")) == [("additive", "u")]
+    assert kinds(c.diff_schema(old, new, "u", "output")) == [("breaking", "u")]
+
+
+# ── diff_schema: limits ──
+
+LIMITS = [
+    # key, tighter value, looser value
+    ("maxLength", 100, 1000),
+    ("maxItems", 10, 50),
+    ("maxProperties", 5, 6),
+    ("maximum", 100, 200),
+    ("exclusiveMaximum", 1.0, 1.5),
+    ("minLength", 3, 1),
+    ("minItems", 1, 0),
+    ("minProperties", 2, 1),
+    ("minimum", 1, 0),
+    ("exclusiveMinimum", 0.5, 0.0),
+]
+
+
+@pytest.mark.parametrize("key,tight,loose", LIMITS)
+def test_looser_input_limit_is_additive_and_tighter_is_breaking(key, tight, loose):
+    assert kinds(c.diff_schema({"type": "string", key: tight}, {"type": "string", key: loose}, "q", "input")) == [("additive", "q")]
+    assert kinds(c.diff_schema({"type": "string", key: loose}, {"type": "string", key: tight}, "q", "input")) == [("breaking", "q")]
+
+
+@pytest.mark.parametrize("key,tight,loose", LIMITS)
+def test_looser_output_limit_is_breaking_and_tighter_is_additive(key, tight, loose):
+    assert kinds(c.diff_schema({"type": "string", key: tight}, {"type": "string", key: loose}, "r", "output")) == [("breaking", "r")]
+    assert kinds(c.diff_schema({"type": "string", key: loose}, {"type": "string", key: tight}, "r", "output")) == [("additive", "r")]
+
+
+@pytest.mark.parametrize("key,tight,loose", LIMITS)
+def test_removing_a_limit_loosens_and_adding_one_tightens(key, tight, loose):
+    limited, free = {"type": "string", key: tight}, {"type": "string"}
+    assert kinds(c.diff_schema(limited, free, "q", "input")) == [("additive", "q")]
+    assert kinds(c.diff_schema(free, limited, "q", "input")) == [("breaking", "q")]
+    assert kinds(c.diff_schema(limited, free, "r", "output")) == [("breaking", "r")]
+    assert kinds(c.diff_schema(free, limited, "r", "output")) == [("additive", "r")]
+
+
+def test_limit_change_names_the_limit_and_both_values():
+    changes = c.diff_schema({"type": "string", "maxLength": 100}, {"type": "string", "maxLength": 1000}, "q", "input")
+    assert changes[0].what == "maxLength 100 -> 1000"
+
+
+def test_limit_that_is_not_a_number_is_conservatively_breaking():
+    changes = c.diff_schema({"type": "string", "maxLength": 100}, {"type": "string", "maxLength": "1000"}, "q", "input")
+    assert kinds(changes) == [("breaking", "q")]
+
+
+def test_limit_inside_an_optional_input():
+    old = optional({"type": "string", "maxLength": 100})
+    new = optional({"type": "string", "maxLength": 1000})
+    assert kinds(c.diff_schema(old, new, "q", "input")) == [("additive", "q")]
+
+
+# ── diff_schema: anyOf branches ──
+
+def test_new_optional_property_in_an_optional_model_is_additive():
+    old = optional(OBJ({"a": STR}, ["a"]))
+    new = optional(OBJ({"a": STR, "b": INT}, ["a"]))
+    assert kinds(c.diff_schema(old, new, "x", "input")) == [("additive", "x.b")]
+
+
+def test_new_optional_property_in_one_branch_of_a_union_is_additive():
+    old = {"anyOf": [OBJ({"a": STR}), OBJ({"b": INT})]}
+    new = {"anyOf": [OBJ({"a": STR}), OBJ({"b": INT, "c": STR})]}
+    assert kinds(c.diff_schema(old, new, "x", "input")) == [("additive", "x<1>.c")]
+
+
+def test_new_required_property_in_a_union_branch_is_breaking():
+    old = {"anyOf": [OBJ({"a": STR}), OBJ({"b": INT})]}
+    new = {"anyOf": [OBJ({"a": STR}), OBJ({"b": INT, "c": STR}, ["c"])]}
+    assert kinds(c.diff_schema(old, new, "x", "input")) == [("breaking", "x<1>.c")]
+
+
+@pytest.mark.parametrize("direction", ["input", "output"])
+def test_union_with_a_different_number_of_branches_is_conservatively_breaking(direction):
+    old = {"anyOf": [STR, INT]}
+    new = {"anyOf": [STR, INT, {"type": "boolean"}]}
+    changes = c.diff_schema(old, new, "u", direction)
+    assert kinds(changes) == [("breaking", "u")]
+    assert "unclassified" in changes[0].what
+
+
+# ── the reproductions from issue #32 ──
+
+def test_issue_32_optional_input_needs_a_minor_bump():
+    old = {"type": "object", "properties": {"top_k": {"type": "integer"}}, "required": []}
+    new = {"type": "object", "properties": {"top_k": {"anyOf": [{"type": "integer"}, {"type": "null"}]}}, "required": []}
+    assert c.required_bump(c.diff_schema(old, new, "body", "input")) == "minor"
+
+
+def test_issue_32_looser_limit_needs_a_minor_bump():
+    changes = c.diff_schema({"type": "string", "maxLength": 100}, {"type": "string", "maxLength": 1000}, "q", "input")
+    assert c.required_bump(changes) == "minor"
 
 
 # ── surfaces ──

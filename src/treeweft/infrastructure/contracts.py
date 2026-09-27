@@ -6,6 +6,10 @@ each difference as breaking (needs a MAJOR bump) or additive (needs a MINOR
 bump), and fails when pyproject.toml's version doesn't cover it. Unrecognised
 schema differences are classified as breaking, deliberately.
 
+A change that widens what is accepted (an input made Optional, a looser
+limit) is additive for inputs and breaking for outputs; one that narrows it
+is the reverse.
+
 Known limitation: FastAPI documents a response schema only where an endpoint
 declares a response_model. Responses returned as plain dicts have the schema
 {}, so field changes inside them are invisible to this check.
@@ -24,7 +28,15 @@ CONTRACTS_DIR = Path(__file__).resolve().parents[3] / "contracts"
 
 _NOISE = {"title", "description", "examples", "example"}
 _METHODS = ("get", "post", "put", "patch", "delete")
-_HANDLED = {"type", "properties", "required", "enum", "items", "default"}
+_NULL = {"type": "null"}
+# A value at or under an upper limit, or at or over a lower one, is accepted.
+_UPPER_LIMITS = ("maxLength", "maxItems", "maxProperties", "maximum", "exclusiveMaximum")
+_LOWER_LIMITS = ("minLength", "minItems", "minProperties", "minimum", "exclusiveMinimum")
+_HANDLED = {
+    "type", "properties", "required", "enum", "items", "default", "anyOf",
+    *_UPPER_LIMITS, *_LOWER_LIMITS,
+}
+_UNCLASSIFIED = "unclassified schema change (treated as breaking)"
 
 
 @dataclass(frozen=True)
@@ -73,6 +85,47 @@ def _key(value) -> str:
     return json.dumps(value, sort_keys=True)
 
 
+def _split_nullable(schema: dict) -> tuple[dict, bool]:
+    """pydantic writes Optional[T] as {"anyOf": [T, null], ...}. Return the
+    schema without the null branch (T itself when it is the only other one,
+    carrying the outer keys such as "default"), and whether null was allowed."""
+    branches = schema.get("anyOf")
+    if not isinstance(branches, list) or _NULL not in branches:
+        return schema, False
+    rest = [b for b in branches if b != _NULL]
+    outer = {k: v for k, v in schema.items() if k != "anyOf"}
+    if len(rest) == 1 and isinstance(rest[0], dict):
+        return {**rest[0], **outer}, True
+    return {**outer, "anyOf": rest}, True
+
+
+def _widening(widened: bool, direction: str) -> str:
+    """Accepting more is additive for what the client sends; for what it
+    receives, a wider range is one a reader was not written for."""
+    return "additive" if widened == (direction == "input") else "breaking"
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _diff_limits(old: dict, new: dict, where: str, direction: str) -> list[Change]:
+    changes: list[Change] = []
+    for key in _UPPER_LIMITS + _LOWER_LIMITS:
+        was, now = old.get(key), new.get(key)
+        if was == now:
+            continue
+        if not all(v is None or _is_number(v) for v in (was, now)):
+            changes.append(Change("breaking", where, _UNCLASSIFIED))
+        elif was is None or now is None:
+            looser = now is None  # a limit removed; one added tightens
+            changes.append(Change(_widening(looser, direction), where, f"{key} {was!r} -> {now!r}"))
+        else:
+            looser = now > was if key in _UPPER_LIMITS else now < was
+            changes.append(Change(_widening(looser, direction), where, f"{key} {was!r} -> {now!r}"))
+    return changes
+
+
 def diff_schema(old, new, where: str, direction: str) -> list[Change]:
     """Classify the difference between two JSON schemas.
 
@@ -83,10 +136,18 @@ def diff_schema(old, new, where: str, direction: str) -> list[Change]:
         return []
     if not isinstance(old, dict) or not isinstance(new, dict):
         return [Change("breaking", where, "schema replaced")]
-    if old.get("type") != new.get("type"):
-        return [Change("breaking", where, f"type {old.get('type')!r} -> {new.get('type')!r}")]
 
     changes: list[Change] = []
+    old, old_nullable = _split_nullable(old)
+    new, new_nullable = _split_nullable(new)
+    if old_nullable != new_nullable:
+        changes.append(Change(
+            _widening(new_nullable, direction), where,
+            "now nullable" if new_nullable else "no longer nullable",
+        ))
+    if old.get("type") != new.get("type"):
+        return changes + [Change("breaking", where, f"type {old.get('type')!r} -> {new.get('type')!r}")]
+
     old_props, new_props = old.get("properties", {}), new.get("properties", {})
     old_req, new_req = set(old.get("required", [])), set(new.get("required", []))
     for name in sorted(old_props.keys() - new_props.keys()):
@@ -118,11 +179,22 @@ def diff_schema(old, new, where: str, direction: str) -> list[Change]:
         changes += diff_schema(old.get("items"), new.get("items"), f"{where}[]", direction)
     if old.get("default") != new.get("default"):
         changes.append(Change("additive", where, f"default {old.get('default')!r} -> {new.get('default')!r}"))
+    changes += _diff_limits(old, new, where, direction)
+
+    old_any, new_any = old.get("anyOf"), new.get("anyOf")
+    if old_any != new_any:
+        # Branch by branch when the union has the same shape. A branch added,
+        # removed or reordered is not classified.
+        if isinstance(old_any, list) and isinstance(new_any, list) and len(old_any) == len(new_any):
+            for i, (old_branch, new_branch) in enumerate(zip(old_any, new_any)):
+                changes += diff_schema(old_branch, new_branch, f"{where}<{i}>", direction)
+        else:
+            changes.append(Change("breaking", where, _UNCLASSIFIED))
 
     rest_old = {k: v for k, v in old.items() if k not in _HANDLED}
     rest_new = {k: v for k, v in new.items() if k not in _HANDLED}
     if rest_old != rest_new:
-        changes.append(Change("breaking", where, "unclassified schema change (treated as breaking)"))
+        changes.append(Change("breaking", where, _UNCLASSIFIED))
     return changes
 
 
