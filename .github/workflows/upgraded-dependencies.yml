@@ -13,7 +13,7 @@ name: Upgraded dependencies
 # It is not a required check and does not run on other pull requests, so it
 # never blocks a merge. The upgraded lockfile is not committed. A failed
 # scheduled run sends GitHub's failed-workflow email; the run's summary lists
-# the packages that differ from uv.lock.
+# the installed packages that differ from uv.lock.
 
 on:
   schedule:
@@ -48,24 +48,11 @@ jobs:
           enable-cache: true
       - name: Upgrade the lockfile
         # Rewrites uv.lock in the workspace only. uv reports each change as
-        # "Updated <package> v1 -> v2"; the summary is what names the culprit
-        # when the tests below fail.
-        env:
-          PYTHON: ${{ matrix.python }}
+        # "Updated <package> v1 -> v2".
         run: |
           set -euo pipefail
           uv lock --upgrade 2>&1 | tee upgrade.log
-          {
-            echo "### Packages that differ from uv.lock (python $PYTHON)"
-            echo
-            if grep -E '^(Updated|Added|Removed) ' upgrade.log > changes.log; then
-              echo '```'
-              cat changes.log
-              echo '```'
-            else
-              echo "None: uv.lock already has the newest versions in range."
-            fi
-          } >> "$GITHUB_STEP_SUMMARY"
+          grep -E '^(Updated|Added|Removed) ' upgrade.log > changes.log || true
       - name: Install
         # The same extras as ci.yml, from the lockfile just upgraded.
         run: uv sync --locked --extra dev --extra all-backends --extra simple
@@ -73,3 +60,11 @@ jobs:
         run: cp .env.example .env
       - name: Unit tests
         run: uv run --locked --no-sync pytest tests/unit -q
+      - name: Summarize what was upgraded
+        # What names the culprit when a step above fails. The lockfile covers
+        # every extra, so its changes are narrowed to the packages this job
+        # installed; if the install itself failed, all of them are listed.
+        if: always()
+        env:
+          PYTHON: ${{ matrix.python }}
+        run: bash scripts/ci/upgraded_packages_summary.sh >> "$GITHUB_STEP_SUMMARY"
