@@ -8,7 +8,9 @@ schema differences are classified as breaking, deliberately.
 
 A change that widens what is accepted (an input made Optional, a looser
 limit) is additive for inputs and breaking for outputs; one that narrows it
-is the reverse.
+is the reverse. Enum values are the exception: an added value is additive and
+a removed one breaking in both directions, because clients must accept an
+enum value they do not know (ADR-004 §4).
 
 Known limitation: FastAPI documents a response schema only where an endpoint
 declares a response_model. Responses returned as plain dicts have the schema
