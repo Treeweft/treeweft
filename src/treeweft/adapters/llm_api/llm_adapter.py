@@ -67,10 +67,16 @@ def _get_client() -> httpx.AsyncClient:
 def _get_slots() -> PrioritySlots:
     """The LLM_CONCURRENCY limit. A freed slot goes to a waiting search
     (HyDE) before a queued chunk summary, so an index job's queue cannot
-    hold up a search; the number of concurrent requests is unchanged."""
+    hold up a search; the number of concurrent requests is unchanged.
+    LLM_SEARCH_RESERVED_SLOTS of the slots are never given to a chunk
+    summary, so a search need not wait for a slow one to finish."""
     global _slots
     if _slots is None:
-        _slots = PrioritySlots(LLM_CONCURRENCY)
+        from treeweft.infrastructure.config import llm_search_reserved_slots
+
+        _slots = PrioritySlots(
+            LLM_CONCURRENCY, reserved=llm_search_reserved_slots(LLM_CONCURRENCY)
+        )
     return _slots
 
 

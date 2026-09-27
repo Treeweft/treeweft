@@ -252,3 +252,79 @@ class TestBackgroundIsNotStarved:
         await _drain(first, second, summary)
 
         assert order == ["search0", "search1", "summary"]
+
+
+class TestReservedForInteractive:
+    """`reserved` slots are kept for interactive callers: background work
+    holds at most `capacity - reserved` of them, however long its queue."""
+
+    async def test_rejects_a_reservation_that_leaves_background_no_slot(self):
+        with pytest.raises(ValueError, match="reserved"):
+            PrioritySlots(2, reserved=2)
+        with pytest.raises(ValueError, match="reserved"):
+            PrioritySlots(2, reserved=-1)
+
+    async def test_background_leaves_the_reserved_slots_free(self):
+        slots = PrioritySlots(4, reserved=1)
+        order: list[str] = []
+        workers = [_Worker(slots, f"bg{i}", Priority.BACKGROUND, order) for i in range(6)]
+        await _settle()
+
+        assert order == ["bg0", "bg1", "bg2"]
+        assert slots.in_use == 3
+        assert slots.waiting(Priority.BACKGROUND) == 3
+        await _drain(*workers)
+        assert slots.in_use == 0
+
+    async def test_interactive_caller_gets_the_reserved_slot_at_once(self):
+        """The case the reservation is for: every background slot is held by
+        a slow request, and a search must not wait for one to finish."""
+        slots = PrioritySlots(4, reserved=1)
+        order: list[str] = []
+        busy = [_Worker(slots, f"bg{i}", Priority.BACKGROUND, order) for i in range(5)]
+        await _settle()
+
+        search = _Worker(slots, "search", Priority.INTERACTIVE, order)
+        await _settle()
+
+        assert order[-1] == "search"
+        assert slots.in_use == 4
+        await _drain(search, *busy)
+
+    async def test_interactive_callers_may_also_use_background_slots(self):
+        slots = PrioritySlots(3, reserved=1)
+        order: list[str] = []
+        searches = [_Worker(slots, f"search{i}", Priority.INTERACTIVE, order) for i in range(3)]
+        await _settle()
+
+        assert order == ["search0", "search1", "search2"]
+        await _drain(*searches)
+
+    async def test_a_freed_reserved_slot_is_not_taken_by_background_work(self):
+        slots = PrioritySlots(2, reserved=1)
+        order: list[str] = []
+        bg = _Worker(slots, "bg0", Priority.BACKGROUND, order)
+        search = _Worker(slots, "search", Priority.INTERACTIVE, order)
+        waiting = _Worker(slots, "bg1", Priority.BACKGROUND, order)
+        await _settle()
+        assert order == ["bg0", "search"]
+
+        search.finish.set()
+        await _settle()
+
+        assert order == ["bg0", "search"]  # bg1 still waits: the free slot is reserved
+        assert slots.in_use == 1
+        bg.finish.set()
+        await _settle()
+        assert order == ["bg0", "search", "bg1"]
+        await _drain(bg, search, waiting)
+        assert slots.in_use == 0
+
+    async def test_no_reservation_is_the_default(self):
+        slots = PrioritySlots(2)
+        order: list[str] = []
+        workers = [_Worker(slots, f"bg{i}", Priority.BACKGROUND, order) for i in range(2)]
+        await _settle()
+
+        assert order == ["bg0", "bg1"]
+        await _drain(*workers)

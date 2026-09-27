@@ -47,6 +47,12 @@ Added, Fixed.
 
 ### Operator configuration
 
+- `LLM_SEARCH_RESERVED_SLOTS` (default 1, or 0 when `LLM_CONCURRENCY` is
+  1): LLM slots that chunk summaries never use, so a search's HyDE request
+  does not wait for a slow summary to finish. An index job therefore runs
+  with one fewer concurrent LLM request than `LLM_CONCURRENCY` (3 of 4 at
+  the defaults). Set it to 0 to give indexing every slot; startup fails if
+  it is not less than `LLM_CONCURRENCY`.
 - The first start after upgrading verifies an existing (pre-1.1.0) index
   by re-embedding up to 3 sampled chunks against the configured embedding
   model; this needs the embedding service reachable. Until it succeeds,
