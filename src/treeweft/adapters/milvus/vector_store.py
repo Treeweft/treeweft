@@ -256,6 +256,8 @@ class MilvusAdapter(VectorStorePort):
             # ADR-004 legacy-adoption check unverified. A stats-agreeing
             # `has_data=True` never reaches this branch, so the extra query
             # only runs for stores that are actually empty or ambiguous.
+            # Strong: the collection default (Bounded) can also miss rows
+            # inserted a moment ago, which this query exists to find.
             has_data = bool(
                 await self._execute_with_reconnect(
                     MilvusClient.query,
@@ -263,6 +265,7 @@ class MilvusAdapter(VectorStorePort):
                     filter="",
                     output_fields=["id"],
                     limit=1,
+                    consistency_level="Strong",
                 )
             )
         return StoreObservation(

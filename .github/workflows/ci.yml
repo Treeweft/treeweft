@@ -185,4 +185,7 @@ jobs:
           name: itest-logs
           path: .itest-logs/
           if-no-files-found: ignore
+          # .itest-logs is a dot-directory; upload-artifact skips hidden
+          # files unless told otherwise.
+          include-hidden-files: true
           retention-days: 7

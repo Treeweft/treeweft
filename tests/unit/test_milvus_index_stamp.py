@@ -133,6 +133,9 @@ class TestObserveIndex:
         query.assert_called_once()
         _, kwargs = query.call_args
         assert kwargs["limit"] == 1
+        # The collection default (Bounded) can miss rows inserted a moment
+        # ago, which is what this query exists to find. Seen on a CI runner.
+        assert kwargs["consistency_level"] == "Strong"
 
     async def test_zero_row_count_but_unflushed_rows_found_by_query(self, mock_client):
         from treeweft.adapters.milvus import vector_store as vs
