@@ -361,6 +361,7 @@ class TestWiring:
     async def test_slots_are_sized_by_llm_concurrency(self, monkeypatch):
         monkeypatch.setattr(llm_adapter, "_slots", None)
         monkeypatch.setattr(llm_adapter, "LLM_CONCURRENCY", 3)
+        monkeypatch.setenv("LLM_SEARCH_RESERVED_SLOTS", "0")  # tested in test_llm_search_reserved_slots.py
 
         slots = llm_adapter._get_slots()
 

@@ -99,6 +99,7 @@ def validate_config() -> None:
         prompt_pins_refresh_seconds,
     ):
         getter()
+    llm_search_reserved_slots(_llm_concurrency())
 
 
 # ── Index stamp check tunables (ADR-004 §3) ─────────────────────────────────
@@ -155,6 +156,39 @@ def prompt_pins_refresh_seconds() -> float:
     return _positive_number_env(
         "PROMPT_PINS_REFRESH_SECONDS", PROMPT_PINS_REFRESH_SECONDS_DEFAULT
     )
+
+
+# ── LLM slots (#22) ──────────────────────────────────────────────────────────
+
+
+def _llm_concurrency() -> int:
+    raw = os.environ.get("LLM_CONCURRENCY", "4")
+    try:
+        return int(raw)
+    except ValueError:
+        raise ConfigError(f"Env var 'LLM_CONCURRENCY'={raw!r} is not an integer") from None
+
+
+def llm_search_reserved_slots(concurrency: int) -> int:
+    """How many of the `concurrency` LLM slots are kept for searches (HyDE).
+
+    Chunk summaries may hold the rest. Default 1, or 0 when `concurrency` is
+    1, since summaries need at least one slot. Unset or blank means the
+    default."""
+    name = "LLM_SEARCH_RESERVED_SLOTS"
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return 1 if concurrency >= 2 else 0
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConfigError(f"Env var {name!r}={raw!r} is not an integer") from None
+    if not 0 <= value < concurrency:
+        raise ConfigError(
+            f"Env var {name!r}={raw!r} must be at least 0 and less than "
+            f"LLM_CONCURRENCY ({concurrency}), so chunk summaries keep a slot"
+        )
+    return value
 
 
 def load_yaml_config(path: str | Path | None = None) -> dict[str, Any]:

@@ -10,8 +10,13 @@ Background work is not starved: while it has a caller waiting, interactive
 callers hold at most `capacity - 1` slots between them (all of them when
 the capacity is 1).
 
+`reserved` slots are kept for interactive callers: background work holds at
+most `capacity - reserved`, however long its queue. Priority alone cannot
+help an interactive caller that arrives while every slot is busy with a
+slow background request; a reserved slot is free for it at once.
+
 A slot is handed to a waiter the moment it frees, so a free slot and a
-waiting caller never exist together.
+waiter that may take it never exist together.
 
 Not thread-safe: use from one event loop, like `asyncio.Semaphore`.
 """
@@ -39,10 +44,15 @@ class PrioritySlots:
             ...
     """
 
-    def __init__(self, capacity: int):
+    def __init__(self, capacity: int, reserved: int = 0):
         if capacity < 1:
             raise ValueError(f"capacity must be at least 1, got {capacity}")
+        if not 0 <= reserved < capacity:
+            raise ValueError(
+                f"reserved must be at least 0 and less than capacity ({capacity}), got {reserved}"
+            )
         self._capacity = capacity
+        self._reserved = reserved
         self._held = {p: 0 for p in Priority}
         self._waiters: dict[Priority, deque[asyncio.Future[None]]] = {
             p: deque() for p in Priority
@@ -58,7 +68,7 @@ class PrioritySlots:
         return sum(1 for q in queues for fut in q if not fut.done())
 
     async def acquire(self, priority: Priority) -> None:
-        if self.in_use < self._capacity:
+        if self._may_take(priority):
             self._held[priority] += 1
             return
         fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
@@ -90,6 +100,14 @@ class PrioritySlots:
         finally:
             self.release(priority)
 
+    def _may_take(self, priority: Priority) -> bool:
+        """A slot is free that a caller of `priority` may hold."""
+        if self.in_use >= self._capacity:
+            return False
+        if priority is Priority.BACKGROUND:
+            return self._held[Priority.BACKGROUND] < self._capacity - self._reserved
+        return True
+
     def _hand_over(self) -> None:
         # The slot counts as held from here, on the waiter's behalf, so a
         # caller that arrives before the waiter runs cannot take it.
@@ -105,8 +123,8 @@ class PrioritySlots:
         for queue in self._waiters.values():
             while queue and queue[0].done():  # cancelled while waiting
                 queue.popleft()
-        interactive = bool(self._waiters[Priority.INTERACTIVE])
-        background = bool(self._waiters[Priority.BACKGROUND])
+        interactive = bool(self._waiters[Priority.INTERACTIVE]) and self._may_take(Priority.INTERACTIVE)
+        background = bool(self._waiters[Priority.BACKGROUND]) and self._may_take(Priority.BACKGROUND)
         if interactive and background:
             limit = max(1, self._capacity - 1)
             if self._held[Priority.INTERACTIVE] >= limit:
