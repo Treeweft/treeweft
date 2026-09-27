@@ -89,3 +89,73 @@ def test_pre_semver_release_in_same_month_is_ignored(repo):
     release(repo, "2026.9.23", "v2026.9.23")          # CalVer-era release
     release(repo, "1.0.0", "v1.0.0", "v2026.9.28")   # first SemVer release, same month
     assert crt.check(repo, "v2026.9.28") == []
+
+
+def test_major_bump_on_non_ancestor_branch_is_refused(repo):
+    # issue #31: a release cut from a branch that doesn't contain the month's
+    # earlier release must still be compared against it.
+    release(repo, "1.0.0", "v1.0.0")
+    release(repo, "1.1.0", "v1.1.0", "v2026.10.1")
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "side", "v1.0.0"], check=True)
+    release(repo, "2.0.0", "v2.0.0", "v2026.10.15")
+    errors = crt.check(repo, "v2026.10.15")
+    assert len(errors) == 1 and "breaking release mid-month" in errors[0] and "v2026.10.1" in errors[0]
+
+
+def test_hotfix_after_non_ancestor_major_bump_is_refused(repo):
+    # issue #31 reverse case: a 1.x hotfix from a maintenance branch, released
+    # later in a month whose first release was 2.0.0, must also be refused.
+    release(repo, "1.0.0", "v1.0.0")
+    release(repo, "2.0.0", "v2.0.0", "v2026.10.1")
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "maint", "v1.0.0"], check=True)
+    release(repo, "1.0.1", "v1.0.1", "v2026.10.15")
+    errors = crt.check(repo, "v2026.10.15")
+    assert len(errors) == 1 and "breaking release mid-month" in errors[0] and "v2026.10.1" in errors[0]
+
+
+def test_second_same_month_release_with_same_major_on_side_branch_is_fine(repo):
+    # A legitimate second release in the month, cut from a non-ancestor branch,
+    # must still pass when the major matches.
+    release(repo, "1.0.0", "v1.0.0")
+    release(repo, "1.1.0", "v1.1.0", "v2026.10.1")
+    subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "side", "v1.0.0"], check=True)
+    release(repo, "1.0.1", "v1.0.1", "v2026.10.15")
+    assert crt.check(repo, "v2026.10.15") == []
+
+
+def test_missing_pyproject_at_released_tag_is_a_clean_error(repo):
+    # issue #33: a missing/unreadable pyproject.toml at the tag being released
+    # must produce a clean ::error:: line, not a traceback.
+    (repo / "README.md").write_text("no pyproject here")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "no pyproject"], check=True)
+    subprocess.run(["git", "-C", str(repo), "tag", "v2026.10.1"], check=True)
+    errors = crt.check(repo, "v2026.10.1")
+    assert errors == ["pyproject.toml is missing or unreadable at v2026.10.1"]
+
+
+def test_main_reports_missing_pyproject_without_traceback(repo, monkeypatch, capsys):
+    (repo / "README.md").write_text("no pyproject here")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "no pyproject"], check=True)
+    subprocess.run(["git", "-C", str(repo), "tag", "v2026.10.1"], check=True)
+    monkeypatch.chdir(repo)
+    exit_code = crt.main(["check_release_tags.py", "v2026.10.1"])
+    out = capsys.readouterr().out
+    assert exit_code == 1
+    assert "::error::pyproject.toml is missing or unreadable at v2026.10.1" in out
+    assert "Traceback" not in out
+
+
+def test_earlier_tag_with_unreadable_pyproject_is_a_warning_not_a_failure(repo, capsys):
+    # issue #33: an earlier same-month tag with no readable pyproject.toml must
+    # be skipped with a warning, not fail the check.
+    (repo / "README.md").write_text("no pyproject here")
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "no pyproject"], check=True)
+    subprocess.run(["git", "-C", str(repo), "tag", "v2026.10.1"], check=True)
+    release(repo, "1.0.0", "v1.0.0", "v2026.10.15")
+    errors = crt.check(repo, "v2026.10.15")
+    out = capsys.readouterr().out
+    assert errors == []
+    assert "::warning::pyproject.toml is missing or unreadable at v2026.10.1" in out
