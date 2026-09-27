@@ -48,27 +48,35 @@ def _commit(repo, rev: str) -> str | None:
         return None
 
 
-def _version_at(repo, rev: str) -> str:
-    return tomllib.loads(_git(repo, "show", f"{rev}:pyproject.toml"))["project"]["version"]
+def _version_at(repo, rev: str) -> str | None:
+    try:
+        toml = tomllib.loads(_git(repo, "show", f"{rev}:pyproject.toml"))
+        version = toml["project"]["version"]
+    except (subprocess.CalledProcessError, tomllib.TOMLDecodeError, KeyError, TypeError):
+        return None  # missing/unreadable pyproject.toml, or no parseable version
+    return version if isinstance(version, str) else None
 
 
-def _is_ancestor(repo, older: str, newer: str) -> bool:
-    return subprocess.run(
-        ["git", "-C", str(repo), "merge-base", "--is-ancestor", older, newer], capture_output=True
-    ).returncode == 0
+def _calver_order(match: re.Match) -> tuple[int, int]:
+    # (day, suffix) so no-suffix sorts before .1, .1 before .2, etc.
+    return (int(match["d"]), int(match["n"]) if match["n"] else 0)
 
 
 def check(repo: Path | str, tag: str) -> list[str]:
     calver = CALVER_TAG.match(tag)
     if calver is None:
         return [f"tag {tag!r} is not CalVer (expected vYYYY.M.D or vYYYY.M.D.N, no zero padding)"]
+    commit = _commit(repo, tag)
+    if commit is None:
+        return [f"tag {tag} does not exist"]
     version = _version_at(repo, tag)
+    if version is None:
+        return [f"pyproject.toml is missing or unreadable at {tag}"]
     semver = _semver(version)
     if semver is None:
         return [f"pyproject.toml version {version!r} at {tag} is not MAJOR.MINOR.PATCH SemVer"]
 
     errors: list[str] = []
-    commit = _commit(repo, tag)
     semver_tag = f"v{version}"
     semver_commit = _commit(repo, semver_tag)
     if semver_commit != commit:
@@ -77,12 +85,21 @@ def check(repo: Path | str, tag: str) -> list[str]:
                       f"which {state}; push {semver_tag} first")
 
     major = int(semver[1])
+    this_order = _calver_order(calver)
     for other in _git(repo, "tag", "--list", f"v{calver['y']}.{calver['m']}.*").split():
-        if other == tag or CALVER_TAG.match(other) is None:
+        if other == tag:
             continue
-        if not _is_ancestor(repo, other, tag):
-            continue  # only earlier releases in this month count
-        other_semver = _semver(_version_at(repo, other))
+        other_calver = CALVER_TAG.match(other)
+        if other_calver is None:
+            continue
+        if _calver_order(other_calver) >= this_order:
+            continue  # only releases earlier in CalVer order count, regardless of git ancestry
+        other_version = _version_at(repo, other)
+        if other_version is None:
+            print(f"::warning::pyproject.toml is missing or unreadable at {other}; "
+                  "the month rule was not checked against it")
+            continue
+        other_semver = _semver(other_version)
         if other_semver is None:
             continue  # CalVer-era release: the month rule starts with SemVer
         if int(other_semver[1]) != major:
