@@ -76,6 +76,11 @@ Added, Fixed.
 
 ### Fixed
 
+- The contract check (`tests/unit/test_contracts.py`) demanded a major
+  version bump for compatible API changes: a request field or tool
+  argument made optional (`Optional[...]`), a looser limit on one
+  (`maxLength`, `minimum`, ...), and a new optional field in a model
+  inside a union (#32). These now need a minor bump.
 - Searching during an index job took about 18 seconds and ran without
   HyDE (#22). The HyDE request waited behind the job's queued chunk
   summaries, timed out and was retried twice. A search's HyDE request now
