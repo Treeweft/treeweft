@@ -120,6 +120,21 @@ class CircuitBreaker:
             elif self._failure_count >= self._config.failure_threshold:
                 self._state = CircuitState.OPEN
 
+    def abandon_probe(self) -> None:
+        """Give back a HALF_OPEN probe admitted by is_open() whose call ended
+        without an answer about the provider: it was cancelled, or it ran
+        out of time before the request was sent.
+
+        Without this the probe is never resolved, and is_open() reports
+        open until the process restarts. No effect in any other state.
+        """
+        with self._lock:
+            if (
+                self._current_state() == CircuitState.HALF_OPEN
+                and self._half_open_attempts > 0
+            ):
+                self._half_open_attempts -= 1
+
     def reset(self) -> None:
         """Force-reset to CLOSED (for testing/manual recovery)."""
         with self._lock:

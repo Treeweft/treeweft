@@ -149,7 +149,7 @@ async def test_summarize_with_cache_uses_v4_prompt_and_schema(fake_pool, registr
     captured = {}
 
     async def _fake(*, messages, max_tokens, operation, validator=None, timeout=None,
-                     timeout_includes_queue=True):
+                     timeout_includes_queue=True, priority=None):
         captured["messages"] = messages
         captured["validator"] = validator
         return "A v4 summary.", "simple"
@@ -221,7 +221,7 @@ async def test_generate_summary_still_returns_str_or_none(fake_pool, registry_v4
     _pin(monkeypatch, 4)
 
     async def _fake(*, messages, max_tokens, operation, validator=None, timeout=None,
-                     timeout_includes_queue=True):
+                     timeout_includes_queue=True, priority=None):
         assert messages[0]["content"].startswith(_V4.system)
         return "A v4 summary.", "simple"
 

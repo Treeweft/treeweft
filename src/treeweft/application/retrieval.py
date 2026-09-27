@@ -105,7 +105,11 @@ async def _maybe_hyde_embedding(
     if not hyde_text:
         return None
     embs = await embedder.embed([hyde_text])
-    return embs[0] if embs else None
+    if not embs:
+        from treeweft.infrastructure import metrics
+        metrics.hyde_fallbacks.labels(reason="embed_failed").inc()
+        return None
+    return embs[0]
 
 
 _community_emb_cache: dict[int, list[float]] | None = None

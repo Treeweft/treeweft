@@ -2,7 +2,7 @@
 from treeweft.adapters.llm_api.llm_adapter import (
     _strip_thinking,
     _get_client,
-    _get_semaphore,
+    _get_slots,
     _hyde_cache_get,
     _hyde_cache_put,
     _chat,

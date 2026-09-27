@@ -47,6 +47,20 @@ rerank_fallbacks = Counter(
     "quality is silently degraded — alert on it.",
     registry=registry,
 )
+hyde_fallbacks = Counter(
+    "treeweft_hyde_fallbacks_total",
+    "Searches that asked for HyDE and ran without it. reason=error: no "
+    "expansion within LLM_HYDE_TIMEOUT (timeout, provider error or open "
+    "circuit breaker); reason=rejected: every answer failed validation; "
+    "reason=embed_failed: the expansion could not be embedded. A sustained "
+    "rate means search quality is degraded.",
+    ["reason"],
+    registry=registry,
+)
+# Export every series from the start, at 0: rate() and increase() miss the
+# first increment of a series that did not exist before it.
+for _reason in ("error", "rejected", "embed_failed"):
+    hyde_fallbacks.labels(reason=_reason)
 encoding_fallbacks = Counter(
     "treeweft_encoding_fallbacks_total",
     "Files indexed via UTF-8 replacement fallback (invalid UTF-8 input)",
