@@ -159,3 +159,32 @@ def test_earlier_tag_with_unreadable_pyproject_is_a_warning_not_a_failure(repo, 
     out = capsys.readouterr().out
     assert errors == []
     assert "::warning::pyproject.toml is missing or unreadable at v2026.10.1" in out
+
+
+@pytest.mark.parametrize("content", [
+    '[project]\nname = "treeweft"\n',   # no version
+    '[tool.other]\nx = 1\n',            # no [project] table
+    'this is [not toml\n',               # not parseable
+])
+def test_pyproject_without_a_readable_version_is_a_clean_error(repo, content):
+    (repo / "pyproject.toml").write_text(content)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-q", "-m", "bad pyproject"], check=True)
+    subprocess.run(["git", "-C", str(repo), "tag", "v2026.10.1"], check=True)
+    assert crt.check(repo, "v2026.10.1") == ["pyproject.toml is missing or unreadable at v2026.10.1"]
+
+
+def test_same_day_second_release_with_a_new_major_is_refused(repo):
+    release(repo, "1.0.0", "v1.0.0", "v2026.10.1")
+    release(repo, "2.0.0", "v2.0.0", "v2026.10.1.1")
+    errors = crt.check(repo, "v2026.10.1.1")
+    assert len(errors) == 1 and "breaking release mid-month" in errors[0]
+
+
+def test_later_release_in_the_month_does_not_fail_an_earlier_one(repo):
+    """Re-running the check for the month's first release, after a later
+    release with another major was (wrongly) tagged, blames the later one."""
+    release(repo, "1.0.0", "v1.0.0", "v2026.10.1")
+    release(repo, "2.0.0", "v2.0.0", "v2026.10.15")
+    assert crt.check(repo, "v2026.10.1") == []
+    assert len(crt.check(repo, "v2026.10.15")) == 1

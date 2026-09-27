@@ -93,7 +93,8 @@ def check(repo: Path | str, tag: str) -> list[str]:
             continue  # only releases earlier in CalVer order count, regardless of git ancestry
         other_version = _version_at(repo, other)
         if other_version is None:
-            print(f"::warning::pyproject.toml is missing or unreadable at {other}")
+            print(f"::warning::pyproject.toml is missing or unreadable at {other}; "
+                  "the month rule was not checked against it")
             continue
         other_semver = _semver(other_version)
         if other_semver is None:
