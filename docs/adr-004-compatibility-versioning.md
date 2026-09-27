@@ -236,8 +236,8 @@ it with the snapshots, and classifies the difference:
 
 | Change | Classification | Requirement |
 |---|---|---|
-| Removed endpoint, method or tool; removed or renamed parameter or response field; optional → required; type change | Breaking | `pyproject` major > released major |
-| New endpoint or tool; new optional parameter or response field | Additive | `pyproject` > released version at minor level or above |
+| Removed endpoint, method or tool; removed or renamed parameter or response field; optional → required; type change; an input that no longer accepts null or has a tighter limit (`maxLength`, `minimum`, ...); an output that may now be null or has a looser limit; any change the classifier does not recognise | Breaking | `pyproject` major > released major |
+| New endpoint or tool; new optional parameter or response field; an input that now accepts null or has a looser limit; an output that can no longer be null or has a tighter limit | Additive | `pyproject` > released version at minor level or above |
 | Any change to the index schema | Index-breaking | `INDEX_SCHEMA_VERSION` > recorded value, and a major bump |
 | Nothing | — | any version |
 
