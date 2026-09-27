@@ -51,9 +51,10 @@ def _commit(repo, rev: str) -> str | None:
 def _version_at(repo, rev: str) -> str | None:
     try:
         toml = tomllib.loads(_git(repo, "show", f"{rev}:pyproject.toml"))
-        return toml["project"]["version"]
-    except (subprocess.CalledProcessError, tomllib.TOMLDecodeError, KeyError):
+        version = toml["project"]["version"]
+    except (subprocess.CalledProcessError, tomllib.TOMLDecodeError, KeyError, TypeError):
         return None  # missing/unreadable pyproject.toml, or no parseable version
+    return version if isinstance(version, str) else None
 
 
 def _calver_order(match: re.Match) -> tuple[int, int]:
@@ -65,6 +66,9 @@ def check(repo: Path | str, tag: str) -> list[str]:
     calver = CALVER_TAG.match(tag)
     if calver is None:
         return [f"tag {tag!r} is not CalVer (expected vYYYY.M.D or vYYYY.M.D.N, no zero padding)"]
+    commit = _commit(repo, tag)
+    if commit is None:
+        return [f"tag {tag} does not exist"]
     version = _version_at(repo, tag)
     if version is None:
         return [f"pyproject.toml is missing or unreadable at {tag}"]
@@ -73,7 +77,6 @@ def check(repo: Path | str, tag: str) -> list[str]:
         return [f"pyproject.toml version {version!r} at {tag} is not MAJOR.MINOR.PATCH SemVer"]
 
     errors: list[str] = []
-    commit = _commit(repo, tag)
     semver_tag = f"v{version}"
     semver_commit = _commit(repo, semver_tag)
     if semver_commit != commit:

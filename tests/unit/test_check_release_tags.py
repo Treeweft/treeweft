@@ -165,6 +165,8 @@ def test_earlier_tag_with_unreadable_pyproject_is_a_warning_not_a_failure(repo, 
     '[project]\nname = "treeweft"\n',   # no version
     '[tool.other]\nx = 1\n',            # no [project] table
     'this is [not toml\n',               # not parseable
+    '[project]\nversion = 1.0\n',        # version is not a string
+    'project = "treeweft"\n',            # project is not a table
 ])
 def test_pyproject_without_a_readable_version_is_a_clean_error(repo, content):
     (repo / "pyproject.toml").write_text(content)
@@ -188,3 +190,8 @@ def test_later_release_in_the_month_does_not_fail_an_earlier_one(repo):
     release(repo, "2.0.0", "v2.0.0", "v2026.10.15")
     assert crt.check(repo, "v2026.10.1") == []
     assert len(crt.check(repo, "v2026.10.15")) == 1
+
+
+def test_tag_that_does_not_exist_is_reported_as_such(repo):
+    release(repo, "1.0.0", "v1.0.0", "v2026.10.1")
+    assert crt.check(repo, "v2026.10.9") == ["tag v2026.10.9 does not exist"]
