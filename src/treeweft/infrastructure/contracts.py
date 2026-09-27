@@ -86,17 +86,30 @@ def _key(value) -> str:
 
 
 def _split_nullable(schema: dict) -> tuple[dict, bool]:
-    """pydantic writes Optional[T] as {"anyOf": [T, null], ...}. Return the
-    schema without the null branch (T itself when it is the only other one,
-    carrying the outer keys such as "default"), and whether null was allowed."""
+    """pydantic writes Optional[T] as {"anyOf": [T, null], ...}. Return T
+    carrying the outer keys such as "default", and whether null was allowed.
+
+    A union of several types, or a T with a key the outer schema also has
+    with another value, is returned as it is: its branches are compared one
+    by one, so nothing in a branch is hidden by an outer key."""
     branches = schema.get("anyOf")
     if not isinstance(branches, list) or _NULL not in branches:
         return schema, False
     rest = [b for b in branches if b != _NULL]
     outer = {k: v for k, v in schema.items() if k != "anyOf"}
     if len(rest) == 1 and isinstance(rest[0], dict):
-        return {**rest[0], **outer}, True
-    return {**outer, "anyOf": rest}, True
+        if all(outer.get(k, v) == v for k, v in rest[0].items()):
+            return {**rest[0], **outer}, True
+    return schema, True
+
+
+def _branches(schema: dict) -> list[tuple[int, object]] | None:
+    """The branches of a union with their place in the schema, the null
+    branch left out. None when "anyOf" is not a list."""
+    branches = schema.get("anyOf", [])
+    if not isinstance(branches, list):
+        return None
+    return [(i, b) for i, b in enumerate(branches) if b != _NULL]
 
 
 def _widening(widened: bool, direction: str) -> str:
@@ -117,12 +130,12 @@ def _diff_limits(old: dict, new: dict, where: str, direction: str) -> list[Chang
             continue
         if not all(v is None or _is_number(v) for v in (was, now)):
             changes.append(Change("breaking", where, _UNCLASSIFIED))
-        elif was is None or now is None:
+            continue
+        if was is None or now is None:
             looser = now is None  # a limit removed; one added tightens
-            changes.append(Change(_widening(looser, direction), where, f"{key} {was!r} -> {now!r}"))
         else:
             looser = now > was if key in _UPPER_LIMITS else now < was
-            changes.append(Change(_widening(looser, direction), where, f"{key} {was!r} -> {now!r}"))
+        changes.append(Change(_widening(looser, direction), where, f"{key} {was!r} -> {now!r}"))
     return changes
 
 
@@ -181,12 +194,15 @@ def diff_schema(old, new, where: str, direction: str) -> list[Change]:
         changes.append(Change("additive", where, f"default {old.get('default')!r} -> {new.get('default')!r}"))
     changes += _diff_limits(old, new, where, direction)
 
-    old_any, new_any = old.get("anyOf"), new.get("anyOf")
-    if old_any != new_any:
-        # Branch by branch when the union has the same shape. A branch added,
-        # removed or reordered is not classified.
-        if isinstance(old_any, list) and isinstance(new_any, list) and len(old_any) == len(new_any):
-            for i, (old_branch, new_branch) in enumerate(zip(old_any, new_any)):
+    old_any, new_any = _branches(old), _branches(new)
+    if old_any is None or new_any is None:
+        if old.get("anyOf") != new.get("anyOf"):
+            changes.append(Change("breaking", where, _UNCLASSIFIED))
+    elif [b for _, b in old_any] != [b for _, b in new_any]:
+        # Branch by branch when the union has the same number of them. A
+        # branch added, removed or moved is not classified.
+        if len(old_any) == len(new_any):
+            for (_, old_branch), (i, new_branch) in zip(old_any, new_any):
                 changes += diff_schema(old_branch, new_branch, f"{where}<{i}>", direction)
         else:
             changes.append(Change("breaking", where, _UNCLASSIFIED))

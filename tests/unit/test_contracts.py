@@ -203,6 +203,44 @@ def test_union_with_a_different_number_of_branches_is_conservatively_breaking(di
     assert "unclassified" in changes[0].what
 
 
+# ── diff_schema: what the Optional handling must not hide ──
+
+@pytest.mark.parametrize("direction", ["input", "output"])
+def test_key_on_both_the_optional_node_and_its_branch_does_not_hide_a_change(direction):
+    """The outer keys are merged into the branch. Where both carry the same
+    key with different values, merging would let the outer value stand in
+    for the branch's, so such a schema is not merged and not classified."""
+    old = optional({"type": "string", "maxLength": 10}, maxLength=10)
+    new = optional({"type": "string", "maxLength": 5}, maxLength=10)
+    assert kinds(c.diff_schema(old, new, "q", direction)) == [("breaking", "q")]
+
+
+@pytest.mark.parametrize("direction,expected", [("input", "breaking"), ("output", "additive")])
+def test_change_in_a_branch_that_cannot_be_merged_is_classified_in_the_branch(direction, expected):
+    old = optional({"type": "string", "maxLength": 10}, maxLength=20)
+    new = optional({"type": "string", "maxLength": 5}, maxLength=20)
+    assert kinds(c.diff_schema(old, new, "q", direction)) == [(expected, "q<0>")]
+
+
+def test_key_on_both_with_the_same_value_is_no_change():
+    schema = optional({"type": "string", "maxLength": 10}, maxLength=10)
+    assert c.diff_schema(schema, dict(schema), "q", "input") == []
+
+
+def test_union_branch_is_named_by_its_place_in_the_schema():
+    """The null branch is left out of the comparison, not out of the count:
+    the label must point at the branch a reader finds in the schema."""
+    old = {"anyOf": [NULL, OBJ({"a": STR}), OBJ({"b": INT})]}
+    new = {"anyOf": [NULL, OBJ({"a": STR}), OBJ({"b": INT, "c": STR})]}
+    assert kinds(c.diff_schema(old, new, "x", "input")) == [("additive", "x<2>.c")]
+
+
+def test_anyof_that_is_not_a_list_is_conservatively_breaking():
+    changes = c.diff_schema({"anyOf": "string"}, {"anyOf": "integer"}, "u", "input")
+    assert kinds(changes) == [("breaking", "u")]
+    assert "unclassified" in changes[0].what
+
+
 # ── the reproductions from issue #32 ──
 
 def test_issue_32_optional_input_needs_a_minor_bump():
