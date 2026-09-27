@@ -13,7 +13,6 @@ tests/integration/test_migrations_pg.py.
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 import pytest
@@ -29,10 +28,16 @@ class _FakeDb:
     """Committed state, shared by every connection the pool hands out."""
 
     def __init__(self):
+        self.table_exists = False       # treeweft_migrations
         self.recorded: list[str] = []   # treeweft_migrations rows
         self.applied_sql: list[str] = []  # migration scripts that committed
         self.calls: list[tuple] = []
+        self.timeouts: dict[str, float | None] = {}  # executed SQL -> timeout
+        self.isolations: list[str | None] = []
         self.fail: dict[str, Exception] = {}  # SQL substring -> error to raise
+        # SQL substring -> the script ends the runner's transaction, in a way
+        # the text of the script does not show (a procedure that commits).
+        self.ends_transaction: list[str] = []
 
 
 class _TxCtx:
@@ -67,33 +72,43 @@ class _FakeConn:
         self.db.recorded.extend(self.pending_recorded)
         self.db.applied_sql.extend(self.pending_sql)
 
-    def transaction(self):
+    def transaction(self, isolation=None):
+        self.db.isolations.append(isolation)
         return _TxCtx(self)
 
     def is_in_transaction(self) -> bool:
         return self.in_tx
 
-    async def execute(self, query: str, *args):
+    async def execute(self, query: str, *args, timeout=None):
         q = " ".join(query.split())
         self.db.calls.append(("execute", q, args))
+        self.db.timeouts[q] = timeout
         for needle, error in self.db.fail.items():
             if needle in q:
                 raise error
-        if "pg_advisory_xact_lock" in q or q.startswith("CREATE TABLE IF NOT EXISTS treeweft_migrations"):
+        if "pg_advisory_xact_lock" in q:
+            return "OK"
+        if q.startswith("CREATE TABLE treeweft_migrations"):
+            self.db.table_exists = True
             return "OK"
         if q.startswith("INSERT INTO treeweft_migrations"):
             self.pending_recorded.append(args[0])
         else:
             self.pending_sql.append(q)  # a migration script
-        if not self.in_tx or re.search(r"\bCOMMIT\b", q):
-            # Autocommit outside a transaction. Inside one, a script carrying
-            # its own COMMIT ends the runner's transaction there, work and
-            # all — what a real server does.
+        if not self.in_tx or any(needle in q for needle in self.db.ends_transaction):
+            # Autocommit outside a transaction. Inside one, a script that
+            # commits ends the runner's transaction there, work and all —
+            # what a real server does.
             self.flush()
             self.pending_recorded.clear()
             self.pending_sql.clear()
             self.in_tx = False
         return "OK"
+
+    async def fetchval(self, query: str, *args):
+        self.db.calls.append(("fetchval", " ".join(query.split()), args))
+        assert "to_regclass" in query
+        return self.db.table_exists
 
     async def fetch(self, query: str, *args):
         self.db.calls.append(("fetch", " ".join(query.split()), args))
@@ -178,6 +193,7 @@ class TestAppliesPending:
     async def test_skips_migrations_already_recorded(self, db, migrations_dir):
         (migrations_dir / "001_a.sql").write_text("CREATE TABLE t_a (id int);")
         (migrations_dir / "002_b.sql").write_text("CREATE TABLE t_b (id int);")
+        db.table_exists = True
         db.recorded.append("001_a.sql")
 
         applied = await pg.run_migrations()
@@ -282,7 +298,7 @@ class TestFailsLoud:
 
     async def test_failure_to_create_the_tracking_table_propagates(self, db, migrations_dir):
         (migrations_dir / "001_a.sql").write_text("CREATE TABLE t_a (id int);")
-        db.fail["CREATE TABLE IF NOT EXISTS treeweft_migrations"] = RuntimeError(
+        db.fail["CREATE TABLE treeweft_migrations"] = RuntimeError(
             "permission denied for schema public"
         )
 
@@ -291,19 +307,97 @@ class TestFailsLoud:
 
         assert db.applied_sql == []
 
-    async def test_script_that_ends_the_transaction_is_rejected(self, db, migrations_dir):
-        """A script with its own COMMIT commits before the tracking row is
-        written — the non-atomic state this runner exists to prevent."""
+    async def test_script_with_transaction_control_is_rejected_before_it_runs(
+        self, db, migrations_dir
+    ):
+        """A script with its own COMMIT would commit before the tracking row
+        is written — the non-atomic state this runner exists to prevent."""
         (migrations_dir / "001_own_txn.sql").write_text(
             "BEGIN; CREATE TABLE t_a (id int); COMMIT;"
         )
         (migrations_dir / "002_after.sql").write_text("CREATE TABLE t_b (id int);")
 
-        with pytest.raises(pg.MigrationError, match="001_own_txn.sql"):
+        with pytest.raises(pg.MigrationError) as excinfo:
+            await pg.run_migrations()
+
+        message = str(excinfo.value)
+        assert "001_own_txn.sql" in message
+        assert "BEGIN" in message and "COMMIT" in message
+        assert db.recorded == []
+        assert db.applied_sql == []
+        assert not any("t_a" in c[1] or "t_b" in c[1] for c in db.calls if c[0] == "execute")
+
+    async def test_script_that_ends_the_transaction_unseen_is_rejected(
+        self, db, migrations_dir
+    ):
+        """The backstop: the script's text shows no transaction control, but
+        running it ends the transaction (a procedure that commits)."""
+        (migrations_dir / "001_calls_proc.sql").write_text("CALL commits_inside();")
+        (migrations_dir / "002_after.sql").write_text("CREATE TABLE t_b (id int);")
+        db.ends_transaction.append("commits_inside")
+
+        with pytest.raises(pg.MigrationError, match="001_calls_proc.sql"):
             await pg.run_migrations()
 
         assert db.recorded == []
         assert not any("t_b" in c[1] for c in db.calls if c[0] == "execute")
+
+    async def test_timeout_message_says_what_timed_out(self, db, migrations_dir):
+        """str(TimeoutError()) is empty; the message must still name a cause."""
+        (migrations_dir / "001_slow.sql").write_text("CREATE TABLE t_a (id int);")
+        db.fail["CREATE TABLE t_a"] = TimeoutError()
+
+        with pytest.raises(pg.MigrationError) as excinfo:
+            await pg.run_migrations()
+
+        message = str(excinfo.value)
+        assert "001_slow.sql" in message
+        assert "TimeoutError" in message
+        assert "time limit" in message
+
+
+@pytest.mark.asyncio
+class TestTrackingTable:
+    async def test_is_not_created_again_when_it_exists(self, db, migrations_dir):
+        """CREATE TABLE IF NOT EXISTS needs CREATE on the schema even when
+        the table exists; a role with read/write rights only must still be
+        able to start when nothing is pending."""
+        (migrations_dir / "001_a.sql").write_text("CREATE TABLE t_a (id int);")
+        db.table_exists = True
+        db.recorded.append("001_a.sql")
+        db.fail["CREATE TABLE"] = RuntimeError("permission denied for schema public")
+
+        assert await pg.run_migrations() == []
+
+    async def test_is_created_when_missing(self, db, migrations_dir):
+        await pg.run_migrations()
+
+        assert db.table_exists is True
+
+
+@pytest.mark.asyncio
+class TestLimits:
+    async def test_script_and_lock_wait_do_not_use_the_pool_timeout(self, db, migrations_dir):
+        """The pool's 10s command_timeout would stop startup on every attempt
+        for a migration that needs longer, and for the process waiting on it."""
+        (migrations_dir / "001_a.sql").write_text("CREATE TABLE t_a (id int);")
+
+        await pg.run_migrations()
+
+        lock = next(q for q in db.timeouts if "pg_advisory_xact_lock" in q)
+        assert db.timeouts["CREATE TABLE t_a (id int);"] == pg._MIGRATION_TIMEOUT_SECONDS
+        assert db.timeouts[lock] == pg._MIGRATION_TIMEOUT_SECONDS
+        assert pg._MIGRATION_TIMEOUT_SECONDS >= 600
+
+    async def test_every_transaction_is_read_committed(self, db, migrations_dir):
+        """Under REPEATABLE READ the re-check after the lock would not see
+        the row its previous holder committed."""
+        (migrations_dir / "001_a.sql").write_text("CREATE TABLE t_a (id int);")
+
+        await pg.run_migrations()
+
+        assert db.isolations
+        assert set(db.isolations) == {"read_committed"}
 
 
 @pytest.mark.asyncio
@@ -325,20 +419,46 @@ class TestPoolUnavailable:
 
 
 # ---------------------------------------------------------------------------
-# The shipped migration files
+# Transaction control in a script, and the shipped migration files
 # ---------------------------------------------------------------------------
 
+class TestTransactionControlDetection:
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "BEGIN;\nCREATE TABLE t (id int);\nCOMMIT;",
+            "BEGIN; CREATE TABLE t (id int); COMMIT;",
+            "begin transaction; create table t (id int); commit transaction;",
+            "START TRANSACTION; CREATE TABLE t (id int); END TRANSACTION;",
+            "BEGIN ISOLATION LEVEL SERIALIZABLE; CREATE TABLE t (id int); END;",
+            "CREATE TABLE t (id int); COMMIT; BEGIN; CREATE TABLE u (id int);",
+            "CREATE TABLE t (id int);\nROLLBACK;",
+            "CREATE TABLE t (id int); ABORT",
+        ],
+    )
+    def test_detects(self, sql):
+        assert pg._transaction_control(sql)
+
+    @pytest.mark.parametrize(
+        "sql",
+        [
+            "CREATE TABLE t (id int);",
+            "-- COMMIT; is not allowed here, and don't add BEGIN;\nCREATE TABLE t (id int);",
+            "/* BEGIN;\nCOMMIT; */ CREATE TABLE t (id int);",
+            "INSERT INTO t (note) VALUES ('then run COMMIT; by hand');",
+            "INSERT INTO t (note) VALUES ('it''s; COMMIT;');",
+            "CREATE TEMPORARY TABLE tmp ON COMMIT DROP AS SELECT 1;",
+            "DO $$\nBEGIN\n  UPDATE t SET id = 1;\nEND;\n$$;",
+            "CREATE FUNCTION f() RETURNS int AS $body$\nBEGIN\n  RETURN 1;\nEND;\n$body$ LANGUAGE plpgsql;",
+            'CREATE TABLE "commit" (id int);',
+            "UPDATE t SET ended = true; -- END;",
+        ],
+    )
+    def test_ignores(self, sql):
+        assert pg._transaction_control(sql) == []
+
+
 _SHIPPED = sorted((Path(pg.__file__).resolve().parent / "migrations").glob("*.sql"))
-
-_TRANSACTION_CONTROL = re.compile(
-    r"^\s*(BEGIN|START\s+TRANSACTION|COMMIT|END|ROLLBACK|ABORT)\s*;",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
-def _strip_sql_comments(sql: str) -> str:
-    sql = re.sub(r"/\*.*?\*/", "", sql, flags=re.DOTALL)
-    return re.sub(r"--[^\n]*", "", sql)
 
 
 class TestShippedMigrations:
@@ -347,9 +467,9 @@ class TestShippedMigrations:
 
     @pytest.mark.parametrize("path", _SHIPPED, ids=lambda p: p.name)
     def test_no_migration_controls_its_own_transaction(self, path):
-        """The runner owns the transaction. A script's own COMMIT would end
-        it before the tracking row is written."""
-        found = _TRANSACTION_CONTROL.findall(_strip_sql_comments(path.read_text()))
+        """The runner owns the transaction, and refuses to run a script that
+        has its own — which would stop every fresh install at startup."""
+        found = pg._transaction_control(path.read_text())
         assert not found, (
             f"{path.name} contains transaction control {found}; remove it — "
             "run_migrations() wraps every migration in a transaction"

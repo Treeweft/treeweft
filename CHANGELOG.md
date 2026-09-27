@@ -80,6 +80,8 @@ Added, Fixed.
   being recorded.
 - Indexer processes started at the same time no longer race to apply the
   same migration; they take turns under a Postgres advisory lock.
+- Migrations are no longer cut off by the 10-second query timeout of the
+  connection pool; they get one hour.
 
 ## 1.0.0 — 2026.9.24
 
