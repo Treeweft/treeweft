@@ -53,6 +53,11 @@ Treeweft has two version lines (ADR-004):
   outside this rule.
 - `GET /health` reports both: `"version"` (SemVer) and `"release"` (CalVer,
   `null` when running from a source checkout).
+- **Every image carries the label `treeweft.source-version`**, the SemVer of
+  the source tree the release was built from. All four images are built from
+  one commit, so they carry the same value: it is not a version of the UI or
+  the reranker on their own. Only the `indexer` and `mcp-server` images take
+  the `TREEWEFT_RELEASE` build argument; the other two have no use for it.
 
 ## Tags
 

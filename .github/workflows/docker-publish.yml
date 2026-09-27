@@ -78,14 +78,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # release_arg: the Dockerfile declares `ARG TREEWEFT_RELEASE`
+          # (the two Python images, which report it in GET /health).
           - image: indexer
             context: .
             dockerfile: Dockerfile.indexer
             platforms: linux/amd64
+            release_arg: true
           - image: mcp-server
             context: .
             dockerfile: Dockerfile
             platforms: linux/amd64,linux/arm64
+            release_arg: true
           - image: ui
             context: ./ui
             dockerfile: ui/Dockerfile
@@ -175,8 +179,7 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            TREEWEFT_RELEASE=${{ steps.versions.outputs.release }}
+          build-args: ${{ matrix.release_arg && format('TREEWEFT_RELEASE={0}', steps.versions.outputs.release) || '' }}
           # PR builds read both caches but write only their own scope, so an
           # amd64-only PR export never replaces the release scope's arm64
           # layers (which would make the next release build arm64 cold).

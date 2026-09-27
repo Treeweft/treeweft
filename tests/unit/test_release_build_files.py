@@ -46,3 +46,17 @@ def test_both_python_images_bake_the_release_and_ship_pyproject():
         assert "ARG TREEWEFT_RELEASE" in text, dockerfile
         assert "ENV TREEWEFT_RELEASE=$TREEWEFT_RELEASE" in text, dockerfile
         assert "COPY pyproject.toml" in text, dockerfile  # versions.SOURCE_VERSION reads it
+
+
+def test_release_build_arg_goes_only_to_images_that_declare_it():
+    """An image whose Dockerfile has no `ARG TREEWEFT_RELEASE` must not be
+    passed one (BuildKit warns about it), and one that has it must be."""
+    build = _workflow()["jobs"]["build"]
+    step = next(s for s in build["steps"] if str(s.get("uses", "")).startswith("docker/build-push-action"))
+    assert "matrix.release_arg" in step["with"]["build-args"]
+
+    entries = build["strategy"]["matrix"]["include"]
+    assert {e["image"] for e in entries} == {"indexer", "mcp-server", "ui", "qwen3-reranker"}
+    for entry in entries:
+        declares = "ARG TREEWEFT_RELEASE" in (ROOT / entry["dockerfile"]).read_text()
+        assert bool(entry.get("release_arg")) is declares, entry["image"]
