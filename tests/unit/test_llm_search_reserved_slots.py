@@ -78,21 +78,3 @@ class TestWiring:
         for _ in range(4):
             await asyncio.wait_for(slots.acquire(Priority.BACKGROUND), timeout=0.1)
         assert slots.in_use == 4
-
-
-def test_docker_compose_passes_the_setting_to_the_indexer():
-    """The compose indexer has no env_file: a setting it does not name in
-    `environment:` never reaches the container, whatever `.env` says."""
-    import pathlib
-
-    import yaml
-
-    compose = yaml.safe_load(
-        (pathlib.Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text()
-    )
-    services = [s for s in compose["services"].values()
-                if any(str(e).startswith("LLM_CONCURRENCY=") for e in s.get("environment") or [])]
-    assert services, "no compose service passes LLM_CONCURRENCY"
-    for service in services:
-        names = {str(e).split("=", 1)[0] for e in service["environment"]}
-        assert "LLM_SEARCH_RESERVED_SLOTS" in names

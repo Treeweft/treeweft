@@ -91,10 +91,40 @@ image at once. Running `docker compose build` still works and tags the local
 build with the same name, which is why a subsequent `up` uses whichever you
 did last; pass `--pull` to `up` to force the registry copy.
 
-Running the indexer from its image outside compose:
+### Settings for the indexer container
+
+The compose `indexer` service reads the whole `.env` (`env_file`), so every
+setting in it applies. Service addresses are the exception. The addresses in
+`.env` (`MILVUS_URI`, `NEO4J_URI`, `EMBEDDING_URL`, `RERANKER_URL`,
+`DATABASE_URL`, ...) are written for an indexer running on the host, where
+`localhost` is the host; inside the container it is the container itself. So
+`docker-compose.yml` replaces them with the compose services (`milvus`,
+`neo4j`, `tei-embedding`, `tei-reranker`, `postgres`, `otel-collector`).
+
+To use a service compose does not run, set its `DOCKER_*` variable in `.env`:
+
+| Variable | Default in the container |
+|---|---|
+| `DOCKER_MILVUS_URI`, `DOCKER_MILVUS_HOST`, `DOCKER_MILVUS_PORT` | `http://milvus:19530`, `milvus`, `19530` |
+| `DOCKER_NEO4J_URI` | `bolt://neo4j:7687` |
+| `DOCKER_EMBEDDING_URL` (`DOCKER_EMBEDDING_URLS`) | `http://tei-embedding:80`; without an NVIDIA GPU, `http://tei-embedding-cpu:80` |
+| `DOCKER_EMBEDDING_FALLBACK_URL` (`..._URLS`) | none |
+| `DOCKER_RERANKER_URL` | `http://tei-reranker:80` |
+| `DOCKER_LLM_URL` | `LLM_URL` unchanged. `.env.example` sets `http://host.docker.internal:11434/v1`, for an LLM on the Docker host |
+| `DOCKER_OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4317` |
+
+An unreachable LLM does not stop the indexer: it runs without HyDE and chunk
+summaries. After changing `DOCKER_LLM_URL`, check the indexer's log for LLM
+errors.
+
+Running the indexer from its image outside compose, pass container addresses
+the same way, for example with `-e MILVUS_URI=http://milvus.example:19530`
+after `--env-file .env` (a later `-e` wins):
 
 ```bash
 docker run --rm -p 8001:8001 --env-file .env \
+  -e MILVUS_URI=... -e MILVUS_HOST=... -e NEO4J_URI=... -e EMBEDDING_URL=... \
+  -e RERANKER_URL=... -e LLM_URL=... -e DATABASE_URL=... \
   -v /path/to/repos:/data/repos:ro \
   treeweft/indexer:latest
 ```

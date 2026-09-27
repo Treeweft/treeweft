@@ -47,6 +47,12 @@ Added, Fixed.
 
 ### Operator configuration
 
+- The indexer container reads the whole `.env`. Service addresses in `.env`
+  are for a host-run indexer and are replaced in the container; set the new
+  `DOCKER_MILVUS_URI`, `DOCKER_NEO4J_URI`, `DOCKER_EMBEDDING_URL`,
+  `DOCKER_LLM_URL` (and similar) variables to point it at a service compose
+  does not run. See `docs/docker-images.md`, "Settings for the indexer
+  container".
 - `LLM_SEARCH_RESERVED_SLOTS` (default 1, or 0 when `LLM_CONCURRENCY` is
   1): LLM slots that chunk summaries never use, so a search's HyDE request
   does not wait for a slow summary to finish. An index job therefore runs
@@ -82,6 +88,11 @@ Added, Fixed.
 
 ### Fixed
 
+- The indexer in `docker-compose.yml` could not start: it received only the
+  settings listed under its `environment:`, which did not include
+  `MILVUS_HOST`, `MILVUS_PORT` or `EMBEDDING_URL`, and it ignored everything
+  else in `.env` (#48). It now reads `.env`, and the service addresses are
+  replaced with the compose services.
 - The index-schema check could report an unstamped Milvus collection as
   empty when rows had been inserted moments before: its confirming query
   used Milvus's default Bounded consistency. It now uses Strong.
