@@ -1,0 +1,75 @@
+name: Upgraded dependencies
+
+# A canary, not a gate. CI installs the versions in uv.lock, but
+# `pip install treeweft` resolves the newest releases that fit the ranges in
+# pyproject.toml. This workflow upgrades every dependency within those ranges
+# and runs the unit suite, so an upstream release that breaks Treeweft shows
+# up here and not in a user's install (tree-sitter-language-pack 1.9.x did).
+#
+#   * weekly, Monday 03:00 UTC, before Dependabot's Monday run
+#   * manual run
+#   * pull request that changes this file, so a change to it is tested
+#
+# It is not a required check and does not run on other pull requests, so it
+# never blocks a merge. The upgraded lockfile is not committed. A failed
+# scheduled run sends GitHub's failed-workflow email; the run's summary lists
+# the packages that differ from uv.lock.
+
+on:
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/upgraded-dependencies.yml"
+
+concurrency:
+  group: upgraded-dependencies-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: unit-tests, upgraded (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The same two as ci.yml: the supported floor and what the images run.
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@v7
+      # The same pin as ci.yml; Dependabot's github-actions updates bump both.
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Upgrade the lockfile
+        # Rewrites uv.lock in the workspace only. uv reports each change as
+        # "Updated <package> v1 -> v2"; the summary is what names the culprit
+        # when the tests below fail.
+        env:
+          PYTHON: ${{ matrix.python }}
+        run: |
+          set -euo pipefail
+          uv lock --upgrade 2>&1 | tee upgrade.log
+          {
+            echo "### Packages that differ from uv.lock (python $PYTHON)"
+            echo
+            if grep -E '^(Updated|Added|Removed) ' upgrade.log > changes.log; then
+              echo '```'
+              cat changes.log
+              echo '```'
+            else
+              echo "None: uv.lock already has the newest versions in range."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Install
+        # The same extras as ci.yml, from the lockfile just upgraded.
+        run: uv sync --locked --extra dev --extra all-backends --extra simple
+      - name: Provide the quickstart env
+        run: cp .env.example .env
+      - name: Unit tests
+        run: uv run --locked --no-sync pytest tests/unit -q
