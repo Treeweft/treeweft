@@ -11,25 +11,18 @@ ids. Uses a uniquely named collection built directly from
 `MilvusAdapter(collection_name=...)`, never the module-level wrappers
 (those address the configured MILVUS_COLLECTION).
 
-Run against a standalone instance:
-
-    docker compose --profile local-infra up -d milvus
-    MILVUS_TEST_URI=http://localhost:19530 \
-      env -u PYTHONPATH python -m pytest tests/integration/test_resummarize_milvus.py -v
-
-Skipped unless MILVUS_TEST_URI is set — no service, no silent pass.
+Gets its Milvus address from the `milvus_uri` fixture (conftest.py):
+explicit MILVUS_TEST_URI, else a throwaway testcontainer when
+TREEWEFT_ITEST_CONTAINERS=1, else skipped.
 """
 from __future__ import annotations
 
-import os
 import uuid
 
 import pytest
 
-URI = os.environ.get("MILVUS_TEST_URI")
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not URI, reason="set MILVUS_TEST_URI to run"),
     pytest.mark.asyncio,
 ]
 
@@ -55,18 +48,18 @@ OLD_SUMMARY_C = [0.5, 0.5, 0.5, 0.5]
 
 
 @pytest.fixture
-def adapter():
+def adapter(milvus_uri):
     from pymilvus import MilvusClient
 
     from treeweft.adapters.milvus import vector_store as vs
 
-    raw = MilvusClient(uri=URI)
+    raw = MilvusClient(uri=milvus_uri)
     if raw.has_collection(COLL):
         raw.drop_collection(COLL)
 
-    host, _, port = URI.split("://", 1)[1].partition(":")
+    host, _, port = milvus_uri.split("://", 1)[1].partition(":")
     a = vs.MilvusAdapter(host=host, port=port or "19530", collection_name=COLL, vector_dim=DIM)
-    a.uri = URI  # the adapter assumes https; the local standalone is plain http
+    a.uri = milvus_uri  # the adapter assumes https; the local standalone is plain http
     yield a
     if raw.has_collection(COLL):
         raw.drop_collection(COLL)

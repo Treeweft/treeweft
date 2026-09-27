@@ -57,7 +57,7 @@ dependencies = [
 # (lancedb/fastembed/aiosqlite) extras rather than duplicating their
 # package lists here:
 #   pip install -e ".[dev,all-backends,simple]"
-dev = ["pytest>=8", "pytest-asyncio>=1.0", "pytest-mock>=3.12"]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "pytest-mock>=3.12", "testcontainers[postgres,neo4j,milvus]>=4.15,<4.16"]
 # Alternate vector backends. Milvus (the default) is in the base install.
 # Install with: pip install -e .[chromadb]   /   .[lancedb]
 # or .[all-backends] for every supported store.
@@ -112,4 +112,5 @@ dev = [
     "pytest>=8.0",
     "pytest-mock>=3.12",
     "pytest-asyncio>=0.23",
+    "testcontainers[postgres,neo4j,milvus]>=4.15,<4.16",
 ]

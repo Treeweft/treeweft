@@ -15,6 +15,18 @@ pytest tests/unit -q        # no services needed
 
 Running the full stack locally is described in the README (Quick Start).
 
+## Integration tests
+
+`tests/integration/` exercises the real Postgres, Milvus and Neo4j adapters, not mocks. It
+self-provisions throwaway copies of all three (Docker required) rather than pointing at a stack
+you run yourself:
+
+```bash
+TREEWEFT_ITEST_CONTAINERS=1 pytest tests/integration -m slow -q
+```
+
+CI runs this as the `integration` check; it's currently advisory, not required to merge.
+
 ## Ground rules
 
 - **Architecture**: DDD layering — `domain/` never imports `adapters/`.

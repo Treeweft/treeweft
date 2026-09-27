@@ -293,6 +293,50 @@ subcommands print JSON to stdout; the `agentic` subcommand writes per-query rows
 (per-arm mean tokens/turns/recall@k/MRR/judge, and a `comparison` block with tokens-saved %,
 quality-per-1k-tokens, and treeweft win-rates).
 
+## Integration tests
+
+`tests/integration/` (`specs/003-integration-testcontainers/`) exercises the real Postgres,
+Milvus and Neo4j adapters instead of mocks. Each test takes its service address from a
+session-scoped fixture (`postgres_url`, `milvus_uri`, `neo4j_conn`) rather than reading an env
+var into a module constant at import, so a subset selection only starts the services its
+fixtures are actually asked for:
+
+```bash
+# Self-provisioned (needs Docker): starts throwaway services, runs the suite, tears them down.
+TREEWEFT_ITEST_CONTAINERS=1 pytest tests/integration -m slow -q
+
+# A subset -- only Milvus gets provisioned, Postgres/Neo4j are never touched.
+TREEWEFT_ITEST_CONTAINERS=1 pytest tests/integration -m slow -k milvus -q
+```
+
+- **Resolution per service is explicit variable → switch → skip** (`tests/integration/_services.py`,
+  `resolve_mode`). `POSTGRES_TEST_URL`, `MILVUS_TEST_URI` and `NEO4J_TEST_URI` (+ `NEO4J_USER`/
+  `NEO4J_PASSWORD`) each point *that one service* at an address you manage and win over
+  `TREEWEFT_ITEST_CONTAINERS=1` for it — the two modes can mix per service in one run. With
+  neither set for a service, its fixture skips with a reason naming both options, e.g. "Postgres
+  not configured: set POSTGRES_TEST_URL, or TREEWEFT_ITEST_CONTAINERS=1 to start a throwaway one
+  (needs Docker)".
+- **Self-provisioning guarantees**: the image for each service comes from `docker-compose.yml`
+  (`services.<name>.image`) — one source of truth, never a separate pin; every published port
+  binds to `127.0.0.1` on a random host port, never `0.0.0.0`; credentials (Postgres user/
+  password/db, Neo4j password) are generated per run via `secrets.token_hex` and never read from
+  `.env`; the Neo4j tests monkeypatch the `graph_store` module's `NEO4J_URI`/`NEO4J_USER`/
+  `NEO4J_PASSWORD` constants (and reset `_driver`) rather than relying on the environment, because
+  a module imported earlier in the session ignores env changes; each service waits with its own
+  startup timeout (Postgres 60s, Neo4j 120s, Milvus 180s) so a cold pull on CI isn't cut short by
+  the library's shorter global default; a missing Docker daemon or a failed image pull fails the
+  run loudly (`pytest.fail`, naming the image and error), never a silent skip.
+- **Prerequisites**: Docker, and about 2 GB of images (`pgvector/pgvector`, `milvusdb/milvus`,
+  `neo4j`, at the versions pinned in `docker-compose.yml`) that the first run pulls.
+- **Cleanup**: a normal run stops each container in its fixture's teardown; after a crash or
+  interrupt, Ryuk (on by default) removes the session's labelled containers within about 10s.
+  Rootless Docker or Docker Desktop may need `TESTCONTAINERS_RYUK_PRIVILEGED` or
+  `TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE` — the library's own overrides, not set by the suite.
+- **Failure logs**: if any test in the session failed, each provisioned service writes its
+  container logs to `.itest-logs/<service>.log` in fixture teardown before stopping (`.itest-logs/`
+  is gitignored). CI uploads it as the `itest-logs` artifact on failure.
+- The unit suite (`tests/unit`, the only path in pytest's `testpaths`) never needs Docker and
+  never reads `TREEWEFT_ITEST_CONTAINERS`.
 
 ## Constraints to respect
 

@@ -26,27 +26,21 @@ in, and none of these assertions need those columns. If `prompt_pins`
 cannot even be created (e.g. no CREATE privilege on the test DB), the whole
 module fails loudly at setup rather than skipping silently.
 
-Run against a standalone instance:
-
-    POSTGRES_TEST_URL=postgresql://user:pass@localhost:5432/treeweft_test \\
-      env -u PYTHONPATH python -m pytest tests/integration/test_prompt_pins_pg.py -v
-
-Skipped unless POSTGRES_TEST_URL is set — no service, no silent pass.
+Gets its Postgres address from the `postgres_url` fixture (conftest.py):
+explicit POSTGRES_TEST_URL, else a throwaway testcontainer when
+TREEWEFT_ITEST_CONTAINERS=1, else skipped.
 """
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 
 import asyncpg
 import pytest
 import pytest_asyncio
 
-URL = os.environ.get("POSTGRES_TEST_URL")
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not URL, reason="set POSTGRES_TEST_URL to run"),
     pytest.mark.asyncio,
 ]
 
@@ -68,10 +62,10 @@ CREATE TABLE IF NOT EXISTS prompt_pins (
 
 
 @pytest_asyncio.fixture
-async def pg_table():
+async def pg_table(postgres_url: str):
     """Ensures prompt_pins exists (idempotent), on its own short-lived
     connection so the DDL is committed before any test connection opens."""
-    conn = await asyncpg.connect(URL)
+    conn = await asyncpg.connect(postgres_url)
     try:
         await conn.execute(_CREATE_PROMPT_PINS)
     finally:
@@ -85,8 +79,8 @@ async def scope():
     return f"itest-{uuid.uuid4().hex[:8]}"
 
 
-async def _delete_scope(operation: str, scope_value: str) -> None:
-    conn = await asyncpg.connect(URL)
+async def _delete_scope(url: str, operation: str, scope_value: str) -> None:
+    conn = await asyncpg.connect(url)
     try:
         await conn.execute(
             "DELETE FROM prompt_pins WHERE operation = $1 AND scope = $2",
@@ -97,17 +91,19 @@ async def _delete_scope(operation: str, scope_value: str) -> None:
 
 
 class TestNotifyReachesSecondConnection:
-    async def test_upsert_notify_reaches_a_listening_connection(self, pg_table, scope):
+    async def test_upsert_notify_reaches_a_listening_connection(
+        self, pg_table, scope, postgres_url, monkeypatch
+    ):
         """Exercises the real PromptPinStore.upsert() path (via a pool this
         test initializes) — the load-bearing claim is that the NOTIFY it
         sends in the same transaction as the write is actually delivered to
         an independent listening connection, not just that the SQL runs."""
-        os.environ["DATABASE_URL"] = URL
+        monkeypatch.setenv("DATABASE_URL", postgres_url)
         from treeweft.adapters.postgresql import connection
         from treeweft.adapters.postgresql.prompt_pin_store import PromptPinStore
 
-        await connection.init_pool(URL)
-        listener_conn = await asyncpg.connect(URL)
+        await connection.init_pool(postgres_url)
+        listener_conn = await asyncpg.connect(postgres_url)
         received = asyncio.Event()
 
         def _on_notify(conn, pid, channel, payload):
@@ -126,12 +122,12 @@ class TestNotifyReachesSecondConnection:
         finally:
             await listener_conn.close()
             await connection.close_pool()
-            await _delete_scope("chunk_summary", scope)
+            await _delete_scope(postgres_url, "chunk_summary", scope)
 
 
 class TestCheckRejectsHydeOverride:
-    async def test_check_rejects_non_deployment_hyde_scope(self, pg_table, scope):
-        conn = await asyncpg.connect(URL)
+    async def test_check_rejects_non_deployment_hyde_scope(self, pg_table, scope, postgres_url):
+        conn = await asyncpg.connect(postgres_url)
         try:
             with pytest.raises(asyncpg.CheckViolationError):
                 await conn.execute(
@@ -143,15 +139,17 @@ class TestCheckRejectsHydeOverride:
             await conn.close()
             # Defensive: the CHECK should have blocked the insert entirely,
             # but clean up in case anything landed.
-            await _delete_scope("hyde", scope)
+            await _delete_scope(postgres_url, "hyde", scope)
 
 
 class TestConcurrentSeedRaceLeavesOneRow:
-    async def test_concurrent_on_conflict_do_nothing_leaves_one_row(self, pg_table, scope):
+    async def test_concurrent_on_conflict_do_nothing_leaves_one_row(
+        self, pg_table, scope, postgres_url
+    ):
         """The exact statement `PromptPinStore.seed_if_absent` runs, fired
         from two genuinely separate connections at once."""
-        conn_a = await asyncpg.connect(URL)
-        conn_b = await asyncpg.connect(URL)
+        conn_a = await asyncpg.connect(postgres_url)
+        conn_b = await asyncpg.connect(postgres_url)
         sql = (
             "INSERT INTO prompt_pins (operation, scope, version, updated_by) "
             "VALUES ($1, $2, $3, NULL) "
@@ -163,7 +161,7 @@ class TestConcurrentSeedRaceLeavesOneRow:
                 conn_b.execute(sql, "chunk_summary", scope, 4),
             )
 
-            check_conn = await asyncpg.connect(URL)
+            check_conn = await asyncpg.connect(postgres_url)
             try:
                 rows = await check_conn.fetch(
                     "SELECT version FROM prompt_pins WHERE operation = $1 AND scope = $2",
@@ -177,4 +175,4 @@ class TestConcurrentSeedRaceLeavesOneRow:
         finally:
             await conn_a.close()
             await conn_b.close()
-            await _delete_scope("chunk_summary", scope)
+            await _delete_scope(postgres_url, "chunk_summary", scope)

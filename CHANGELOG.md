@@ -82,6 +82,9 @@ Added, Fixed.
 
 ### Fixed
 
+- The index-schema check could report an unstamped Milvus collection as
+  empty when rows had been inserted moments before: its confirming query
+  used Milvus's default Bounded consistency. It now uses Strong.
 - The MCP tools `find_definition`, `find_callers` and `find_references`
   reported a validation error ("Input should be a valid list") when the
   indexer returned an error or could not be reached. They now report the

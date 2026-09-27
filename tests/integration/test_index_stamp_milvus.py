@@ -17,15 +17,12 @@ Skipped unless MILVUS_TEST_URI is set — no service, no silent pass.
 """
 from __future__ import annotations
 
-import os
 import uuid
 
 import pytest
 
-URI = os.environ.get("MILVUS_TEST_URI")
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not URI, reason="set MILVUS_TEST_URI to run"),
     pytest.mark.asyncio,
 ]
 
@@ -35,7 +32,7 @@ MODEL = "Qwen/Qwen3-Embedding-0.6B"
 
 
 @pytest.fixture
-def adapter(monkeypatch):
+def adapter(milvus_uri, monkeypatch):
     from pymilvus import MilvusClient
 
     from treeweft.adapters.milvus import vector_store as vs
@@ -45,13 +42,13 @@ def adapter(monkeypatch):
     # the same way the unit tests (test_milvus_index_stamp.py) do.
     monkeypatch.setattr(vs, "EMBEDDING_MODEL", MODEL)
 
-    raw = MilvusClient(uri=URI)
+    raw = MilvusClient(uri=milvus_uri)
     if raw.has_collection(COLL):
         raw.drop_collection(COLL)
 
-    host, _, port = URI.split("://", 1)[1].partition(":")
+    host, _, port = milvus_uri.split("://", 1)[1].partition(":")
     a = vs.MilvusAdapter(host=host, port=port or "19530", collection_name=COLL, vector_dim=DIM)
-    a.uri = URI  # the adapter assumes https; the local standalone is plain http
+    a.uri = milvus_uri  # the adapter assumes https; the local standalone is plain http
     yield a
     if raw.has_collection(COLL):
         raw.drop_collection(COLL)

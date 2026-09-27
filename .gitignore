@@ -28,6 +28,7 @@ Thumbs.db
 
 # Pytest
 .pytest_cache/
+.itest-logs/
 
 #benchmarking
 benchmarks/results

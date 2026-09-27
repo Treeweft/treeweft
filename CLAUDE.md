@@ -39,9 +39,13 @@ Treeweft is a GraphRAG system for code search: tree-sitter parsing, chonkie chun
 
 ```bash
 env -u PYTHONPATH python -m pytest tests/unit -q
+
+# Integration (needs Docker): self-provisions throwaway Postgres/Milvus/Neo4j at the
+# compose-pinned versions on loopback ports, removed afterwards.
+TREEWEFT_ITEST_CONTAINERS=1 env -u PYTHONPATH python -m pytest tests/integration -m slow -q
 ```
 
-Unit tests need no services. The `env -u PYTHONPATH` is required: a system `/opt/ros` entry on `PYTHONPATH` otherwise hijacks pytest plugin autoload and dies on `ModuleNotFoundError: lark`. Retrieval *quality* is validated by the benchmark harness, never by unit tests.
+Unit tests need no services. The `env -u PYTHONPATH` is required: a system `/opt/ros` entry on `PYTHONPATH` otherwise hijacks pytest plugin autoload and dies on `ModuleNotFoundError: lark`. `POSTGRES_TEST_URL`/`MILVUS_TEST_URI`/`NEO4J_TEST_URI` still point a run at services you manage and take precedence over the switch, per service. Retrieval *quality* is validated by the benchmark harness, never by unit tests.
 
 ## Invariants — do not violate without reading the linked notes
 

@@ -10,22 +10,19 @@ schema can start when nothing is pending.
 
 Every test runs in its own database, `tw_migtest_<hex>`, created here and
 dropped afterwards — the runner's tracking table has a fixed name, so
-sharing a database with another suite would mix their rows. The role in
-POSTGRES_TEST_URL therefore needs CREATEDB, and CREATEROLE for the
+sharing a database with another suite would mix their rows. The Postgres
+role therefore needs CREATEDB, and CREATEROLE for the
 restricted-role test; without them the module fails loudly at setup rather
 than skipping silently.
 
-Run against a standalone instance:
-
-    POSTGRES_TEST_URL=postgresql://user:pass@localhost:5432/treeweft_test \\
-      env -u PYTHONPATH python -m pytest tests/integration/test_migrations_pg.py -v
-
-Skipped unless POSTGRES_TEST_URL is set — no service, no silent pass.
+Gets its Postgres address from the `postgres_url` fixture (conftest.py):
+explicit POSTGRES_TEST_URL, else a throwaway testcontainer when
+TREEWEFT_ITEST_CONTAINERS=1, else skipped. A throwaway testcontainer's role is a
+superuser.
 """
 from __future__ import annotations
 
 import asyncio
-import os
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
@@ -33,16 +30,14 @@ import asyncpg
 import pytest
 import pytest_asyncio
 
-URL = os.environ.get("POSTGRES_TEST_URL")
 pytestmark = [
     pytest.mark.slow,
-    pytest.mark.skipif(not URL, reason="set POSTGRES_TEST_URL to run"),
     pytest.mark.asyncio,
 ]
 
 
-async def _admin(sql: str, url: str | None = None) -> None:
-    conn = await asyncpg.connect(url or URL)
+async def _admin(sql: str, url: str) -> None:
+    conn = await asyncpg.connect(url)
     try:
         await conn.execute(sql)
     finally:
@@ -59,15 +54,14 @@ def _with(url: str, *, database: str | None = None, userinfo: str | None = None)
 
 
 @pytest_asyncio.fixture
-async def database():
+async def database(postgres_url: str):
     """URL of a fresh empty database, dropped afterwards."""
-    assert URL is not None  # the skipif above
     name = f"tw_migtest_{uuid.uuid4().hex[:12]}"
-    await _admin(f'CREATE DATABASE "{name}"')
+    await _admin(f'CREATE DATABASE "{name}"', postgres_url)
     try:
-        yield _with(URL, database=name)
+        yield _with(postgres_url, database=name)
     finally:
-        await _admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        await _admin(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)', postgres_url)
 
 
 @pytest_asyncio.fixture
@@ -176,7 +170,7 @@ class TestShippedMigrations:
         assert sorted(first + second) == _shipped(pg)
         assert await _recorded(pg) == _shipped(pg)
 
-    async def test_two_runners_under_a_repeatable_read_default(self, database, pg):
+    async def test_two_runners_under_a_repeatable_read_default(self, database, pg, postgres_url):
         """The re-check under the lock must see the other runner's row even
         when the database defaults to an isolation level whose snapshot
         predates the wait for the lock."""
@@ -184,7 +178,8 @@ class TestShippedMigrations:
 
         name = urlsplit(database).path.lstrip("/")
         await _admin(
-            f'ALTER DATABASE "{name}" SET default_transaction_isolation = \'repeatable read\''
+            f'ALTER DATABASE "{name}" SET default_transaction_isolation = \'repeatable read\'',
+            postgres_url,
         )
         await connection.close_pool()  # the setting applies to new sessions
         await connection.init_pool(database)
@@ -198,7 +193,9 @@ class TestShippedMigrations:
 
 
 class TestRestrictedRole:
-    async def test_role_without_create_starts_when_nothing_is_pending(self, database, pg):
+    async def test_role_without_create_starts_when_nothing_is_pending(
+        self, database, pg, postgres_url
+    ):
         """Schema provisioned by an owner role, indexer connecting with
         read/write rights only: CREATE TABLE IF NOT EXISTS would be refused
         even though the tracking table exists."""
@@ -208,7 +205,7 @@ class TestRestrictedRole:
         await connection.close_pool()
 
         role = f"tw_migtest_role_{uuid.uuid4().hex[:12]}"
-        await _admin(f"CREATE ROLE {role} LOGIN PASSWORD '{role}'")
+        await _admin(f"CREATE ROLE {role} LOGIN PASSWORD '{role}'", postgres_url)
         try:
             await _admin(
                 "REVOKE CREATE ON SCHEMA public FROM PUBLIC;"
@@ -225,4 +222,4 @@ class TestRestrictedRole:
         finally:
             await connection.close_pool()
             await _admin(f"DROP OWNED BY {role}", database)
-            await _admin(f"DROP ROLE {role}")
+            await _admin(f"DROP ROLE {role}", postgres_url)
