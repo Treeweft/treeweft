@@ -68,13 +68,24 @@ values to scope subsequent searches.
 INDEXER_URL = require_env("INDEXER_URL")
 
 
+def _returns_list(fn) -> bool:
+    """True if `fn` is annotated to return a list. Annotations are resolved
+    first: under `from __future__ import annotations` they are strings, and
+    typing.get_origin("list[dict]") is None."""
+    try:
+        annotation = typing.get_type_hints(fn).get("return")
+    except Exception:  # a name in some annotation cannot be resolved
+        annotation = inspect.signature(fn).return_annotation
+    return annotation is list or typing.get_origin(annotation) is list
+
+
 def _requires_compatible_indexer(fn):
     """Run the lazy treeweft-mcp/indexer major-version check before the tool (ADR-004 §2).
 
     functools.wraps keeps the signature FastMCP builds the tool schema from, so
     the MCP contract is unchanged (tests/unit/test_mcp_compat.py checks this).
     """
-    returns_list = typing.get_origin(inspect.signature(fn).return_annotation) is list
+    returns_list = _returns_list(fn)
 
     @functools.wraps(fn)
     async def wrapper(*args, **kwargs):
@@ -1093,7 +1104,7 @@ async def find_definition(
             entities = resp.json()
             return [_neighbor_to_dict(_parse_neighbor(e)) for e in entities]
     except httpx.HTTPError as exc:
-        return {"error": _indexer_error(exc)}
+        return [{"error": _indexer_error(exc)}]
 
 
 @mcp.tool(
@@ -1119,7 +1130,7 @@ async def find_callers(
             callers = resp.json()
             return [_neighbor_to_dict(_parse_neighbor(c)) for c in callers]
     except httpx.HTTPError as exc:
-        return {"error": _indexer_error(exc)}
+        return [{"error": _indexer_error(exc)}]
 
 
 @mcp.tool(
@@ -1145,4 +1156,4 @@ async def find_references(
             refs = resp.json()
             return [_neighbor_to_dict(_parse_neighbor(r)) for r in refs]
     except httpx.HTTPError as exc:
-        return {"error": _indexer_error(exc)}
+        return [{"error": _indexer_error(exc)}]

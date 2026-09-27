@@ -1,5 +1,7 @@
 """treeweft-mcp detects an incompatible indexer lazily, per call (ADR-004 §2)."""
 import asyncio
+import json
+import typing  # noqa: F401  (named in a string annotation below)
 import logging
 
 import httpx
@@ -252,6 +254,162 @@ async def test_reindex_required_409_reaches_the_agent_with_the_rebuild_pointer(f
     assert result == {"error": f"Indexer returned HTTP 409: {body['detail']}"}
     assert "/index/rebuild" in result["error"]
     assert "unreachable" not in result["error"].lower()
+
+
+# ── an error has the shape the tool's output schema declares ─────────
+# FastMCP validates what a tool returns against its output schema. A tool
+# declared `-> list[dict]` that returns `{"error": ...}` does not reach the
+# agent as that error: the agent gets "1 validation error ... Input should be
+# a valid list".
+
+def _tools() -> dict:
+    from treeweft.application import mcp_server
+
+    return {t.name: t for t in asyncio.run(mcp_server.mcp.list_tools())}
+
+
+def _returns_list(tool) -> bool:
+    result = (tool.outputSchema or {}).get("properties", {}).get("result", {})
+    return result.get("type") == "array"
+
+
+def _arguments(tool) -> dict:
+    """A value for each required argument, by its declared type."""
+    values = {"string": "x", "integer": 1, "number": 1.0, "boolean": False, "array": [], "object": {}}
+    properties = tool.inputSchema.get("properties", {})
+    return {
+        name: values[properties[name].get("type", "string")]
+        for name in tool.inputSchema.get("required", [])
+    }
+
+
+TOOLS = _tools()  # read once, at import: asyncio.run() cannot run inside a test's event loop
+LIST_TOOLS = sorted(name for name, tool in TOOLS.items() if _returns_list(tool))
+ALL_TOOLS = sorted(TOOLS)
+
+
+def test_the_list_returning_tools_are_the_ones_expected():
+    assert LIST_TOOLS == [
+        "find_callers", "find_definition", "find_references",
+        "list_index_jobs", "list_indexed_sources",
+    ]
+
+
+def _error_of(result) -> str:
+    """The error an agent reads in the result of a tool call: the structured
+    result where the tool has an output schema, else the JSON text."""
+    if isinstance(result, tuple):
+        _content, structured = result
+        payload = structured["result"] if set(structured) == {"result"} else structured
+    else:
+        payload = json.loads(result[0].text)
+    if isinstance(payload, list):
+        assert len(payload) == 1, payload
+        payload = payload[0]
+    return payload["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", ALL_TOOLS)
+async def test_major_mismatch_reaches_the_agent_from_every_tool(name, fake_http, fresh_state):
+    from treeweft.application import mcp_server
+
+    script, calls = fake_http
+    script["GET"] = _resp(200, {"version": "99.0.0"})
+    tool = TOOLS[name]
+
+    result = await mcp_server.mcp.call_tool(name, _arguments(tool))
+
+    assert _error_of(result).startswith("Incompatible indexer: indexer is 99.0.0")
+    assert [m for m, _ in calls] == ["GET"]  # only the health check was made
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", LIST_TOOLS)
+async def test_indexer_error_reaches_the_agent_from_every_list_tool(name, fake_http, fresh_state):
+    from treeweft import versions
+    from treeweft.application import mcp_server
+
+    script, _ = fake_http
+    failure = _resp(503, {"detail": "graph store unavailable"})
+    script["GET"] = [_resp(200, {"status": "ok", "version": versions.SOURCE_VERSION}), failure]
+    script["POST"] = failure
+    tool = TOOLS[name]
+
+    result = await mcp_server.mcp.call_tool(name, _arguments(tool))
+
+    assert _error_of(result) == "Indexer returned HTTP 503: graph store unavailable"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", LIST_TOOLS)
+async def test_list_tool_called_directly_returns_a_list_on_an_indexer_error(name, fake_http, fresh_state):
+    from treeweft import versions
+    from treeweft.application import mcp_server
+
+    script, _ = fake_http
+    script["GET"] = [
+        _resp(200, {"status": "ok", "version": versions.SOURCE_VERSION}),
+        _resp(503, {"detail": "graph store unavailable"}),
+    ]
+
+    result = await getattr(mcp_server, name)(**_arguments(TOOLS[name]))
+
+    assert result == [{"error": "Indexer returned HTTP 503: graph store unavailable"}]
+
+
+# ── the decorator reads the return type however the annotation is stored ──
+
+async def _annotated_with_a_string() -> "list[dict]":
+    return []
+
+
+async def _annotated_with_a_string_dict() -> "dict":
+    return {}
+
+
+async def _annotated_with_bare_list() -> list:
+    return []
+
+
+async def _annotated_with_typing_list() -> "typing.List[dict]":
+    return []
+
+
+async def _not_annotated():
+    return {}
+
+
+async def _annotated_with_an_unknown_name() -> "NoSuchType":  # noqa: F821
+    return {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fn,expected", [
+    (_annotated_with_a_string, list),
+    (_annotated_with_bare_list, list),
+    (_annotated_with_typing_list, list),
+    (_annotated_with_a_string_dict, dict),
+    (_not_annotated, dict),
+    (_annotated_with_an_unknown_name, dict),
+], ids=lambda v: getattr(v, "__name__", None))
+async def test_error_shape_follows_the_return_type_with_postponed_annotations(
+    fn, expected, fake_http, fresh_state
+):
+    """`from __future__ import annotations` stores every annotation as a
+    string. typing.get_origin("list[dict]") is None, so reading the raw
+    annotation would send a dict from a tool declared to return a list."""
+    import typing  # noqa: F401  (named in an annotation above)
+    from treeweft.application import mcp_server
+
+    script, _ = fake_http
+    script["GET"] = _resp(200, {"version": "99.0.0"})
+
+    result = await mcp_server._requires_compatible_indexer(fn)()
+
+    assert type(result) is expected
+    error = result[0]["error"] if expected is list else result["error"]
+    assert error.startswith("Incompatible indexer")
 
 
 def test_every_tool_is_wrapped_and_its_schema_is_unchanged():

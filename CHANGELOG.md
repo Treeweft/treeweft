@@ -76,6 +76,10 @@ Added, Fixed.
 
 ### Fixed
 
+- The MCP tools `find_definition`, `find_callers` and `find_references`
+  reported a validation error ("Input should be a valid list") when the
+  indexer returned an error or could not be reached. They now report the
+  indexer's error, as the other tools do (#36).
 - The contract check (`tests/unit/test_contracts.py`) demanded a major
   version bump for compatible API changes: a request field or tool
   argument made optional (`Optional[...]`), a looser limit on one
