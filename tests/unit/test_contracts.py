@@ -55,9 +55,13 @@ def test_output_no_longer_guaranteed_is_breaking():
     assert kinds(c.diff_schema(OBJ({"a": STR}, ["a"]), OBJ({"a": STR}), "r", "output")) == [("breaking", "r.a")]
 
 
-def test_enum_values_removed_is_breaking_added_is_additive():
+@pytest.mark.parametrize("direction", ["input", "output"])
+def test_enum_values_removed_is_breaking_added_is_additive(direction):
+    """In both directions, by policy (ADR-004 §4, issue #32): clients must
+    accept an enum value they do not know, so a value added to a response
+    enum does not need a major bump, although it widens the output."""
     old, new = {"type": "string", "enum": ["a", "b"]}, {"type": "string", "enum": ["b", "c"]}
-    assert kinds(c.diff_schema(old, new, "e", "input")) == [("additive", "e"), ("breaking", "e")]
+    assert kinds(c.diff_schema(old, new, "e", direction)) == [("additive", "e"), ("breaking", "e")]
 
 
 def test_default_change_is_additive():
