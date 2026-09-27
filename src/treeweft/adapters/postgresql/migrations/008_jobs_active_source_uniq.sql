@@ -6,8 +6,10 @@
 -- Cleanup first: any pre-existing duplicates (queued/running rows sharing
 -- a source_id) get collapsed — keep the oldest by start_time, mark the
 -- rest as failed-by-supersede, and drop their queue rows.
-
-BEGIN;
+--
+-- No BEGIN/COMMIT here: run_migrations() runs every migration in one
+-- transaction with its tracking row, and a COMMIT in this file would end
+-- that transaction early. ON COMMIT DROP below fires on the runner's commit.
 
 -- Pre-stage the ids to supersede so the DELETE and UPDATE see the same
 -- snapshot. Excludes source_id = '' (legacy / non-source jobs).
@@ -44,5 +46,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS jobs_active_source_uniq
     ON jobs (source_id)
  WHERE status IN ('queued', 'running')
    AND source_id <> '';
-
-COMMIT;

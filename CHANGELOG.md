@@ -66,6 +66,22 @@ Added, Fixed.
   often each indexer process reloads the pins. Startup fails, naming the
   pin and the versions this build registers, if a stored pin names a
   version it does not know (for example after a downgrade).
+- A failed Postgres migration now stops the indexer at startup. It used to
+  log the error and start anyway. The message names the migration file and
+  the database error; fix the cause and restart, and the migrations resume
+  at the one that failed.
+
+### Fixed
+
+- A failed Postgres migration was logged and ignored: the migrations after
+  it were skipped and the indexer started on a partial schema (#28). Each
+  migration is now committed in one transaction with its tracking row, so
+  a migration is never recorded without being applied or applied without
+  being recorded.
+- Indexer processes started at the same time no longer race to apply the
+  same migration; they take turns under a Postgres advisory lock.
+- Migrations are no longer cut off by the 10-second query timeout of the
+  connection pool; they get one hour.
 
 ## 1.0.0 — 2026.9.24
 
