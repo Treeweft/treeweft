@@ -109,11 +109,18 @@ services:
       - POSTGRES_DB=${POSTGRES_DB:-treeweft}
     volumes:
       - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
     restart: unless-stopped
 
   # Self-contained local infra for the quickstart (COMPOSE_PROFILES=local-infra).
-  # Production/dev deployments that already run Neo4j and Milvus elsewhere just
-  # drop the profile and point NEO4J_URI / MILVUS_URI at them in .env.
+  # Deployments that already run Neo4j and Milvus elsewhere drop the profile
+  # and set them in .env: NEO4J_URI / MILVUS_* for a host-run indexer, and
+  # DOCKER_NEO4J_URI / DOCKER_MILVUS_* for the indexer container, which
+  # otherwise looks for these services.
   neo4j:
     profiles: ["local-infra"]
     image: neo4j:5-community
@@ -124,10 +131,19 @@ services:
       - NEO4J_AUTH=${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:-treeweft_pass}
     volumes:
       - neo4j-data:/data
+    # Ready means Bolt answers a query, which is what the indexer needs: it
+    # creates the graph constraints and indexes once, at startup.
+    healthcheck:
+      test: ["CMD-SHELL", "cypher-shell -u \"$${NEO4J_AUTH%%/*}\" -p \"$${NEO4J_AUTH#*/}\" 'RETURN 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 10s
     restart: unless-stopped
 
   # Milvus standalone with embedded etcd + local storage (single container,
-  # no etcd/minio sidecars). Plain HTTP — set MILVUS_URI=http://localhost:19530.
+  # no etcd/minio sidecars). Plain HTTP: a host-run indexer needs
+  # MILVUS_URI=http://localhost:19530; the indexer container uses http://milvus:19530.
   milvus:
     profiles: ["local-infra"]
     image: milvusdb/milvus:v2.5.4
@@ -164,41 +180,69 @@ services:
       dockerfile: Dockerfile.indexer
     ports:
       - "${INDEXER_PORT:-8001}:8001"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Every setting in .env reaches the indexer (#48). It used to receive only
+    # the variables listed under `environment:`, so it silently ignored most
+    # of .env and could not even start (MILVUS_HOST, MILVUS_PORT and
+    # EMBEDDING_URL were never passed).
+    env_file:
+      - path: .env
+        required: false
+    # `environment:` wins over env_file. It replaces the service addresses,
+    # which in .env are written for a host-run indexer (localhost) and are
+    # wrong inside this container. Each defaults to the compose service; set
+    # the DOCKER_* variable in .env to use a service elsewhere.
     environment:
       - DATABASE_URL=postgresql://${POSTGRES_USER:-treeweft}:${POSTGRES_PASSWORD:-treeweft_pass}@postgres:5432/${POSTGRES_DB:-treeweft}
-      - MILVUS_URI=${MILVUS_URI?MILVUS_URI must be set}
-      - NEO4J_URI=${NEO4J_URI?NEO4J_URI must be set}
+      - MILVUS_URI=${DOCKER_MILVUS_URI:-http://milvus:19530}
+      - MILVUS_HOST=${DOCKER_MILVUS_HOST:-milvus}
+      - MILVUS_PORT=${DOCKER_MILVUS_PORT:-19530}
+      - NEO4J_URI=${DOCKER_NEO4J_URI:-bolt://neo4j:7687}
       - NEO4J_USER=${NEO4J_USER:-neo4j}
       - NEO4J_PASSWORD=${NEO4J_PASSWORD:-treeweft_pass}
-      - LLM_URL=${LLM_URL?LLM_URL must be set}
+      - EMBEDDING_URL=${DOCKER_EMBEDDING_URL:-http://tei-embedding:80}
+      - EMBEDDING_URLS=${DOCKER_EMBEDDING_URLS:-}
+      - EMBEDDING_FALLBACK_URL=${DOCKER_EMBEDDING_FALLBACK_URL:-}
+      - EMBEDDING_FALLBACK_URLS=${DOCKER_EMBEDDING_FALLBACK_URLS:-}
+      # Must resolve to the in-Docker service. The .env default
+      # (localhost:8081) is unreachable from inside this container; rerank
+      # then fails silently and graph_rescore zeroes every score.
+      - RERANKER_URL=${DOCKER_RERANKER_URL:-http://tei-reranker:80}
+      # An LLM on the host: DOCKER_LLM_URL=http://host.docker.internal:<port>/v1
+      - LLM_URL=${DOCKER_LLM_URL:-${LLM_URL?LLM_URL must be set}}
       - LLM_MODEL=${LLM_MODEL?LLM_MODEL must be set}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${DOCKER_OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
+      # The container binds all its interfaces (Dockerfile.indexer CMD);
+      # publishing is decided by `ports:` above.
+      - INDEXER_HOST=0.0.0.0
+      - RUST_MIN_STACK=8388608
+      # Container defaults that differ from the code's; .env still wins.
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
       - VECTOR_DIM=${VECTOR_DIM:-768}
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-jinaai/jina-embeddings-v2-base-code}
-      - EMBEDDING_URLS=${EMBEDDING_URLS:-}
-      - EMBEDDING_FALLBACK_URLS=${EMBEDDING_FALLBACK_URLS:-}
-      # Reranker must resolve to the in-Docker service. The .env default
-      # (localhost:8081) targets a host-based indexer and is unreachable from
-      # inside this container; rerank then fails silently and graph_rescore
-      # zeroes every score (final_score = ALPHA*0 + ...).
-      - RERANKER_URL=${DOCKER_RERANKER_URL:-http://tei-reranker:80}
-      - VECTOR_STORE=${VECTOR_STORE:-milvus}
       - INDEX_CONCURRENCY=${INDEX_CONCURRENCY:-8}
       - INDEX_FILE_CONCURRENCY=${INDEX_FILE_CONCURRENCY:-24}
       - LLM_CONCURRENCY=${LLM_CONCURRENCY:-8}
-      - LLM_SEARCH_RESERVED_SLOTS=${LLM_SEARCH_RESERVED_SLOTS:-}
       - USE_SUMMARY_VECTOR=${USE_SUMMARY_VECTOR:-1}
       - JOB_QUEUE_POLL_INTERVAL=${JOB_QUEUE_POLL_INTERVAL:-1.0}
       - NEO4J_OP_TIMEOUT_SECONDS=${NEO4J_OP_TIMEOUT_SECONDS:-30}
-      - RUST_MIN_STACK=8388608
-      - AUTH_ENABLED=${AUTH_ENABLED:-true}
-      - AUTH_SECRET_KEY=${AUTH_SECRET_KEY:-}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://otel-collector:4317}
       - OTEL_TRACES_SAMPLER=${OTEL_TRACES_SAMPLER:-always_on}
-      - STRUCTURED_LOG_FILE=${STRUCTURED_LOG_FILE:-}
     volumes:
       - ${BENCHMARK_REPOS_DIR:-./benchmark-repos}:/data/repos:ro
+    # Wait for the stores to be ready, not just started: the indexer creates
+    # the Neo4j constraints and indexes once, at startup, and only logs a
+    # failure. required: false lets it start without the local-infra profile,
+    # with Neo4j and Milvus elsewhere.
     depends_on:
-      - postgres
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+        required: false
+      milvus:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
 
   mcp-server:
