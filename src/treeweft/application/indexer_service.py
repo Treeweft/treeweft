@@ -823,6 +823,7 @@ async def handle_index_file(req: IndexFileRequest, request: Request):
         job["source_path"] = str(path)
         job["created_by"] = _caller_id(request)
         await _attach_group(job, job["created_by"])
+        runners.set_request_options(job, skip_graph=req.skip_graph)
         return job
 
     if active is not None:  # active["kind"] == "resummarize" (finding #6)
@@ -881,8 +882,12 @@ async def handle_index_directory(req: IndexDirectoryRequest, request: Request):
         job["source_path"] = directory
         job["created_by"] = _caller_id(request)
         await _attach_group(job, job["created_by"])
-        if FEATURE_SKIP_PATTERNS and req.skip_patterns:
-            job["skip_patterns"] = list(req.skip_patterns)
+        runners.set_request_options(
+            job,
+            pattern=req.pattern,
+            skip_patterns=req.skip_patterns if FEATURE_SKIP_PATTERNS else None,
+            skip_graph=req.skip_graph,
+        )
         return job
 
     if active is not None:  # active["kind"] == "resummarize" (finding #6)
@@ -954,8 +959,11 @@ async def handle_index_repo(req: IndexRepoRequest, request: Request):
         job["source_branch"] = req.branch or ""
         job["created_by"] = _caller_id(request)
         await _attach_group(job, job["created_by"], req.group_id)
-        if FEATURE_SKIP_PATTERNS and req.skip_patterns:
-            job["skip_patterns"] = list(req.skip_patterns)
+        runners.set_request_options(
+            job,
+            skip_patterns=req.skip_patterns if FEATURE_SKIP_PATTERNS else None,
+            skip_graph=req.skip_graph,
+        )
         return job
 
     if active is not None:  # active["kind"] == "resummarize" (finding #6)

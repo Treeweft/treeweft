@@ -52,7 +52,7 @@ from typing import Any, Coroutine
 import asyncio
 import os
 
-_SUMMARIZING_KINDS = frozenset({"repo"})
+_SUMMARIZING_KINDS = frozenset({"repo", "directory"})
 
 
 # The chunker singleton. Lived in indexer_service, which this leaf may not
@@ -123,6 +123,42 @@ def _persist_job_sync(job_dict: dict) -> None:
     asyncio.ensure_future(_persist_job(job_dict))
 
 
+def set_request_options(
+    job: dict,
+    *,
+    pattern: str | None = None,
+    skip_patterns: list[str] | None = None,
+    skip_graph: bool = False,
+) -> None:
+    """Keep an index request's options with its job.
+
+    Index jobs run from the queue: a worker rebuilds each job from its stored
+    row (`dispatch_job`), and only stored fields survive. These options are
+    not Job fields, so they go in the payload, which is stored. They are also
+    set on `job` itself, for a job run straight from this dict (#51).
+    """
+    payload = job.get("payload") or {}
+    if pattern is not None:
+        payload["pattern"] = pattern
+    if skip_patterns:
+        payload["skip_patterns"] = list(skip_patterns)
+        job["skip_patterns"] = list(skip_patterns)
+    if skip_graph:
+        payload["skip_graph"] = True
+        job["skip_graph"] = True
+    job["payload"] = payload
+
+
+def _restore_request_options(jd: dict) -> str:
+    """Put the options `set_request_options` stored back on a rebuilt job,
+    and return its pattern ("**/*", every file, when none was given)."""
+    payload = jd.get("payload") or {}
+    if payload.get("skip_patterns"):
+        jd["skip_patterns"] = list(payload["skip_patterns"])
+    jd["skip_graph"] = bool(payload.get("skip_graph", False))
+    return payload.get("pattern") or "**/*"
+
+
 def dispatch_job(job) -> "Coroutine | None":
     """Reconstruct a runner coroutine for a persisted Job row.
 
@@ -144,6 +180,7 @@ def dispatch_job(job) -> "Coroutine | None":
         target = jd.get("source_path") or jd.get("source")
         if not target or not os.path.exists(target):
             return None
+        _restore_request_options(jd)
         _state._jobs[job.id] = jd
         return _run_index_file_job(jd, target)
 
@@ -151,10 +188,12 @@ def dispatch_job(job) -> "Coroutine | None":
         target = jd.get("source_path") or jd.get("source")
         if not target or not os.path.isdir(target):
             return None
+        pattern = _restore_request_options(jd)
         _state._jobs[job.id] = jd
-        return _run_index_directory_job(jd, target, "**/*")
+        return _run_index_directory_job(jd, target, pattern)
 
     if kind == "repo":
+        _restore_request_options(jd)
         rebuilt_req = _RepoJobSpec(
             path=jd.get("source_path") or None,
             url=jd.get("source_url") or None,
@@ -496,11 +535,19 @@ async def _graph_index_file(file_path: str, source_id: str):
             await graph_store.store_graph(entities, relationships, source_id=source_id)
 
 
-def _collect_files(path: str, skip_patterns: list[str] | None = None) -> list[str]:
+def _collect_files(
+    path: str, skip_patterns: list[str] | None = None, pattern: str | None = None,
+) -> list[str]:
+    """Supported files under `path`, hidden directories skipped. `pattern`
+    (a `Path.rglob` glob, e.g. `**/*.py`) keeps only the files it matches."""
     import fnmatch
     # Includes markdown extensions (.md/.markdown/.mdx) — see SUPPORTED_EXTENSIONS.
     supported_exts = SUPPORTED_EXTENSIONS
     patterns = (skip_patterns or []) if FEATURE_SKIP_PATTERNS else []
+    wanted = (
+        None if pattern in (None, "", "**/*", "**")
+        else {os.path.normpath(p) for p in Path(path).rglob(pattern)}
+    )
     files = []
     for root, dirs, fnames in os.walk(path):
         dirs[:] = [d for d in dirs if not d.startswith(".")]
@@ -511,6 +558,8 @@ def _collect_files(path: str, skip_patterns: list[str] | None = None) -> list[st
             if ext not in supported_exts:
                 continue
             full = os.path.join(root, fname)
+            if wanted is not None and os.path.normpath(full) not in wanted:
+                continue
             if patterns:
                 rel = os.path.relpath(full, path)
                 if any(fnmatch.fnmatch(fname, p) or fnmatch.fnmatch(rel, p) for p in patterns):
@@ -687,7 +736,7 @@ async def _process_file(
 
 
 async def _walk_and_index(
-    path: str, source_id: str, job: dict, skip_count: int = 0,
+    path: str, source_id: str, job: dict, skip_count: int = 0, pattern: str | None = None,
 ) -> tuple[int, int]:
     """Index every supported file under `path` with bounded concurrency.
 
@@ -710,7 +759,7 @@ async def _walk_and_index(
     """
     from treeweft.retriever import list_indexed_paths
 
-    files = _collect_files(path, skip_patterns=job.get("skip_patterns"))
+    files = _collect_files(path, skip_patterns=job.get("skip_patterns"), pattern=pattern)
     job["total_files"] = len(files)
 
     if skip_count > 0:
@@ -822,7 +871,8 @@ async def _walk_and_index(
     async with persist_lock:
         await _persist_job(job)
     _log_progress(job, force=True)
-    return total_chunks_ref[0], len(files)
+    # Every file of the source, including those a resume skipped as done.
+    return total_chunks_ref[0], job["total_files"]
 
 
 async def _reset_source(source_id: str):
@@ -950,6 +1000,7 @@ async def _finalize_job(job: dict, total_chunks: int, total_files: int, message:
         # re-enqueue the same kind. A graph-only re-pass must NOT relabel
         # the source — preserve the existing kind for it.
         job_kind = job.get("kind") or "repo"
+        existing = None
         if job_kind in ("repo", "directory", "file"):
             source_kind = job_kind
         else:
@@ -972,7 +1023,12 @@ async def _finalize_job(job: dict, total_chunks: int, total_files: int, message:
                 datetime.fromtimestamp(job["finished_at"], tz=timezone.utc)
             ),
         )
-        await _state._source_repo.save(record)
+        # A graph-only job leaves an existing record alone: the chunk pass owns
+        # it (file and chunk counts, path, kind), and the graph job has set
+        # graph_indexed itself, only if a file succeeded. Rewriting it here
+        # zeroed chunk_count and overrode that rule (#51).
+        if not (job_kind == "graph" and existing is not None):
+            await _state._source_repo.save(record)
     except Exception:
         pass  # Degraded mode — graph store is the primary persistence
 
@@ -980,7 +1036,7 @@ async def _finalize_job(job: dict, total_chunks: int, total_files: int, message:
     kind = job.get("kind") or "repo"
     if kind in ("file", "directory", "repo"):
         try:
-            # Only repo jobs summarize (via _process_file); file and directory
+            # Repo and directory jobs summarize (via _process_file); file
             # jobs insert without summary vectors, so they record "unknown".
             if kind in _SUMMARIZING_KINDS and USE_SUMMARY_VECTOR and summary_vectors_supported():
                 # FR-010: the payload copy is authoritative. A resumed job's
@@ -1275,7 +1331,8 @@ async def _run_index_file_job(job: dict, file_path: str):
             embeddings = await embed(texts)
             await init_collection()
             await insert_chunks(chunks, embeddings)
-            await _graph_index_file(file_path, job["source_id"])
+            if not job.get("skip_graph"):
+                await _graph_index_file(file_path, job["source_id"])
             job["processed_files"] = 1
             job["committed_files"] = 1
             job["total_chunks"] = len(chunks)
@@ -1291,6 +1348,10 @@ async def _run_index_file_job(job: dict, file_path: str):
 
 
 async def _run_index_directory_job(job: dict, directory: str, pattern: str):
+    """Index a directory through `_walk_and_index`, like `/index-repo`: each
+    file is chunked, summarized, embedded and added to the graph. This job
+    used to have its own loop that did only the chunks and embeddings, while
+    still recording the source as graph-indexed (#51)."""
     resuming = job.pop("_resume", False)
     skip_count = job.get("committed_files", 0) if resuming else 0
     job_attrs = {
@@ -1307,128 +1368,13 @@ async def _run_index_directory_job(job: dict, directory: str, pattern: str):
         await _resolve_summary_version(job)
         if not resuming:
             await _reset_source(job["source_id"])
-            job["committed_files"] = 0
-            job["processed_files"] = 0
-            job["total_chunks"] = 0
             job["commit_sha"] = _git_head_sha(directory)
-        root = Path(directory)
-        files = []
-        for fp in root.rglob(pattern):
-            if fp.is_dir() or fp.name.startswith("."):
-                continue
-            if detect_language(str(fp)):
-                files.append(str(fp))
-        files.sort()
-        job["total_files"] = len(files)
-        if resuming:
-            job["processed_files"] = min(skip_count, len(files))
+        if not os.path.isdir(directory):
+            raise FileNotFoundError(f"Directory not found: {directory}")
 
-        total_chunks = job.get("total_chunks", 0) if resuming else 0
-        chunk_buffer: list[dict] = []
-        files_in_buffer: list[str] = []
-
-        async def _flush_buffer():
-            nonlocal total_chunks
-            if not chunk_buffer:
-                if files_in_buffer:
-                    job["committed_files"] = job.get("committed_files", 0) + len(files_in_buffer)
-                    files_in_buffer.clear()
-                    _persist_job_sync(job)
-                return
-            try:
-                # Batch flush spans are intentionally root traces (they span
-                # multiple files), tagged with job_id so they're discoverable
-                # alongside the per-file traces in TraceQL.
-                with tracer.start_as_current_span(
-                    "embed.chunks",
-                    attributes={"treeweft.chunk_count": len(chunk_buffer), **job_attrs},
-                ):
-                    texts = [c["text"] for c in chunk_buffer]
-                    embeddings = await embed(texts)
-                metrics.chunks_embedded.inc(len(chunk_buffer))
-                with tracer.start_as_current_span(
-                    "milvus.init_collection", attributes=job_attrs,
-                ):
-                    await init_collection()
-                with tracer.start_as_current_span(
-                    "milvus.insert_chunks",
-                    attributes={"treeweft.row_count": len(chunk_buffer), **job_attrs},
-                ):
-                    await insert_chunks(chunk_buffer, embeddings)
-                total_chunks += len(chunk_buffer)
-                job["committed_files"] = job.get("committed_files", 0) + len(files_in_buffer)
-                job["total_chunks"] = total_chunks
-                chunk_buffer.clear()
-                files_in_buffer.clear()
-                _persist_job_sync(job)
-            except Exception as exc:
-                # Batch flush failure: log, record files as errored, discard the
-                # batch, and continue — do NOT fail the entire job.
-                logger.exception(
-                    "[job %s] batch flush failed (%d chunks, %d files): %s — discarding batch",
-                    job.get("job_id", "?"), len(chunk_buffer), len(files_in_buffer), exc,
-                )
-                job["errors"] = job.get("errors", 0) + len(files_in_buffer)
-                chunk_buffer.clear()
-                files_in_buffer.clear()
-                _persist_job_sync(job)
-
-        for file_path in files[skip_count:]:
-            job["current_file"] = file_path
-            with tracer.start_as_current_span(
-                "index_file",
-                attributes={
-                    "treeweft.file_path": file_path,
-                    **job_attrs,
-                },
-            ) as file_span:
-                with tracer.start_as_current_span(
-                    "parse_and_chunk",
-                    attributes={"treeweft.file_path": file_path},
-                ) as chunk_span:
-                    try:
-                        # CPU-bound tree-sitter parse + chunk. Called inline
-                        # from this async runner it froze the whole event
-                        # loop for its duration — search, /health, the queue
-                        # poller and the webhook endpoint all stall
-                        # (CWE-400), and this one is inside a per-file loop,
-                        # so indexing a repo stalled search for the entire
-                        # job. Safe in a thread: _make_chunker builds a fresh
-                        # parser per call, which is why _process_file already
-                        # does exactly this.
-                        chunks = await asyncio.to_thread(
-                            indexer.parse_and_chunk, file_path
-                        )
-                    except Exception as exc:
-                        _mark_span_error(chunk_span, exc)
-                        _mark_span_error(file_span, exc)
-                        logger.warning("Failed to chunk %s: %s", file_path, exc)
-                        job["processed_files"] += 1
-                        job["errors"] = job.get("errors", 0) + 1
-                        files_in_buffer.append(file_path)
-                        _log_progress(job)
-                        continue
-                    chunk_span.set_attribute("treeweft.chunk_count", len(chunks) if chunks else 0)
-                if not chunks:
-                    file_span.set_attribute("treeweft.chunk_count", 0)
-                    job["processed_files"] += 1
-                    files_in_buffer.append(file_path)
-                    _log_progress(job)
-                    continue
-                for c in chunks:
-                    c["source_id"] = job["source_id"]
-                chunk_buffer.extend(chunks)
-                files_in_buffer.append(file_path)
-                job["processed_files"] += 1
-                job["total_chunks"] = total_chunks + len(chunk_buffer)
-                file_span.set_attribute("treeweft.chunk_count", len(chunks))
-                _log_progress(job)
-            if len(chunk_buffer) >= MAX_BATCH_SIZE:
-                await _flush_buffer()
-
-        await _flush_buffer()
-        metrics.files_processed.inc(job["processed_files"])
-        _log_progress(job, force=True)
+        total_chunks, total_files = await _walk_and_index(
+            directory, job["source_id"], job, skip_count=skip_count, pattern=pattern,
+        )
 
         if total_chunks > 0:
             try:
@@ -1445,8 +1391,8 @@ async def _run_index_directory_job(job: dict, directory: str, pattern: str):
                     "post-index signals failed for source %s", job["source_id"],
                 )
         await _finalize_job(
-            job, total_chunks, len(files),
-            f"Indexed {total_chunks} chunks from {len(files)} files",
+            job, total_chunks, total_files,
+            f"Indexed {total_chunks} chunks from {total_files} files",
         )
     except Exception as exc:
         with tracer.start_as_current_span("job.failed", attributes=job_attrs) as err_span:
@@ -1579,7 +1525,7 @@ async def _run_index_graph_job(job: dict, source_id: str):
                 f"chunks-index it first before running /index-graph."
             )
         target_path = record.path
-        if not target_path or not os.path.isdir(target_path):
+        if not target_path or not os.path.exists(target_path):
             raise FileNotFoundError(
                 f"Source path {target_path!r} not accessible — cannot graph-index."
             )
@@ -1587,9 +1533,20 @@ async def _run_index_graph_job(job: dict, source_id: str):
         # Idempotent re-run: drop the prior graph for this source.
         await graph_store.delete_source(source_id)
 
-        # Re-collect files. The skip-patterns flag, if any, was stored on
-        # the original repo job — for graph jobs we honor it as well.
-        files = _collect_files(target_path, skip_patterns=job.get("skip_patterns"))
+        # A file source is its one file. Otherwise re-collect, then keep the
+        # files the chunk pass indexed: its pattern and skip patterns live on
+        # that job, not on the source, and a graph entry for a file with no
+        # chunks points nowhere. A store that tracks no paths (ChromaDB)
+        # reports none; then every file is graphed.
+        if os.path.isfile(target_path):
+            files = [target_path]
+        else:
+            files = _collect_files(target_path, skip_patterns=job.get("skip_patterns"))
+        from treeweft.retriever import list_indexed_paths
+
+        indexed = await list_indexed_paths(source_id)
+        if indexed:
+            files = [f for f in files if f in indexed]
         job["total_files"] = len(files)
         job["processed_files"] = 0
         job["committed_files"] = 0

@@ -130,8 +130,9 @@ UPDATE source_records SET summary_prompt_version = 3
   job never changes it: it re-summarizes only the changed files, so advancing
   the version would report a stale source as current (amended 2026-09-25,
   spec 002 FR-010). A clean full job with summary vectors off, or on a store
-  without them, sets it to `NULL`, as do file and directory jobs, which insert
-  chunks without summary vectors (only repo jobs summarize). A graph-only job never changes it. `NULL` means
+  without them, sets it to `NULL`, as do file jobs, which insert chunks
+  without summary vectors (repo and directory jobs summarize; directory jobs
+  since issue #51, amended 2026-09-27). A graph-only job never changes it. `NULL` means
   unknown or never summarized (for example, indexed with
   `USE_SUMMARY_VECTOR=0`). Backfilling 3 is correct because every existing
   index was built with v3. The backfill also applies to sources indexed with
