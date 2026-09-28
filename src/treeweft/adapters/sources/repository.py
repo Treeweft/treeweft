@@ -98,10 +98,14 @@ class PostgreSourceRepository(SourceRepositoryPort):
         try:
             async with pool.acquire() as conn:
                 await conn.execute(
+                    # graph_indexed is written here too: left out, it kept
+                    # its column default (TRUE) and a chunks-only
+                    # (skip_graph) source read back as graph-indexed (#51).
                     """INSERT INTO source_records
                            (id, path, url, branch, indexed_at,
-                            file_count, chunk_count, commit_sha, created_by, kind)
-                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+                            file_count, chunk_count, commit_sha, created_by, kind,
+                            graph_indexed, graph_indexed_at)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                        ON CONFLICT (id) DO UPDATE SET
                            path       = EXCLUDED.path,
                            url        = EXCLUDED.url,
@@ -111,7 +115,9 @@ class PostgreSourceRepository(SourceRepositoryPort):
                            chunk_count = EXCLUDED.chunk_count,
                            commit_sha = EXCLUDED.commit_sha,
                            created_by = EXCLUDED.created_by,
-                           kind       = EXCLUDED.kind""",
+                           kind       = EXCLUDED.kind,
+                           graph_indexed    = EXCLUDED.graph_indexed,
+                           graph_indexed_at = EXCLUDED.graph_indexed_at""",
                     record.id,
                     record.path,
                     record.url,
@@ -122,6 +128,8 @@ class PostgreSourceRepository(SourceRepositoryPort):
                     record.commit_sha,
                     record.created_by,
                     record.kind,
+                    record.graph_indexed,
+                    record.graph_indexed_at,
                 )
         except Exception:
             logger.exception("PostgreSourceRepository.save: database insert failed")

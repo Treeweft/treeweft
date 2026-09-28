@@ -101,6 +101,10 @@ Added, Fixed.
   index endpoints, and `skip_patterns` (with
   `TREEWEFT_FEATURE_SKIP_PATTERNS=1`) was ignored. They are now stored with
   the job.
+- Every source was recorded as graph-indexed, whatever its job did: saving
+  a source record never wrote `graph_indexed`, which defaults to true. A
+  chunks-only (`skip_graph`) source now reads back as not graph-indexed, so
+  `rebuild_all_graphs(only_missing=true)` finds it.
 - The indexer in `docker-compose.yml` could not start: it received only the
   settings listed under its `environment:`, which did not include
   `MILVUS_HOST`, `MILVUS_PORT` or `EMBEDDING_URL`, and it ignored everything
