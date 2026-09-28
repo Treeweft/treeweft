@@ -25,7 +25,7 @@ you run yourself:
 TREEWEFT_ITEST_CONTAINERS=1 pytest tests/integration -m slow -q
 ```
 
-CI runs this as the `integration` check; it's currently advisory, not required to merge.
+CI runs this as the `integration` check, which is required to merge.
 
 ## Ground rules
 
