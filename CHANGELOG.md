@@ -88,6 +88,16 @@ Added, Fixed.
 
 ### Fixed
 
+- One CPU embedding server failed most files of an index job at the compose
+  default `INDEX_FILE_CONCURRENCY`: requests it could not answer within the
+  timeout failed, and the timeouts tripped its circuit breaker, so the rest
+  failed too. The indexer now limits how many requests it sends each
+  embedding server at once, halving the limit when the server is slow and
+  raising it while answers are fast (`EMBED_INITIAL_CONCURRENCY`, default 4;
+  `EMBED_MAX_CONCURRENCY`, default 32). `INDEX_FILE_CONCURRENCY=2` is no
+  longer needed without a GPU. A backend that accepts requests but never
+  answers now fails every batch after about six read timeouts (one before),
+  then its breaker opens and queued batches fail over at once.
 - Startup silently ignored this process's `EMBEDDING_URLS`/`EMBEDDING_URL`/
   `EMBEDDING_FALLBACK_URLS`/`EMBEDDING_FALLBACK_URL` whenever the
   `embedding_backends` table already had rows without those addresses
