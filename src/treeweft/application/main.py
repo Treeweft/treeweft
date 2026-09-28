@@ -94,24 +94,24 @@ async def search_endpoint(req: SearchRequest):
     that proxy — no local retrieval, embedding, or graph logic runs here.
     """
     try:
+        # search_code returns markdown text unless asked for JSON, and an
+        # {"error": ...} dict when the indexer cannot answer.
         result = await search_code(
             req.query,
             top_k=req.top_k,
             path_prefix=req.repo if req.repo else None,
+            response_format="json",
         )
+        if "error" in result:
+            return {"error": result["error"]}
         return {
             "chunks": [
                 {
-                    "file_path": c.file_path,
-                    "start_line": c.start_line,
-                    "end_line": c.end_line,
-                    "snippet": c.snippet,
-                    "score": c.score,
+                    key: c.get(key)
+                    for key in ("file_path", "start_line", "end_line", "snippet", "score")
                 }
-                for c in result.chunks
+                for c in result.get("chunks", [])
             ]
-            if result.chunks
-            else []
         }
     except Exception as e:
         # The traceback used to go back in the response body: absolute source
