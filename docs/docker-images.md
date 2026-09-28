@@ -135,7 +135,9 @@ first, the table holds its `localhost` addresses and the container's
 `DOCKER_EMBEDDING_URL` has no effect. Check and change the stored backends
 with the admin API: `GET /embedding-backends`, then `DELETE` the stale entry
 and `POST` the container address (`docs/engineering-notes.md`, "Embedding
-backends live in Postgres").
+backends live in Postgres"). The indexer now logs a warning at startup when
+its own environment configures an address the table lacks, naming both sets
+and how to fix the table, instead of silently ignoring the environment.
 
 Running the indexer from its image outside compose, pass container addresses
 the same way, for example with `-e MILVUS_URI=http://milvus.example:19530`

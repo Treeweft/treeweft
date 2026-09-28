@@ -122,6 +122,42 @@ async def _fleet_refresh_once() -> int:
     return enqueued
 
 
+async def _warn_on_embedding_env_mismatch(backend_store) -> None:
+    """Warn once when this process's env-configured embedding URLs are
+    ignored because the registry already holds different rows (constitution
+    V, "Fail loud, never degrade silently").
+
+    Best-effort, like the embedding-proxy init this runs inside: a failure
+    comparing the two is logged and swallowed rather than aborting startup.
+    """
+    try:
+        mismatch = await backend_store.env_mismatch()
+    except Exception:
+        logger.exception("Failed to compare embedding registry against environment")
+        return
+    if mismatch is None:
+        return
+    table_urls, env_urls = mismatch
+    disabled = (
+        f" Disabled in the registry: {table_urls['disabled']} (DELETE a "
+        "disabled entry before POSTing its address again)."
+        if table_urls.get("disabled")
+        else ""
+    )
+    logger.warning(
+        "Embedding backend registry does not hold every address this "
+        "process's environment configures, enabled and under the same class "
+        "— the registry wins, and those addresses are not used as "
+        "configured. Registry: gpu=%s cpu=%s. Environment "
+        "(EMBEDDING_URLS/EMBEDDING_URL, EMBEDDING_FALLBACK_URLS/"
+        "EMBEDDING_FALLBACK_URL): gpu=%s cpu=%s. To change the registry: "
+        "GET /embedding-backends, then DELETE /embedding-backends/{id} for "
+        "a stale entry and POST /embedding-backends with {\"url\": ..., "
+        "\"klass\": \"gpu\"|\"cpu\"}.%s",
+        table_urls["gpu"], table_urls["cpu"], env_urls["gpu"], env_urls["cpu"], disabled,
+    )
+
+
 def _warn_if_auth_disabled() -> None:
     """Log a loud warning when AUTH_ENABLED is not true.
 
@@ -451,7 +487,12 @@ async def startup(app):
 
         backend_store = EmbeddingBackendStore()
         try:
-            await backend_store.seed_from_env_if_empty()
+            inserted = await backend_store.seed_from_env_if_empty()
+            if not inserted:
+                # Table already had rows (or nothing to seed either way) —
+                # check whether this process's own env config is silently
+                # being ignored.
+                await _warn_on_embedding_env_mismatch(backend_store)
             proxy = await EmbeddingProxy.from_registry(backend_store)
             await proxy.start_listener(backend_store, _state.DATABASE_URL)
             set_proxy(proxy)

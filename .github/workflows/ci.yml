@@ -1,7 +1,7 @@
 name: CI
 
-# `unit-tests` and `ui` are required status checks on main (repository
-# ruleset), so they must REPORT on every PR. A trigger-level `paths-ignore`
+# `unit-tests`, `ui` and `integration` are required status checks on main
+# (repository ruleset), so they must REPORT on every PR. A trigger-level `paths-ignore`
 # would skip the whole workflow on document-only changes and leave the checks
 # unreported, which blocks the merge. Instead a cheap `changes` job classifies
 # the diff and the jobs are skipped (not absent) when only docs/images
@@ -9,11 +9,10 @@ name: CI
 # under its `name:` WITHOUT evaluating matrix expressions, so every required
 # job needs a static name (no matrix-derived name).
 #
-# `integration` is advisory: it deliberately is NOT in the repository
-# ruleset's required checks yet (FR-014), so a container-runtime flake can't
-# block a merge. Its name is still static (no matrix-derived name) so the
-# maintainer can promote it into the required checks later without the name
-# changing underneath the ruleset.
+# `integration` was advisory at first (spec 003, FR-014) so a container-runtime
+# flake could not block a merge. It was made required on 2026-09-27, after a
+# Milvus consistency fix and five green runs. Its name is static (no
+# matrix-derived name) because the ruleset refers to it by name.
 on:
   push:
     branches: [main]
@@ -151,10 +150,8 @@ jobs:
       - name: Unit tests
         run: npm test
 
-  # Advisory (not in the repository ruleset — FR-014): a container-runtime
-  # flake on the shared runner must not block a merge. The name stays static
-  # so the maintainer can add it to the ruleset later without it changing.
-  # Steps mirror `unit-tests` (checkout, setup-uv, install, quickstart env)
+  # Required (repository ruleset; see the header). The name stays static
+  # because the ruleset refers to it by name. Steps mirror `unit-tests` (checkout, setup-uv, install, quickstart env)
   # but diverge on the last two (Testcontainers env var, slow-marked
   # integration suite, and a log upload on failure), so they are written out
   # rather than reusing `*unit-test-steps`.
