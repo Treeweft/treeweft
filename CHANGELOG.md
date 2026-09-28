@@ -88,6 +88,13 @@ Added, Fixed.
 
 ### Fixed
 
+- `/index-directory` (and the MCP `index_directory` tool) built no code
+  graph and no chunk summaries, but recorded the source as graph-indexed
+  (#51). Graph lookups, graph rescoring and communities found nothing for
+  such a source. Directory jobs now index each file the way `/index-repo`
+  does. Re-index directory sources to get their graph and summaries. File
+  selection now also matches `/index-repo`: hidden directories are skipped
+  and hidden files are indexed.
 - The indexer in `docker-compose.yml` could not start: it received only the
   settings listed under its `environment:`, which did not include
   `MILVUS_HOST`, `MILVUS_PORT` or `EMBEDDING_URL`, and it ignored everything

@@ -84,17 +84,28 @@ async def test_clean_repo_job_records_the_payload_version(fake_repo, monkeypatch
     assert fake_repo.recorded == [("s-repo", 5)]
 
 
-@pytest.mark.parametrize("kind", ["file", "directory"])
+@pytest.mark.parametrize("kind", ["file"])
 @pytest.mark.asyncio
 async def test_non_summarizing_full_job_records_unknown(kind, fake_repo, monkeypatch):
-    # File and directory jobs insert no summary vectors, so a v3 record would
-    # report empty summary vectors as current.
+    # File jobs insert no summary vectors, so a v3 record would report empty
+    # summary vectors as current. Directory jobs summarize since #51.
     monkeypatch.setattr(svc, "USE_SUMMARY_VECTOR", True)
     monkeypatch.setattr(svc, "summary_vectors_supported", lambda: True)
     job = _base_job(kind, f"s-{kind}", 5)
     await svc._finalize_job(job, 3, 1, "ok")
     assert job["status"] == "done"
     assert fake_repo.recorded == [(f"s-{kind}", None)]
+
+
+@pytest.mark.asyncio
+async def test_clean_directory_job_records_the_payload_version(fake_repo, monkeypatch):
+    """Directory jobs summarize through _process_file, like repo jobs (#51)."""
+    monkeypatch.setattr(svc, "USE_SUMMARY_VECTOR", True)
+    monkeypatch.setattr(svc, "summary_vectors_supported", lambda: True)
+    job = _base_job("directory", "s-directory", 5)
+    await svc._finalize_job(job, 3, 1, "ok")
+    assert job["status"] == "done"
+    assert fake_repo.recorded == [("s-directory", 5)]
 
 
 @pytest.mark.asyncio
@@ -325,7 +336,9 @@ async def test_directory_job_resolves_version_and_finalizes_clean(tmp_path, fake
     await svc._run_index_directory_job(job, str(tmp_path), "**/*")
     assert job["status"] == "done"
     assert job["payload"]["summary_version"] == 4
-    assert fake_repo.recorded == [("srcdir", None)]
+    # Directory jobs summarize like repo jobs (#51), so a clean run records
+    # the version it used.
+    assert fake_repo.recorded == [("srcdir", 4)]
 
 
 @pytest.mark.asyncio
