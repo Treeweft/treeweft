@@ -88,6 +88,13 @@ Added, Fixed.
 
 ### Fixed
 
+- Startup silently ignored this process's `EMBEDDING_URLS`/`EMBEDDING_URL`/
+  `EMBEDDING_FALLBACK_URLS`/`EMBEDDING_FALLBACK_URL` whenever the
+  `embedding_backends` table already had rows without those addresses
+  (e.g. a host indexer seeding `localhost` addresses that a container then
+  inherits, pointing embedding calls back at itself). It now logs one
+  warning naming the table's addresses, the environment's addresses, and
+  how to fix the table (`GET`/`DELETE`/`POST /embedding-backends`).
 - `/index-directory` (and the MCP `index_directory` tool) built no code
   graph and no chunk summaries, but recorded the source as graph-indexed
   (#51). Graph lookups, graph rescoring and communities found nothing for

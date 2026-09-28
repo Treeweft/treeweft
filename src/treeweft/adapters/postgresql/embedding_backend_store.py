@@ -161,6 +161,48 @@ class EmbeddingBackendStore:
             logger.info("Seeded embedding_backends with %d row(s) from env", inserted)
             return inserted
 
+    async def env_mismatch(self) -> tuple[dict, dict] | None:
+        """Compare this process's env-configured embedding URLs against the
+        enabled rows already in the registry, per class ('gpu' / 'cpu').
+
+        Same precedence as `seed_from_env_if_empty`: EMBEDDING_URLS, else
+        EMBEDDING_URL, for gpu; EMBEDDING_FALLBACK_URLS, else
+        EMBEDDING_FALLBACK_URL, for cpu.
+
+        Returns `(table_urls, env_urls)` — each `{"gpu": [...], "cpu":
+        [...]}`, and the table's also `"disabled": [...]` — when the process
+        configures a URL the table does not hold enabled under the same
+        class, i.e. one this process is not using as configured. Returns None
+        otherwise; rows added through `/embedding-backends` that the
+        environment does not mention are deliberate, not a mismatch. URLs
+        compare without a trailing slash.
+        """
+        gpu_urls = _split_env("EMBEDDING_URLS") or _split_env("EMBEDDING_URL")
+        cpu_urls = _split_env("EMBEDDING_FALLBACK_URLS") or _split_env("EMBEDDING_FALLBACK_URL")
+
+        if not gpu_urls and not cpu_urls:
+            return None
+
+        rows = await self.list_all()
+        enabled = [r for r in rows if r.enabled]
+        table_gpu = sorted({r.url for r in enabled if r.klass == "gpu"})
+        table_cpu = sorted({r.url for r in enabled if r.klass == "cpu"})
+
+        def _norm(urls):
+            return {u.rstrip("/") for u in urls}
+
+        if _norm(gpu_urls) <= _norm(table_gpu) and _norm(cpu_urls) <= _norm(table_cpu):
+            return None
+
+        return (
+            {
+                "gpu": table_gpu,
+                "cpu": table_cpu,
+                "disabled": sorted({r.url for r in rows if not r.enabled}),
+            },
+            {"gpu": gpu_urls, "cpu": cpu_urls},
+        )
+
 
 def _split_env(name: str) -> list[str]:
     raw = os.environ.get(name, "").strip()
