@@ -113,6 +113,11 @@ To use a service compose does not run, set its `DOCKER_*` variable in `.env`:
 | `DOCKER_LLM_URL` | `LLM_URL` unchanged. `.env.example` sets `http://host.docker.internal:11434/v1`, for an LLM on the Docker host |
 | `DOCKER_OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4317` |
 
+Without an NVIDIA GPU, also set `INDEX_FILE_CONCURRENCY=2` (or similar). An
+index job embeds that many files at once, and one CPU embedding server cannot
+answer the compose default within the request timeout: most files then fail
+with `ReadTimeout`, and the embedding circuit breaker fails the rest.
+
 Every service address the container uses comes from this table, never from
 the host addresses in `.env`, even when those already point at another
 machine: with Neo4j and Milvus elsewhere (no `local-infra` profile), set
