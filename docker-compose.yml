@@ -273,17 +273,25 @@ services:
       - OTEL_EXPORTER_OTLP_ENDPOINT=${MCP_OTEL_ENDPOINT:-http://otel-collector:4317}
       - OTEL_TRACES_SAMPLER=${OTEL_TRACES_SAMPLER:-always_on}
       - OTEL_TRACES_SAMPLER_ARG=${OTEL_TRACES_SAMPLER_ARG:-1.0}
-    # mcp-server is a pure API consumer — it proxies all search/index requests
-    # to the host-based indexer via host.docker.internal.  No direct dependency
-    # on TEI, Milvus, Neo4j, or LLM services.
+    # mcp-server is a pure API consumer: it proxies every request to the
+    # indexer at DOCKER_INDEXER_URL, the compose `indexer` service by default
+    # (http://host.docker.internal:8001 for an indexer run on the host). No
+    # direct dependency on TEI, Milvus, Neo4j or the LLM. No depends_on: with
+    # a host-run indexer, it would start a second one on the same port.
+    #
+    # Unlike the indexer, it has no env_file, on purpose: TREEWEFT_MCP_TRANSPORT
+    # would clash with the transport this container runs, and TREEWEFT_MCP_TOKEN
+    # is one caller's own credential, which a shared HTTP server must never
+    # use for everyone (tests/unit/test_compose_mcp_ui.py).
 
   # ── Operator UI v2 (standalone SPA) ──────────────────
   # Static SPA served by nginx. The BROWSER calls the indexer directly at
-  # TREEWEFT_API_BASE, which must be reachable from the browser (the indexer
-  # runs on the HOST at localhost:8001) — NOT an in-compose service name, so
-  # there is no depends_on. The indexer's CORS allow-list
-  # (TREEWEFT_CORS_ORIGINS) must include this UI's origin. Default port
-  # 3001 because grafana owns 3000 in this compose.
+  # TREEWEFT_API_BASE, so it is an address the browser can reach: the port the
+  # indexer is published on (localhost:8001, whether the compose `indexer` or
+  # one run on the host), NOT an in-compose service name, so there is no
+  # depends_on. The indexer's CORS allow-list (TREEWEFT_CORS_ORIGINS) must
+  # include this UI's origin. Default port 3001 because grafana owns 3000 in
+  # this compose.
   ui:
     image: ${TREEWEFT_IMAGE_NAMESPACE:-treeweft}/ui:${TREEWEFT_IMAGE_TAG:-latest}
     build:
