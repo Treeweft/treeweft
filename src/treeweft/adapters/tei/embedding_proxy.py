@@ -18,6 +18,7 @@ See docs/adr-001-cost-aware-embedding-proxy.md for the rationale.
 from __future__ import annotations
 
 import asyncio
+import collections
 import logging
 import os
 import re
@@ -111,6 +112,38 @@ _CB_FAILURE_THRESHOLD = int(os.environ.get("EMBED_CB_THRESHOLD", "5"))
 _CB_WINDOW_SECONDS = float(os.environ.get("EMBED_CB_WINDOW", "60.0"))
 _CB_COOLDOWN_SECONDS = float(os.environ.get("EMBED_CB_COOLDOWN", "30.0"))
 
+# Adaptive per-backend concurrency (back-off under load). A backend answers
+# at most `concurrency_limit` /embed requests at once; the rest wait in the
+# proxy, where the HTTP timeout does not run. The limit halves on a read
+# timeout, a 429, or an answer slower than half the read timeout, and grows
+# while answers are fast and the limit is what holds requests back. Without
+# it, a CPU backend given more requests than it can answer in time timed out
+# the queued ones, and the timeouts tripped the breaker on a healthy backend.
+_INITIAL_CONCURRENCY = int(os.environ.get("EMBED_INITIAL_CONCURRENCY", "4"))
+_MAX_CONCURRENCY = int(os.environ.get("EMBED_MAX_CONCURRENCY", "32"))
+# Times one batch is re-sent to the same backend after a congestion signal
+# before the failure counts toward the breaker.
+_CONGESTION_RETRIES = 8
+# A backend that has answered nothing for this many read timeouts, and whose
+# requests have timed out more than _LONE_TIMEOUT_GRACE times in a row when
+# sent alone, is not answering, not overloaded. The grace covers the work a
+# backend still does for requests that already timed out (it does not cancel
+# them); each extra unit costs one read timeout before a hung backend's
+# breaker opens.
+_SILENT_READ_TIMEOUTS = 2
+_LONE_TIMEOUT_GRACE = 3
+
+
+class _NotAnswering(httpx.ReadTimeout):
+    """A read timeout on a backend that has stopped answering: opens its
+    breaker at once instead of counting toward the threshold."""
+
+
+class _BreakerOpen(httpx.TransportError):
+    """Raised to a request that waited for a slot on a backend whose breaker
+    opened meanwhile, so it fails over instead of being sent. Not a failure
+    of the backend: the breaker already counted those."""
+
 
 @dataclass
 class Backend:
@@ -127,6 +160,15 @@ class Backend:
     # "batch size N > maximum allowed batch size M". None = unknown
     # (send optimistically); once learned, oversized batches are pre-split.
     max_batch_size: int | None = None
+    # --- Adaptive concurrency state (see _INITIAL_CONCURRENCY) ---
+    concurrency_limit: float = float(_INITIAL_CONCURRENCY)
+    active: int = 0  # requests currently sent to this backend
+    slow_start_threshold: float = float("inf")
+    last_decrease_at: float = float("-inf")  # monotonic; one decrease per congestion event
+    last_answer_at: float = float("-inf")  # monotonic; any HTTP response
+    sends: int = 0  # requests sent so far; tells a request whether others were sent during it
+    lone_timeouts: int = 0  # read timeouts on requests sent alone since the last answer
+    _waiters: collections.deque = field(default_factory=collections.deque)
 
 
 # A TEI backend rejects an oversized /embed with HTTP 422 and a body like
@@ -164,13 +206,24 @@ class EmbeddingProxy:
         gpu_max_tokens: int = 4096,
         max_batch_size: int = 128,
         client: httpx.AsyncClient | None = None,
+        initial_concurrency: int = _INITIAL_CONCURRENCY,
+        max_concurrency: int = _MAX_CONCURRENCY,
     ) -> None:
         if not backends:
             raise ValueError("EmbeddingProxy requires at least one backend")
+        self._initial_concurrency = max(1, initial_concurrency)
+        self._max_concurrency = max(self._initial_concurrency, max_concurrency)
+        for b in backends:
+            b.concurrency_limit = float(self._initial_concurrency)
         self._backends = backends
         self._gpu_max_tokens = gpu_max_tokens
         self._max_batch_size = max_batch_size
         self._client = client or httpx.AsyncClient(timeout=120.0)
+        # An answer slower than half the read timeout means the backend is
+        # close to timing requests out: back off before it does.
+        read_timeout = getattr(getattr(self._client, "timeout", None), "read", None)
+        self._read_timeout = read_timeout or 0.0
+        self._slow_after = read_timeout / 2 if read_timeout else None
         self._select_lock = asyncio.Lock()
         # Set by start_listener; nulls keep stop_listener idempotent.
         self._listener_task: asyncio.Task | None = None
@@ -234,7 +287,9 @@ class EmbeddingProxy:
                 existing.klass = BackendClass(r.klass)
                 new_backends.append(existing)
             else:
-                new_backends.append(Backend(url=r.url, klass=BackendClass(r.klass)))
+                b = Backend(url=r.url, klass=BackendClass(r.klass))
+                b.concurrency_limit = float(self._initial_concurrency)
+                new_backends.append(b)
 
         async with self._select_lock:
             self._backends = new_backends
@@ -351,6 +406,128 @@ class EmbeddingProxy:
                 return None
             return min(eligible, key=lambda b: b.in_flight_tokens)
 
+    async def _acquire_slot(self, backend: Backend) -> int:
+        """Wait until `backend` is under its concurrency limit and take a slot.
+
+        Returns the number of requests in flight on it, this one included.
+        """
+        if backend.active < int(backend.concurrency_limit) and not backend._waiters:
+            backend.active += 1
+            return backend.active
+        fut = asyncio.get_running_loop().create_future()
+        backend._waiters.append(fut)
+        try:
+            await fut  # _wake takes the slot on our behalf
+        except asyncio.CancelledError:
+            if fut.done() and not fut.cancelled():
+                self._release_slot(backend)
+            raise
+        return backend.active
+
+    def _release_slot(self, backend: Backend) -> None:
+        backend.active -= 1
+        self._wake(backend)
+
+    @staticmethod
+    def _wake(backend: Backend) -> None:
+        while backend._waiters and backend.active < int(backend.concurrency_limit):
+            fut = backend._waiters.popleft()
+            if not fut.done():
+                backend.active += 1
+                fut.set_result(None)
+
+    def _back_off(self, backend: Backend, sent_at: float, why: str) -> None:
+        if sent_at < backend.last_decrease_at:
+            return  # sent before the last decrease: that one already answered this
+        old = backend.concurrency_limit
+        backend.concurrency_limit = max(1.0, old / 2)
+        backend.slow_start_threshold = backend.concurrency_limit
+        backend.last_decrease_at = time.monotonic()
+        logger.info(
+            "[embed] backend %s is overloaded (%s); concurrency limit %d -> %d",
+            backend.url, why, int(old), int(backend.concurrency_limit),
+        )
+
+    def _grow(self, backend: Backend) -> None:
+        limit = backend.concurrency_limit
+        limit += 1.0 if limit < backend.slow_start_threshold else 1.0 / limit
+        backend.concurrency_limit = min(float(self._max_concurrency), limit)
+        self._wake(backend)
+
+    def _is_load(self, backend: Backend, sent_at: float, sends_at_send: int) -> bool:
+        """Whether a read timeout is load (back off, re-send) or the backend
+        not answering (count it, and open the breaker).
+
+        Load when other requests were in flight or were sent while this one
+        waited, or when the backend answered anything within the last
+        _SILENT_READ_TIMEOUTS read timeouts, or for the first
+        _LONE_TIMEOUT_GRACE lone timeouts since its last answer (it is still
+        working through the requests that timed out). Decided when the
+        timeout happens, not at send: the first request of a burst is sent
+        before the others.
+        """
+        if backend.active > 1 or backend.sends != sends_at_send:
+            return True
+        backend.lone_timeouts += 1
+        silent_for = time.monotonic() - backend.last_answer_at
+        return (
+            silent_for < _SILENT_READ_TIMEOUTS * self._read_timeout
+            or backend.lone_timeouts <= _LONE_TIMEOUT_GRACE
+        )
+
+    async def _send(self, backend: Backend, batch: list[str]) -> httpx.Response:
+        """POST one /embed within the backend's concurrency limit.
+
+        A read timeout that `_is_load` attributes to load, or a 429, backs
+        off and re-sends to the same backend, up to _CONGESTION_RETRIES
+        times, without counting toward the breaker. Any other read timeout
+        raises `_NotAnswering`, which opens the breaker. Connect errors,
+        other timeouts and 5xx propagate to the breaker as before.
+        """
+        attempt = 0
+        while True:
+            in_flight = await self._acquire_slot(backend)
+            if backend.cb_state is CircuitState.OPEN:
+                self._release_slot(backend)
+                raise _BreakerOpen(f"embedding backend {backend.url} circuit breaker is open")
+            filled = in_flight >= int(backend.concurrency_limit)
+            sent_at = time.monotonic()
+            backend.sends += 1
+            sends_at_send = backend.sends
+            try:
+                resp = await self._client.post(
+                    f"{backend.url}/embed",
+                    json={"inputs": batch, "normalize": True},
+                )
+            except httpx.ReadTimeout as exc:
+                load = self._is_load(backend, sent_at, sends_at_send)
+                self._release_slot(backend)
+                if not load:
+                    raise _NotAnswering(str(exc) or "timed out") from exc
+                if attempt >= _CONGESTION_RETRIES:
+                    raise
+                attempt += 1
+                self._back_off(backend, sent_at, "timed out")
+                continue
+            except BaseException:
+                self._release_slot(backend)
+                raise
+            self._release_slot(backend)
+            backend.last_answer_at = time.monotonic()
+            backend.lone_timeouts = 0
+            if resp.status_code == 429 and attempt < _CONGESTION_RETRIES:
+                attempt += 1
+                self._back_off(backend, sent_at, "429")
+                await asyncio.sleep(min(1.0, 0.05 * 2**attempt))
+                continue
+            if resp.status_code < 400:
+                latency = backend.last_answer_at - sent_at
+                if self._slow_after is not None and latency > self._slow_after:
+                    self._back_off(backend, sent_at, f"answered in {latency:.1f}s")
+                elif filled:
+                    self._grow(backend)
+            return resp
+
     async def _post_split(self, backend: Backend, batch: list[str], limit: int) -> list[list[float]]:
         """Post `batch` to `backend` in order, in chunks of `limit`, concatenating
         the embeddings. Used when a batch exceeds the backend's max-batch-size
@@ -370,8 +547,8 @@ class EmbeddingProxy:
             return await self._post_split(backend, batch, backend.max_batch_size)
 
         cost = _estimate_batch_tokens(batch)
-        async with backend._lock:
-            backend.in_flight_tokens += cost
+        backend.in_flight_tokens += cost
+        counted = True  # cleared when the 422 split hands the cost to its parts
         with get_tracer("treeweft.tei").start_as_current_span(
             "tei.embed",
             attributes={
@@ -382,10 +559,7 @@ class EmbeddingProxy:
             },
         ):
             try:
-                resp = await self._client.post(
-                    f"{backend.url}/embed",
-                    json={"inputs": batch, "normalize": True},
-                )
+                resp = await self._send(backend, batch)
                 # Oversized-batch 422: the backend is HEALTHY, the batch is too
                 # big. Learn the cap, split, and retry on the SAME backend —
                 # don't trip the circuit breaker or fall through to a backend
@@ -398,13 +572,12 @@ class EmbeddingProxy:
                             "[embed] backend %s rejected batch of %d (max %d); "
                             "learned cap, splitting", backend.url, len(batch), limit,
                         )
-                        async with backend._lock:
-                            backend.in_flight_tokens -= cost
+                        backend.in_flight_tokens -= cost
+                        counted = False
                         return await self._post_split(backend, batch, limit)
                 resp.raise_for_status()
                 # Success — reset circuit breaker
                 async with backend._lock:
-                    backend.in_flight_tokens -= cost
                     if backend.cb_state is CircuitState.HALF_OPEN:
                         backend.cb_state = CircuitState.CLOSED
                         backend.cb_failure_times.clear()
@@ -412,18 +585,29 @@ class EmbeddingProxy:
                     elif backend.cb_state is CircuitState.CLOSED:
                         backend.cb_failure_times.clear()
                 return resp.json()
+            except _BreakerOpen:
+                raise
             except (httpx.HTTPStatusError, httpx.HTTPError) as exc:
                 # Track failure with sliding window; trip if threshold exceeded
                 now = time.monotonic()
                 async with backend._lock:
-                    backend.in_flight_tokens -= cost
                     backend.failures += 1
                     backend.cb_failure_times.append(now)
                     # Prune old failures outside the window
                     cutoff = now - _CB_WINDOW_SECONDS
                     backend.cb_failure_times = [t for t in backend.cb_failure_times if t >= cutoff]
                     recent = len(backend.cb_failure_times)
-                    if backend.cb_state is CircuitState.CLOSED and recent >= _CB_FAILURE_THRESHOLD:
+                    if backend.cb_state is CircuitState.CLOSED and isinstance(exc, _NotAnswering):
+                        backend.cb_state = CircuitState.OPEN
+                        backend.cb_opened_at = now
+                        logger.warning(
+                            "[embed] backend %s CLOSED→OPEN (not answering: requests "
+                            "sent alone time out, last answer %s)",
+                            backend.url,
+                            "never" if backend.last_answer_at == float("-inf")
+                            else f"{now - backend.last_answer_at:.0f}s ago",
+                        )
+                    elif backend.cb_state is CircuitState.CLOSED and recent >= _CB_FAILURE_THRESHOLD:
                         backend.cb_state = CircuitState.OPEN
                         backend.cb_opened_at = now
                         logger.warning(
@@ -435,6 +619,9 @@ class EmbeddingProxy:
                         backend.cb_opened_at = now
                         logger.warning("[embed] backend %s HALF_OPEN→OPEN (probe failed)", backend.url)
                 raise
+            finally:
+                if counted:
+                    backend.in_flight_tokens -= cost
 
     async def _embed_batch(self, batch: list[str]) -> list[list[float]]:
         require_cpu = _estimate_max_chunk_tokens(batch) > self._gpu_max_tokens

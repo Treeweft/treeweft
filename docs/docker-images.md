@@ -113,10 +113,10 @@ To use a service compose does not run, set its `DOCKER_*` variable in `.env`:
 | `DOCKER_LLM_URL` | `LLM_URL` unchanged. `.env.example` sets `http://host.docker.internal:11434/v1`, for an LLM on the Docker host |
 | `DOCKER_OTEL_EXPORTER_OTLP_ENDPOINT` | `http://otel-collector:4317` |
 
-Without an NVIDIA GPU, also set `INDEX_FILE_CONCURRENCY=2` (or similar). An
-index job embeds that many files at once, and one CPU embedding server cannot
-answer the compose default within the request timeout: most files then fail
-with `ReadTimeout`, and the embedding circuit breaker fails the rest.
+Without an NVIDIA GPU, `INDEX_FILE_CONCURRENCY` can stay at the compose
+default. The indexer sends each embedding server only as many requests at once
+as it answers in time, and holds the rest, so a CPU server is slower but does
+not fail files (`docs/engineering-notes.md`, "Embedding back-off").
 
 Every service address the container uses comes from this table, never from
 the host addresses in `.env`, even when those already point at another
