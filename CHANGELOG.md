@@ -95,6 +95,12 @@ Added, Fixed.
   does. Re-index directory sources to get their graph and summaries. File
   selection now also matches `/index-repo`: hidden directories are skipped
   and hidden files are indexed.
+- Index request options were lost once a job went through the queue:
+  `pattern` on `/index-directory` (and the MCP `index_directory` tool)
+  indexed every file, `skip_graph=true` still built the graph on all three
+  index endpoints, and `skip_patterns` (with
+  `TREEWEFT_FEATURE_SKIP_PATTERNS=1`) was ignored. They are now stored with
+  the job.
 - The indexer in `docker-compose.yml` could not start: it received only the
   settings listed under its `environment:`, which did not include
   `MILVUS_HOST`, `MILVUS_PORT` or `EMBEDDING_URL`, and it ignored everything

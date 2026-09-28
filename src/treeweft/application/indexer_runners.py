@@ -123,6 +123,42 @@ def _persist_job_sync(job_dict: dict) -> None:
     asyncio.ensure_future(_persist_job(job_dict))
 
 
+def set_request_options(
+    job: dict,
+    *,
+    pattern: str | None = None,
+    skip_patterns: list[str] | None = None,
+    skip_graph: bool = False,
+) -> None:
+    """Keep an index request's options with its job.
+
+    Index jobs run from the queue: a worker rebuilds each job from its stored
+    row (`dispatch_job`), and only stored fields survive. These options are
+    not Job fields, so they go in the payload, which is stored. They are also
+    set on `job` itself, for a job run straight from this dict (#51).
+    """
+    payload = job.get("payload") or {}
+    if pattern is not None:
+        payload["pattern"] = pattern
+    if skip_patterns:
+        payload["skip_patterns"] = list(skip_patterns)
+        job["skip_patterns"] = list(skip_patterns)
+    if skip_graph:
+        payload["skip_graph"] = True
+        job["skip_graph"] = True
+    job["payload"] = payload
+
+
+def _restore_request_options(jd: dict) -> str:
+    """Put the options `set_request_options` stored back on a rebuilt job,
+    and return its pattern ("**/*", every file, when none was given)."""
+    payload = jd.get("payload") or {}
+    if payload.get("skip_patterns"):
+        jd["skip_patterns"] = list(payload["skip_patterns"])
+    jd["skip_graph"] = bool(payload.get("skip_graph", False))
+    return payload.get("pattern") or "**/*"
+
+
 def dispatch_job(job) -> "Coroutine | None":
     """Reconstruct a runner coroutine for a persisted Job row.
 
@@ -144,6 +180,7 @@ def dispatch_job(job) -> "Coroutine | None":
         target = jd.get("source_path") or jd.get("source")
         if not target or not os.path.exists(target):
             return None
+        _restore_request_options(jd)
         _state._jobs[job.id] = jd
         return _run_index_file_job(jd, target)
 
@@ -151,10 +188,12 @@ def dispatch_job(job) -> "Coroutine | None":
         target = jd.get("source_path") or jd.get("source")
         if not target or not os.path.isdir(target):
             return None
+        pattern = _restore_request_options(jd)
         _state._jobs[job.id] = jd
-        return _run_index_directory_job(jd, target, "**/*")
+        return _run_index_directory_job(jd, target, pattern)
 
     if kind == "repo":
+        _restore_request_options(jd)
         rebuilt_req = _RepoJobSpec(
             path=jd.get("source_path") or None,
             url=jd.get("source_url") or None,
@@ -507,7 +546,7 @@ def _collect_files(
     patterns = (skip_patterns or []) if FEATURE_SKIP_PATTERNS else []
     wanted = (
         None if pattern in (None, "", "**/*", "**")
-        else {str(p) for p in Path(path).rglob(pattern)}
+        else {os.path.normpath(p) for p in Path(path).rglob(pattern)}
     )
     files = []
     for root, dirs, fnames in os.walk(path):
@@ -519,7 +558,7 @@ def _collect_files(
             if ext not in supported_exts:
                 continue
             full = os.path.join(root, fname)
-            if wanted is not None and full not in wanted:
+            if wanted is not None and os.path.normpath(full) not in wanted:
                 continue
             if patterns:
                 rel = os.path.relpath(full, path)
@@ -1285,7 +1324,8 @@ async def _run_index_file_job(job: dict, file_path: str):
             embeddings = await embed(texts)
             await init_collection()
             await insert_chunks(chunks, embeddings)
-            await _graph_index_file(file_path, job["source_id"])
+            if not job.get("skip_graph"):
+                await _graph_index_file(file_path, job["source_id"])
             job["processed_files"] = 1
             job["committed_files"] = 1
             job["total_chunks"] = len(chunks)

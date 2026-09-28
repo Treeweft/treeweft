@@ -191,3 +191,14 @@ async def test_a_file_that_fails_does_not_stop_the_others(tmp_path, writes, sour
 
     assert job["errors"] == 1
     assert set(writes.graph) == {str(tmp_path / "b.py")}
+
+
+async def test_pattern_works_with_a_relative_directory(tmp_path, writes, source_repo, summaries_off, monkeypatch):
+    """Path.rglob drops a leading "./"; os.walk keeps it."""
+    _tree(tmp_path, {"proj/a.py": PY_A, "proj/notes.md": "# Notes\n"})
+    monkeypatch.chdir(tmp_path)
+
+    job = svc._new_job("directory", "src-dir", "./proj")
+    await svc._run_index_directory_job(job, "./proj", "**/*.py")
+
+    assert job["total_files"] == 1
