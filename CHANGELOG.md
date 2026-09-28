@@ -105,6 +105,10 @@ Added, Fixed.
   a source record never wrote `graph_indexed`, which defaults to true. A
   chunks-only (`skip_graph`) source now reads back as not graph-indexed, so
   `rebuild_all_graphs(only_missing=true)` finds it.
+- `/index-graph` (the second pass of two-pass indexing) refused a source
+  indexed with `/index-file`, graphed every supported file under a
+  directory rather than the files the first pass indexed, and on finishing
+  reset the source's recorded chunk count to 0.
 - The indexer in `docker-compose.yml` could not start: it received only the
   settings listed under its `environment:`, which did not include
   `MILVUS_HOST`, `MILVUS_PORT` or `EMBEDDING_URL`, and it ignored everything

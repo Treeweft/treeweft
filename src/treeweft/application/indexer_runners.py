@@ -871,7 +871,8 @@ async def _walk_and_index(
     async with persist_lock:
         await _persist_job(job)
     _log_progress(job, force=True)
-    return total_chunks_ref[0], len(files)
+    # Every file of the source, including those a resume skipped as done.
+    return total_chunks_ref[0], job["total_files"]
 
 
 async def _reset_source(source_id: str):
@@ -999,6 +1000,7 @@ async def _finalize_job(job: dict, total_chunks: int, total_files: int, message:
         # re-enqueue the same kind. A graph-only re-pass must NOT relabel
         # the source — preserve the existing kind for it.
         job_kind = job.get("kind") or "repo"
+        existing = None
         if job_kind in ("repo", "directory", "file"):
             source_kind = job_kind
         else:
@@ -1021,7 +1023,12 @@ async def _finalize_job(job: dict, total_chunks: int, total_files: int, message:
                 datetime.fromtimestamp(job["finished_at"], tz=timezone.utc)
             ),
         )
-        await _state._source_repo.save(record)
+        # A graph-only job leaves an existing record alone: the chunk pass owns
+        # it (file and chunk counts, path, kind), and the graph job has set
+        # graph_indexed itself, only if a file succeeded. Rewriting it here
+        # zeroed chunk_count and overrode that rule (#51).
+        if not (job_kind == "graph" and existing is not None):
+            await _state._source_repo.save(record)
     except Exception:
         pass  # Degraded mode — graph store is the primary persistence
 
@@ -1518,7 +1525,7 @@ async def _run_index_graph_job(job: dict, source_id: str):
                 f"chunks-index it first before running /index-graph."
             )
         target_path = record.path
-        if not target_path or not os.path.isdir(target_path):
+        if not target_path or not os.path.exists(target_path):
             raise FileNotFoundError(
                 f"Source path {target_path!r} not accessible — cannot graph-index."
             )
@@ -1526,9 +1533,20 @@ async def _run_index_graph_job(job: dict, source_id: str):
         # Idempotent re-run: drop the prior graph for this source.
         await graph_store.delete_source(source_id)
 
-        # Re-collect files. The skip-patterns flag, if any, was stored on
-        # the original repo job — for graph jobs we honor it as well.
-        files = _collect_files(target_path, skip_patterns=job.get("skip_patterns"))
+        # A file source is its one file. Otherwise re-collect, then keep the
+        # files the chunk pass indexed: its pattern and skip patterns live on
+        # that job, not on the source, and a graph entry for a file with no
+        # chunks points nowhere. A store that tracks no paths (ChromaDB)
+        # reports none; then every file is graphed.
+        if os.path.isfile(target_path):
+            files = [target_path]
+        else:
+            files = _collect_files(target_path, skip_patterns=job.get("skip_patterns"))
+        from treeweft.retriever import list_indexed_paths
+
+        indexed = await list_indexed_paths(source_id)
+        if indexed:
+            files = [f for f in files if f in indexed]
         job["total_files"] = len(files)
         job["processed_files"] = 0
         job["committed_files"] = 0
