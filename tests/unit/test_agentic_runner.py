@@ -157,6 +157,7 @@ def _result_with_call_stats(**overrides) -> AgentRunResult:
         repeated_tool_calls=2,
         looped=True,
         truncated_responses=0,
+        failed_tool_calls=4,
     )
     fields.update(overrides)
     return AgentRunResult(**fields)
@@ -172,6 +173,7 @@ def test_arm_row_carries_call_stats_with_and_without_transcripts(debug):
     assert row["looped"] is True
     assert row["agent_truncated_responses"] == 0
     assert row["agent_truncated"] is False
+    assert row["failed_tool_calls"] == 4
     assert sum(row["tool_call_counts"].values()) == row["tool_calls"]
 
 
@@ -218,4 +220,39 @@ def test_truncation_totals_cover_all_arms_and_queries():
     assert _truncation_totals(rows) == {
         "agent_truncated_responses": 3,
         "judge_truncated_responses": 2,
+        # No row says whether its gold answer was cut off: unknown, not zero.
+        "gold_truncated_queries": None,
     }
+
+
+def test_gold_truncation_total_counts_known_markers_only():
+    from treeweft.application.benchmark.agentic_runner import _truncation_totals
+
+    rows = [
+        {"gold_truncated": True, "arms": {}},
+        {"gold_truncated": False, "arms": {}},
+        {"gold_truncated": None, "arms": {}},   # gold cached before the marker
+        {"arms": {}},                           # row from before the feature
+    ]
+
+    assert _truncation_totals(rows)["gold_truncated_queries"] == 1
+    assert _truncation_totals(rows[1:2])["gold_truncated_queries"] == 0
+
+
+@pytest.mark.parametrize("marker", [True, False, None])
+@pytest.mark.asyncio
+async def test_query_row_carries_the_gold_marker(marker):
+    from treeweft.application.benchmark.agentic_runner import run_one_query
+
+    gold_rec = {"gold_answer": "the reference"}
+    if marker is not None:
+        gold_rec["truncated"] = marker
+
+    row = await run_one_query(
+        {"id": "q1", "query": "where?", "relevant_files": []}, gold_rec,
+        repo="/repo", search_url="", agent_llm=None, judge_llm=None,
+        arms=[], max_turns=1,
+    )
+
+    assert row["gold_truncated"] is marker
+    assert row["gold_answer"] == "the reference"

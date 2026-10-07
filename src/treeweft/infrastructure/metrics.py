@@ -91,16 +91,19 @@ llm_response_conditions_total = Counter(
     "treeweft_llm_response_conditions_total",
     "Service LLM responses on which a condition was detected. "
     "condition=model_mismatch: the endpoint reported a different served model "
-    "from the first one seen for that requested model since startup; "
+    "from the first one seen for that requested model since startup, counted "
+    "on every such call, so it grows with call volume for as long as the "
+    "service runs on a different model; "
+    "condition=model_changed: the served model differs from the previous "
+    "call's, counted once per swap — alert on this one; "
     "condition=truncated: generation stopped at the token limit; "
     "condition=empty: no usable text came back. Detection only — the call's "
-    "result is unchanged. Any model_mismatch means the model moved under a "
-    "running service.",
+    "result is unchanged.",
     ["operation", "condition"],
     registry=registry,
 )
 for _op in LLM_OPERATIONS:
-    for _condition in ("model_mismatch", "truncated", "empty"):
+    for _condition in ("model_mismatch", "model_changed", "truncated", "empty"):
         llm_response_conditions_total.labels(operation=_op, condition=_condition)
 
 # ── Incremental-job counters ────────────────────────────────────────

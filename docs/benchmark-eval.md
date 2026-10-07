@@ -312,6 +312,8 @@ statistical power than any single-repo run.
 | Mean turns | Average agent turns per query |
 | Looped queries | Share of queries in which the agent made the same tool call, with the same arguments, three or more times |
 | Mean repeated calls | Average number of tool calls per query that exactly repeated an earlier call |
+| Mean failed calls | Average attempts per query that ran no tool: an unknown tool name, unparseable arguments, or a text-protocol turn with no valid action |
+| Hit turn cap | Share of queries where the agent used every turn and was forced to answer |
 | Calls per tool | Below the table: mean executed calls per query for each tool the arm has |
 
 **Reading the repeat figures.** They measure two different things. *Looped queries* and
@@ -321,7 +323,10 @@ make up for a thinner answer — the compensatory fetching that has sunk every
 payload-trimming idea so far, and that exact repeats do not catch. Two calls are the same
 only when the tool and arguments match exactly (key order and whitespace aside); there is no
 similarity matching. Calls with unparseable arguments or an unknown tool name ran nothing and
-are not counted. The threshold of three is recorded as `loop_threshold` in `_summary.json`.
+are not counted here; they are *failed calls*. A high failed-call figure means the model is
+failing at the tool protocol, which is about the model, not the arm, so read it before
+trusting the cell at all. *Hit turn cap* shows the agent running out of turns whatever the
+cause. The threshold of three is recorded as `loop_threshold` in `_summary.json`.
 
 **Cut-off responses.** `_summary.json` carries `agent_truncated_responses` and
 `judge_truncated_responses`: how many agent responses and judge verdicts stopped at the
@@ -331,6 +336,14 @@ endpoint never reported why generation stopped. Marked queries are **not** exclu
 mean, win rate and p-value is computed over all queries exactly as before. A cut-off verdict
 is usually unparseable and so already scored 1/1 with `parse_ok: false`; the marker tells you
 why.
+
+**Cut-off gold answers.** A gold answer is generated once, cached, and used as the reference
+for every arm on its query, so one that was cut off at the token limit skews that query for
+everyone. Each cached gold record now stores `truncated`; each row carries `gold_truncated`;
+`_summary.json` carries `gold_truncated_queries`; and the affected query ids are printed
+every time gold is built or loaded. Nothing is excluded or regenerated automatically:
+regenerating changes the reference, so it stays a deliberate `--regen-gold`. Gold cached
+before the marker existed shows as `null` (unknown) until regenerated.
 
 **Older results.** Summaries written before these figures existed show `n/a` for them,
 never zero. Every existing figure is computed as before, so this is not a new baseline

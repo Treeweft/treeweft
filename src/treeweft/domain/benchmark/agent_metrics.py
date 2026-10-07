@@ -197,6 +197,11 @@ def _call_stat_means(arms: list[dict]) -> dict:
             [None if v is None else float(bool(v)) for v in looped]),
         "mean_repeated_tool_calls": _mean_or_none(
             [a.get("repeated_tool_calls") for a in arms]),
+        "mean_failed_tool_calls": _mean_or_none(
+            [a.get("failed_tool_calls") for a in arms]),
+        "hit_cap_share": _mean_or_none(
+            [None if a.get("hit_cap") is None else float(bool(a["hit_cap"]))
+             for a in arms]),
         "mean_tool_calls_by_tool": by_tool,
         "agent_truncated_queries": _count(agent_cut),
         "judge_truncated_queries": _count(judge_cut),

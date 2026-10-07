@@ -41,6 +41,12 @@ Remembers, per requested model, the first served model seen in this process.
 
 State transition: `unset → set`, once. Never reset except by process restart (FR-006).
 
+`check(requested, served)` returns both answers for one call: `(mismatch, changed)`.
+`mismatch` is the comparison above. `changed` compares against the previous reported served
+model for that requested model: false on the first report, true on the call where the name
+differs from the previous call's, false again while it stays the same (FR-031). Both are none
+when `served` is none, and nothing is remembered. `observe` returns the mismatch alone.
+
 ### LLM call record (existing `llm.chat` span, extended)
 
 Existing attributes are unchanged. Added attributes are listed in
@@ -93,6 +99,7 @@ Invariants:
 | `repeated_tool_calls` | integer | 0 |
 | `looped` | boolean | false |
 | `truncated_responses` | integer or none | none |
+| `failed_tool_calls` | integer | 0 |
 
 `truncated_responses` counts agent responses in the run whose finish reason indicates the token
 limit, including the forced final answer. A response with an unknown finish reason is not

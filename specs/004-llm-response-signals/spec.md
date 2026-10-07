@@ -48,6 +48,9 @@ default behaviour.
 - Q: When should a service LLM call be flagged as a model mismatch, given that some servers report the served model in a different form from the one requested? → A: First-seen baseline. The served name reported the first time each requested model is seen after startup becomes the baseline; a later call is flagged when its served name differs from that baseline.
 - Q: Besides exact repeats of the same tool call, should the benchmark also report how many times each tool was called per query, per arm? → A: Yes. Record calls per tool for each query and arm, and report mean calls per tool per arm, alongside the exact-repeat measures. No near-duplicate detection.
 - Q: When an agent's answer or a judge's verdict was cut off at the token limit, how should that query be treated in the benchmark results? → A: Count and mark. The run summary reports the counts, and each affected query's result row is marked per arm. Aggregates and significance tests are computed exactly as today; nothing is excluded.
+- Q: Should an agent stuck repeating an unknown tool or malformed arguments count as looped, or be its own category? → A: Its own figure. "Looped" stays as executed repeats. Attempts that ran nothing are counted separately as failed calls, and the share of queries that hit the turn cap is reported.
+- Q: One model change makes every later call a mismatch until restart; is that the wanted behaviour? → A: Keep it as the standing state and add a second flag for the moment of change: `model_changed` is set when the served model differs from the previous call's, once per swap. Alerts use the change; the mismatch shows how long the service ran on a different model.
+- Q: What should be done about gold answers cut off at the token limit? → A: Detect and mark, do not exclude. Each gold record stores whether it was cut off; each query's result carries the marker; the run summary counts them and the affected query ids are printed. Scores and aggregates are computed as today. Gold already cached has no marker and shows as unknown until regenerated.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -111,8 +114,13 @@ that operation. A further, ordinary call carries no condition and increments not
    call completes, **Then** it is marked as truncated and counted for that operation.
 4. **Given** a response with no usable text after reasoning content is removed, **When** the
    call completes, **Then** it is marked as empty and counted for that operation.
-5. **Given** any of the three conditions, **When** the call completes, **Then** the result
+5. **Given** any of the conditions, **When** the call completes, **Then** the result
    returned to the caller is the same as it is today; flagging changes only what is observed.
+6. **Given** the served model changes once and then stays changed for many calls, **When**
+   those calls complete, **Then** exactly one call is marked as a model change, every call
+   from the change onward is marked as a model mismatch, and the change count rises by one.
+7. **Given** the served model changes a second time, **When** that call completes, **Then**
+   it is marked as a model change again, so a second change is distinguishable from the first.
 
 ---
 
@@ -169,6 +177,17 @@ without the feature.
 11. **Given** a cell containing marked queries, **When** aggregates and significance tests are
     computed, **Then** they include the marked queries and equal the values the harness
     produces today for the same data.
+12. **Given** an agent that names a tool that does not exist, or sends arguments that cannot
+    be parsed, three times in a row, **When** the query finishes, **Then** its result records
+    three failed calls and is not marked as looped.
+13. **Given** a completed cell, **When** the summary is written, **Then** each arm reports its
+    mean failed calls per query and the share of queries that hit the turn cap, and the
+    comparison table shows both.
+14. **Given** a gold answer whose generation stopped at the token limit, **When** it is cached,
+    **Then** the cached record says so, the query's result row carries the marker, the run
+    summary counts it, and the affected query id is printed when gold is built.
+15. **Given** a gold answer cached before the marker existed, **When** a run uses it, **Then**
+    the marker is unknown, the answer is used as before, and it is not regenerated.
 
 ---
 
@@ -192,8 +211,16 @@ without the feature.
 - A call fails with an error or times out. No response conditions are recorded; the existing
   error recording is unchanged.
 - An agent's tool call has arguments that cannot be parsed. It is never counted as a repeat
-  of another call, and it is not counted in calls per tool, because no tool ran.
-- The agent names a tool that does not exist. It is not counted in calls per tool.
+  of another call, and it is not counted in calls per tool, because no tool ran. It is
+  counted as a failed call.
+- The agent names a tool that does not exist. It is not counted in calls per tool; it is
+  counted as a failed call.
+- An agent turn in the text protocol contains no valid action. It is counted as a failed call.
+- The served model changes and later changes back to the original. The return is a model
+  change but no longer a mismatch.
+- A cut-off gold answer is already in the cache. It is reported every run until regenerated.
+- No response in an agent's run reports why generation stopped. The run's cut-off marker is
+  unknown, not "none".
 - A response is both truncated and reported under a different model. Both conditions are
   recorded.
 - Tracing is disabled or the tracing library is absent. Calls behave exactly as today, and
@@ -219,6 +246,10 @@ without the feature.
 
 **Flagging conditions (service)**
 
+- **FR-031**: A call MUST additionally be marked as a model change when its served model
+  differs from the served model of the previous call for the same requested model. A model
+  change MUST be counted per operation. One change followed by any number of calls serving
+  the new model MUST produce exactly one model change.
 - **FR-006**: For each requested model, the service MUST remember the served model reported by
   the first response after startup that includes one. A later call for that requested model
   MUST be marked as a model mismatch when its served model differs from the remembered one.
@@ -260,17 +291,36 @@ without the feature.
   stopped at the token limit and whether the judge's verdict did.
 - **FR-024**: Marked queries MUST remain in every aggregate and significance test, computed as
   they are today.
+- **FR-025**: For each query and arm, the harness MUST record the number of failed calls:
+  attempts that ran no tool because the tool name was unknown, the arguments could not be
+  parsed, or the turn contained no valid action. Failed calls MUST NOT count toward repeated
+  calls, the looped flag or calls per tool.
+- **FR-026**: The per-arm summary and the comparison table MUST report mean failed calls per
+  query and the share of queries that hit the turn cap.
+- **FR-027**: When a gold answer is generated, the harness MUST record with it whether its
+  generation stopped at the token limit, and MUST keep that with the cached answer.
+- **FR-028**: Each query's result MUST carry its gold answer's marker, the run summary MUST
+  report how many queries have a cut-off gold answer, and the affected query ids MUST be
+  printed whenever gold is built or loaded for a run.
+- **FR-029**: A gold answer with no recorded marker MUST be reported as unknown, MUST be used
+  as before, and MUST NOT be regenerated or guessed at from its text. Cut-off gold answers
+  MUST NOT be excluded from any aggregate.
+- **FR-030**: A marker that could not be determined (no finish reason reported) MUST be
+  recorded as unknown, never as "not cut off". This applies to agent, judge and gold markers.
 
 ### Key Entities
 
 - **LLM call record**: one chat call made by the service. Gains requested model, served model,
   input tokens, output tokens, finish reason, and zero or more response conditions.
-- **Response condition**: one of model mismatch, truncated, empty. Attached to an LLM call
+- **Response condition**: one of model mismatch, model changed, truncated, empty. Attached to an LLM call
   record and counted per operation. "Truncated" is the term used in field and attribute names;
   "cut off" is its plain-language name in this document and means the same thing: generation
   stopped because the token limit was reached.
 - **Agent run result**: one query run by one arm. Gains repeated-call count, a looped flag,
-  a count of calls per tool, and cut-off markers for the agent's responses and the verdict.
+  a count of calls per tool, a failed-call count, and cut-off markers for the agent's
+  responses and the verdict.
+- **Gold answer**: the cached reference for one query. Gains a cut-off marker, carried into
+  that query's result.
 - **Arm summary**: the per-arm aggregate for a cell. Gains looped share, mean repeated calls,
   mean calls per tool, and truncated-response counts.
 
@@ -296,6 +346,13 @@ without the feature.
   after the change, to within ±5%.
 - **SC-009**: A reader can list which queries in a cell had a cut-off agent response or verdict,
   per arm, from the result rows alone.
+- **SC-010**: After a single model swap under a running service, the count of model changes is
+  exactly one, however many calls follow.
+- **SC-011**: A reader can tell, from the summary alone, how often an arm's agent failed to
+  make a valid tool call and how often it ran out of turns, separately from how often it
+  repeated itself.
+- **SC-012**: A reader can list every query in a cell whose gold answer was cut off, and no
+  cut-off gold answer generated after this change goes unreported.
 
 ## Assumptions
 
@@ -307,6 +364,8 @@ without the feature.
   trace records and their own failure modes.
 - **The benchmark harness keeps its own served-model record.** It already records served
   models per run; this feature does not replace that.
+- **Gold already in the cache is not re-examined.** It has no marker and shows as unknown
+  until regenerated; regenerating is a deliberate step because it changes the reference.
 - **Mismatch means drift, not misconfiguration.** The rule detects the served model changing
   while the service runs. A wrong model present from startup is visible on the trace record
   but is not flagged; verifying the served model before a long run remains a separate,

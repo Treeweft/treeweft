@@ -110,6 +110,7 @@ async def test_three_identical_calls_and_two_different(native):
     # This client reports no finish reason: unknown, not "none were cut off".
     assert res.truncated_responses is None
     # Existing figures and the work done are what they always were.
+    assert res.failed_tool_calls == 0
     assert res.tool_calls == 5 == len(executed)
     assert sum(res.tool_call_counts.values()) == res.tool_calls
     assert res.turns == 6
@@ -164,6 +165,9 @@ async def test_unknown_tool_is_not_counted(native):
     assert res.repeated_tool_calls == 0
     assert res.looped is False
     assert res.tool_calls == 1 == len(executed)
+    # Three attempts that ran nothing: a protocol failure, counted on its own
+    # and kept out of the repeat figures.
+    assert res.failed_tool_calls == 3
 
 
 @pytest.mark.asyncio
@@ -183,6 +187,9 @@ async def test_unparseable_arguments_are_not_counted_native():
     assert res.repeated_tool_calls == 0
     assert res.looped is False
     assert res.tool_calls == 1 == len(executed)
+    # Three attempts that ran nothing: a protocol failure, counted on its own
+    # and kept out of the repeat figures.
+    assert res.failed_tool_calls == 3
 
 
 @PROTOCOLS
@@ -257,3 +264,34 @@ async def test_figures_survive_an_llm_failure_mid_run(native):
     assert res.error
     assert res.tool_call_counts == {"search_code": 2, "read_file": 0}
     assert res.repeated_tool_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_react_turn_with_no_valid_action_is_a_failed_call():
+    class _Rambling(_ChatOnlyLLM):
+        def _reply(self):
+            self.llm_calls += 1
+            step = self.steps.pop(0)
+            return (step if isinstance(step, str) and step != "FINAL"
+                    else _react(step)), None
+
+    llm = _Rambling(["I am not sure what to do next.", "Still thinking.", "FINAL"],
+                    native=False)
+
+    res = await _run(llm, [], False)
+
+    assert res.failed_tool_calls == 2
+    assert res.tool_calls == 0
+    assert res.final_answer == "the answer"
+
+
+@PROTOCOLS
+@pytest.mark.asyncio
+async def test_failed_calls_survive_hitting_the_turn_cap(native):
+    steps = [("no_such_tool", {"q": 1}), ("no_such_tool", {"q": 1}), "FINAL"]
+
+    res = await _run(_ChatOnlyLLM(steps, native), [], native, max_turns=2)
+
+    assert res.hit_cap is True
+    assert res.failed_tool_calls == 2
+    assert res.looped is False

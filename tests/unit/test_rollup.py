@@ -327,8 +327,10 @@ def summary_stats(summary_a):
     return _with_stats(
         summary_a,
         grep={"looped_share": 0.08, "mean_repeated_tool_calls": 0.42,
+              "mean_failed_tool_calls": 1.5, "hit_cap_share": 0.1,
               "mean_tool_calls_by_tool": {"grep": 3.1, "glob": 0.8, "read_file": 2.4}},
         treeweft={"looped_share": 0.02, "mean_repeated_tool_calls": 0.1,
+                  "mean_failed_tool_calls": 0.25, "hit_cap_share": 0.0,
                   "mean_tool_calls_by_tool": {"search_code": 1.7, "read_file": 1.2}},
     )
 
@@ -344,6 +346,8 @@ class TestComparisonTableCallStats:
         assert "| Mean turns | 6.20 | 4.10 | — | — |" in table
         assert "| Looped queries | 8.0% | 2.0% | — | — |" in table
         assert "| Mean repeated calls | 0.42 | 0.10 | — | — |" in table
+        assert "| Mean failed calls | 1.50 | 0.25 | — | — |" in table
+        assert "| Hit turn cap | 10.0% | 0.0% | — | — |" in table
 
     def test_calls_per_tool_lists_each_arms_own_tools(self, summary_stats):
         table = format_comparison_table(summary_stats)
@@ -370,6 +374,8 @@ class TestComparisonTableCallStats:
         assert "| Mean turns | n/a | n/a | — | — |" in table
         assert "| Looped queries | n/a | n/a | — | — |" in table
         assert "| Mean repeated calls | n/a | n/a | — | — |" in table
+        assert "| Mean failed calls | n/a | n/a | — | — |" in table
+        assert "| Hit turn cap | n/a | n/a | — | — |" in table
         assert "- grep: n/a" in table
         assert "- treeweft: n/a" in table
 
@@ -396,6 +402,10 @@ class TestRollupCallStats:
         assert with_stats["treeweft_looped_share"] == 0.02
         assert with_stats["grep_mean_repeated_tool_calls"] == 0.42
         assert with_stats["treeweft_mean_repeated_tool_calls"] == 0.1
+        assert with_stats["grep_mean_failed_tool_calls"] == 1.5
+        assert with_stats["grep_hit_cap_share"] == 0.1
+        assert without["grep_mean_failed_tool_calls"] is None
+        assert without["treeweft_hit_cap_share"] is None
         assert with_stats["treeweft_mean_tool_calls_by_tool"] == {
             "search_code": 1.7, "read_file": 1.2}
         for key in ("grep_looped_share", "treeweft_looped_share",
@@ -440,7 +450,8 @@ class TestRollupCallStats:
                         treeweft={"looped_share": 0.9, "mean_repeated_tool_calls": 9.0}),
             summary_b,
         ])
-        new = ("looped_share", "repeated_tool_calls", "tool_calls_by_tool")
+        new = ("looped_share", "repeated_tool_calls", "tool_calls_by_tool",
+               "failed_tool_calls", "hit_cap_share")
         for key, value in before["pooled"].items():
             if not key.endswith(new):
                 assert after["pooled"][key] == value, key

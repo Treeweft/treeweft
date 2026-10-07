@@ -72,6 +72,10 @@ class AgentRunResult:
     # Agent responses that stopped at the token limit, forced final included.
     # None when no response reported a finish reason: unknown, not zero.
     truncated_responses: int | None = None
+    # Attempts that ran nothing: an unknown tool, unparseable arguments, or a
+    # ReAct turn with no valid action. A protocol failure by the model, kept
+    # apart from the repeat figures, which are about what the tools returned.
+    failed_tool_calls: int = 0
 
 
 def _count_truncation(so_far: int | None, finish_reason: str | None) -> int | None:
@@ -83,9 +87,10 @@ def _count_truncation(so_far: int | None, finish_reason: str | None) -> int | No
     return (so_far or 0) + int(cut)
 
 
-def _call_stats(tally: ToolCallTally, truncated: int | None) -> dict:
+def _call_stats(tally: ToolCallTally, truncated: int | None, failed: int) -> dict:
     """The AgentRunResult fields derived from a run's tally."""
     return {
+        "failed_tool_calls": failed,
         "tool_call_counts": tally.counts_by_tool,
         "repeated_tool_calls": tally.repeated,
         "looped": tally.looped,
@@ -172,6 +177,7 @@ async def run_agent(
     tool_calls = 0
     tally = ToolCallTally(tool_map)
     truncated: int | None = None
+    failed = 0
     last_answer = ""
     t0 = time.monotonic()
 
@@ -194,7 +200,7 @@ async def run_agent(
                 transcript=transcript,
                 latency_s=round(time.monotonic() - t0, 3),
                 error=f"llm call failed at turn {turn}: {e}",
-                **_call_stats(tally, truncated),
+                **_call_stats(tally, truncated, failed),
             )
         content, usage = reply.content, reply.usage
         truncated = _count_truncation(truncated, reply.finish_reason)
@@ -213,12 +219,13 @@ async def run_agent(
                 retrieved_files=retrieved_files,
                 transcript=transcript,
                 latency_s=round(time.monotonic() - t0, 3),
-                **_call_stats(tally, truncated),
+                **_call_stats(tally, truncated, failed),
             )
 
         messages.append({"role": "assistant", "content": content})
 
         if action.kind == "none" or action.tool not in tool_map:
+            failed += 1
             hint = action.error or f"unknown tool {action.tool!r}"
             obs = (
                 f"OBSERVATION: Could not run that step ({hint}). Emit exactly one "
@@ -274,7 +281,7 @@ async def run_agent(
         latency_s=round(time.monotonic() - t0, 3),
         hit_cap=True,
         error=err,
-        **_call_stats(tally, truncated),
+        **_call_stats(tally, truncated, failed),
     )
 
 
@@ -343,6 +350,7 @@ async def _run_agent_native(
     tool_calls = 0
     tally = ToolCallTally(tool_map)
     truncated: int | None = None
+    failed = 0
     last_answer = ""
     t0 = time.monotonic()
 
@@ -361,7 +369,7 @@ async def _run_agent_native(
                 transcript=transcript,
                 latency_s=round(time.monotonic() - t0, 3),
                 error=f"llm call failed at turn {turn}: {e}",
-                **_call_stats(tally, truncated),
+                **_call_stats(tally, truncated, failed),
             )
         content, usage, tcs = reply.content, reply.usage, reply.tool_calls
         truncated = _count_truncation(truncated, reply.finish_reason)
@@ -386,7 +394,7 @@ async def _run_agent_native(
                 retrieved_files=retrieved_files,
                 transcript=transcript,
                 latency_s=round(time.monotonic() - t0, 3),
-                **_call_stats(tally, truncated),
+                **_call_stats(tally, truncated, failed),
             )
 
         # Assistant turn WITH its tool_calls — required context for the
@@ -406,9 +414,11 @@ async def _run_agent_native(
             rec["tool"] = name
             rec["args"] = args if args is not None else fn.get("arguments")
             if arg_err:
+                failed += 1
                 result: dict | str = {"error": arg_err}
                 rec["observation_error"] = arg_err
             elif name not in tool_map:
+                failed += 1
                 err_msg = f"unknown tool {name!r}"
                 result = {"error": err_msg}
                 rec["observation_error"] = err_msg
@@ -458,5 +468,5 @@ async def _run_agent_native(
         latency_s=round(time.monotonic() - t0, 3),
         hit_cap=True,
         error=err,
-        **_call_stats(tally, truncated),
+        **_call_stats(tally, truncated, failed),
     )

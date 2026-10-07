@@ -107,14 +107,29 @@ class ServedModelBaseline:
     alias. Comparing against what the endpoint itself said first flags only a
     change. A wrong model served from the very first call is therefore not a
     mismatch; both names are on the span for the operator to see.
+
+    Two answers per call. *Mismatch* is the standing state: the served model
+    is not the one this process started with, true on every call until it
+    goes back. *Changed* is the moment: the served model differs from the
+    previous call's, true once per swap. Alert on changed, chart mismatch.
     """
 
     def __init__(self) -> None:
         self._first_seen: dict[str, str] = {}
+        self._last_seen: dict[str, str] = {}
+
+    def check(
+        self, requested: str, served: str | None
+    ) -> tuple[bool | None, bool | None]:
+        """(mismatch, changed); both None when `served` was not reported, in
+        which case nothing is remembered."""
+        if not served:
+            return None, None
+        baseline = self._first_seen.setdefault(requested, served)
+        previous = self._last_seen.get(requested, served)
+        self._last_seen[requested] = served
+        return served != baseline, served != previous
 
     def observe(self, requested: str, served: str | None) -> bool | None:
         """True if `served` differs from the baseline; None if not reported."""
-        if not served:
-            return None
-        baseline = self._first_seen.setdefault(requested, served)
-        return served != baseline
+        return self.check(requested, served)[0]

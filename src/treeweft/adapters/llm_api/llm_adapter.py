@@ -90,7 +90,8 @@ def _get_slots() -> PrioritySlots:
 
 def _record_response(span, data, operation: str) -> None:
     """Put what the endpoint reported about a response on the span and the
-    counters, and flag model drift, truncation and an empty answer. A value it
+    counters, and flag model drift (the standing mismatch and the moment of
+    change), truncation and an empty answer. A value it
     did not report is left unset, and a condition that could not be evaluated
     is left off the span. Detection only — nothing here changes what _chat
     returns. Never raises: observability must not fail a call that would
@@ -115,11 +116,10 @@ def _record_response(span, data, operation: str) -> None:
                 metrics.llm_tokens_total.labels(
                     operation=operation, direction=direction
                 ).inc(count)
+        mismatch, changed = _served_baseline.check(LLM_MODEL, signals.served_model)
         for condition, detected in (
-            (
-                "model_mismatch",
-                _served_baseline.observe(LLM_MODEL, signals.served_model),
-            ),
+            ("model_mismatch", mismatch),
+            ("model_changed", changed),
             ("truncated", signals.truncated),
             ("empty", signals.empty),
         ):

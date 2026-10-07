@@ -196,6 +196,7 @@ def _arm_row(rr: AgentRunResult, retrieved: list[str], relevant: list[str],
         "tool_call_counts": rr.tool_call_counts,
         "repeated_tool_calls": rr.repeated_tool_calls,
         "looped": rr.looped,
+        "failed_tool_calls": rr.failed_tool_calls,
         # None when the endpoint never reported a finish reason.
         "agent_truncated_responses": rr.truncated_responses,
         "agent_truncated": (None if rr.truncated_responses is None
@@ -215,8 +216,14 @@ def _truncation_totals(rows: list[dict]) -> dict:
         for arm in (row.get("arms") or {}).values():
             agent += arm.get("agent_truncated_responses") or 0
             judge += bool((arm.get("judge") or {}).get("truncated"))
+    # A gold answer is the reference for every arm on its query. None when no
+    # row knows (gold cached before the marker existed): unknown, not zero.
+    gold_known = [r["gold_truncated"] for r in rows
+                  if r.get("gold_truncated") is not None]
     return {"agent_truncated_responses": agent,
-            "judge_truncated_responses": judge}
+            "judge_truncated_responses": judge,
+            "gold_truncated_queries": (sum(1 for g in gold_known if g)
+                                       if gold_known else None)}
 
 
 async def _run_arm(arm: str, query: str, repo: str, search_url: str,
@@ -367,6 +374,7 @@ async def run_one_query(
         "relevant_files": primary,
         "additional_relevant_files": [f for f in additional if f not in primary],
         "gold_answer": gold_answer,
+        "gold_truncated": gold_rec.get("truncated"),
         "arms": arms_out,
     }
 

@@ -230,3 +230,51 @@ def test_baseline_consistent_unrelated_form_is_never_a_mismatch(served):
     b = ServedModelBaseline()
     for _ in range(5):
         assert b.observe("configured-alias", served) is False
+
+
+# ── ServedModelBaseline.check: standing mismatch vs the moment of change ────
+
+def test_check_first_report_is_neither_mismatch_nor_change():
+    assert ServedModelBaseline().check("m", "served-1") == (False, False)
+
+
+def test_check_unreported_is_unknown_and_remembers_nothing():
+    b = ServedModelBaseline()
+    assert b.check("m", None) == (None, None)
+    assert b.check("m", "served-1") == (False, False)
+
+
+def test_one_swap_changes_once_but_stays_a_mismatch():
+    b = ServedModelBaseline()
+    b.check("m", "served-1")
+    assert b.check("m", "served-2") == (True, True)
+    assert b.check("m", "served-2") == (True, False)
+    assert b.check("m", "served-2") == (True, False)
+
+
+def test_second_swap_is_a_new_change():
+    b = ServedModelBaseline()
+    b.check("m", "served-1")
+    b.check("m", "served-2")
+    assert b.check("m", "served-3") == (True, True)
+
+
+def test_swapping_back_is_a_change_but_no_longer_a_mismatch():
+    b = ServedModelBaseline()
+    b.check("m", "served-1")
+    b.check("m", "served-2")
+    assert b.check("m", "served-1") == (False, True)
+
+
+def test_unreported_call_between_reports_does_not_reset_the_previous_name():
+    b = ServedModelBaseline()
+    b.check("m", "served-1")
+    assert b.check("m", None) == (None, None)
+    assert b.check("m", "served-1") == (False, False)
+    assert b.check("m", "served-2") == (True, True)
+
+
+def test_observe_still_returns_the_mismatch():
+    b = ServedModelBaseline()
+    assert b.observe("m", "served-1") is False
+    assert b.observe("m", "served-2") is True

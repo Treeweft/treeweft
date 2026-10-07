@@ -340,6 +340,8 @@ def _stats(counts: dict, repeated: int = 0, looped: bool = False,
         "looped": looped,
         "agent_truncated_responses": int(agent_truncated),
         "agent_truncated": agent_truncated,
+        "failed_tool_calls": 2 if looped else 0,
+        "hit_cap": looped,
         "_judge_truncated": judge_truncated,
     }
 
@@ -381,6 +383,27 @@ class TestCallStatsAggregation:
         assert t["agent_truncated_queries"] == 0
         assert t["judge_truncated_queries"] == 1
 
+    def test_failed_calls_and_turn_cap(self):
+        summary = aggregate(_stat_rows(), ["grep", "treeweft"], repo="r", model="m")
+
+        # One of four rows per arm is the looped one: 2 failed calls, hit the cap.
+        assert summary["grep"]["mean_failed_tool_calls"] == 0.5
+        assert summary["grep"]["hit_cap_share"] == 0.25
+        assert summary["treeweft"]["mean_failed_tool_calls"] == 0.5
+        assert summary["treeweft"]["hit_cap_share"] == 0.25
+
+    def test_turn_cap_share_is_available_for_older_rows_that_recorded_it(self, mixed_rows):
+        import copy
+
+        rows = copy.deepcopy(mixed_rows)
+        for i, r in enumerate(rows):
+            r["arms"]["grep"]["hit_cap"] = i == 0
+        summary = aggregate(rows, ["grep", "treeweft"], repo="r", model="m")
+
+        assert summary["grep"]["hit_cap_share"] == 0.2
+        assert summary["grep"]["mean_failed_tool_calls"] is None
+        assert summary["treeweft"]["hit_cap_share"] is None
+
     def test_loop_threshold_is_recorded(self):
         summary = aggregate(_stat_rows(), ["grep", "treeweft"], repo="r", model="m")
         assert summary["loop_threshold"] == 3
@@ -407,7 +430,8 @@ class TestCallStatsAggregation:
         for arm in ("grep", "treeweft"):
             for key in ("looped_share", "mean_repeated_tool_calls",
                         "mean_tool_calls_by_tool", "agent_truncated_queries",
-                        "judge_truncated_queries"):
+                        "judge_truncated_queries", "mean_failed_tool_calls",
+                        "hit_cap_share"):
                 assert summary[arm][key] is None, (arm, key)
 
     def test_rows_without_the_field_are_left_out_of_the_mean(self, mixed_rows):
@@ -460,7 +484,8 @@ class TestCallStatsAggregation:
 
         new_arm_keys = {"looped_share", "mean_repeated_tool_calls",
                         "mean_tool_calls_by_tool", "agent_truncated_queries",
-                        "judge_truncated_queries"}
+                        "judge_truncated_queries", "mean_failed_tool_calls",
+                        "hit_cap_share"}
         for arm in ("grep", "treeweft"):
             assert {k: v for k, v in after[arm].items() if k not in new_arm_keys} == \
                    {k: v for k, v in before[arm].items() if k not in new_arm_keys}

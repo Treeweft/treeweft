@@ -85,8 +85,8 @@ still renders data.
 curl -s http://localhost:8001/metrics | grep '^treeweft_llm_response_conditions_total'
 ```
 
-Expected: one series per operation and condition (fifteen with today's operations), all
-present from startup. On a
+Expected: one series per operation and condition (twenty with today's operations and four
+conditions), all present from startup. On a
 stable deployment the `model_mismatch` series stay at 0 (SC-004). To see truncation for real,
 set `LLM_SUMMARY_MAX_TOKENS` to a very small value in a throwaway environment, index one file,
 and confirm the `chunk_summary` / `truncated` series rises. Restore the setting afterwards.

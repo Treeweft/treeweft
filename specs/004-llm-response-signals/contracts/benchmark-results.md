@@ -11,6 +11,7 @@ measured", never as zero.
 | `tool_call_counts` | object, tool name → int | executed calls per tool in this run, for every tool the arm exposes; a tool never called is present with 0 |
 | `repeated_tool_calls` | int | executed calls whose tool and arguments equal an earlier call's |
 | `looped` | bool | some call was made 3 or more times with the same arguments |
+| `failed_tool_calls` | int | attempts that ran no tool: unknown tool name, unparseable arguments, or a text-protocol turn with no valid action; not included in any of the three fields above |
 | `agent_truncated_responses` | int or null | agent responses in this run that stopped at the token limit; null when no response reported a finish reason |
 | `agent_truncated` | bool or null | `agent_truncated_responses > 0`; null when that count is null |
 
@@ -22,6 +23,15 @@ measured", never as zero.
 
 Invariant: the values in `tool_call_counts` sum to the existing `tool_calls`.
 
+Each row gains, at the top level beside `gold_answer`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `gold_truncated` | bool or null | the gold answer's generation stopped at the token limit; null when unknown, including gold cached before the marker existed |
+
+The gold cache file (`benchmarks/gold/<repo>.jsonl`) gains `truncated` (bool or null) on each
+record generated from now on. Existing records are left as they are.
+
 All fields are written whether or not `--debug-transcripts` is set.
 
 ## Summary file: `<arm>` block
@@ -30,6 +40,8 @@ All fields are written whether or not `--debug-transcripts` is set.
 |---|---|---|
 | `looped_share` | number or null | fraction of this arm's queries with `looped` true |
 | `mean_repeated_tool_calls` | number or null | mean of `repeated_tool_calls` |
+| `mean_failed_tool_calls` | number or null | mean of `failed_tool_calls` |
+| `hit_cap_share` | number or null | fraction of this arm's queries that hit the turn cap; computed from the existing `hit_cap` row field, so it is available for older results that recorded it |
 | `mean_tool_calls_by_tool` | object or null | tool name → mean executed calls per query |
 | `agent_truncated_queries` | int or null | queries with `agent_truncated` true |
 | `judge_truncated_queries` | int or null | queries with `judge.truncated` true |
@@ -48,6 +60,7 @@ query, marked or not.
 | `loop_threshold` | int | identical calls needed for `looped`; 3 |
 | `agent_truncated_responses` | int | agent responses cut off, all arms and queries |
 | `judge_truncated_responses` | int | judge verdicts cut off, all arms and queries |
+| `gold_truncated_queries` | int or null | queries whose gold answer was cut off; null when no row's marker is known |
 
 ## Comparison table (grep vs treeweft)
 
@@ -57,6 +70,8 @@ Rows added below the existing three. Existing rows are unchanged.
 | Mean turns | 6.20 | 4.10 | — | — |
 | Looped queries | 8.0% | 2.0% | — | — |
 | Mean repeated calls | 0.42 | 0.10 | — | — |
+| Mean failed calls | 1.50 | 0.25 | — | — |
+| Hit turn cap | 10.0% | 0.0% | — | — |
 
 Calls per tool (mean per query)
 
@@ -75,6 +90,8 @@ Each per-repo entry gains, for both arms:
 |---|---|
 | `grep_looped_share`, `treeweft_looped_share` | number or null |
 | `grep_mean_repeated_tool_calls`, `treeweft_mean_repeated_tool_calls` | number or null |
+| `grep_mean_failed_tool_calls`, `treeweft_mean_failed_tool_calls` | number or null |
+| `grep_hit_cap_share`, `treeweft_hit_cap_share` | number or null |
 | `grep_mean_tool_calls_by_tool`, `treeweft_mean_tool_calls_by_tool` | object or null |
 
 The rollup table gains two columns after the existing ones, `looped g/t` and `repeats g/t`,
@@ -86,8 +103,8 @@ are computed over the repos that have the figures.
 
 ## Experiment tracking (opt-in)
 
-Each (query, arm) trace gains two feedback scores, `looped` (0 or 1) and
-`repeated_tool_calls`, written post-hoc from the finished rows like the existing scores.
+Each (query, arm) trace gains three feedback scores, `looped` (0 or 1),
+`repeated_tool_calls` and `failed_tool_calls`, written post-hoc from the finished rows like the existing scores.
 
 ## Compatibility
 

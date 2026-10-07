@@ -470,6 +470,58 @@ T021 tests/unit/test_opik_tracing.py
 - For every implementation task, run its failing test first, then implement, then run the
   whole unit suite before moving on.
 
+---
+
+## Phase 7: Additions after code review (2026-10-06)
+
+Three additions agreed after the review of pull request 68. Tests first, as before.
+
+- [X] T036 [P] [US2] Add failing tests to `tests/unit/test_llm_response_signals.py` for
+  `ServedModelBaseline.check` returning `(mismatch, changed)`: first report `(False, False)`;
+  one swap `(True, True)` then `(True, False)` on every later call; a second swap `(True, True)`
+  again; swapping back `(False, True)`; an unreported served model `(None, None)` with nothing
+  remembered (FR-031).
+- [X] T037 [US2] Add failing tests to `tests/unit/test_llm_adapter_signals.py`: after one swap
+  followed by three calls, `treeweft.llm.model_changed` is true on exactly one span,
+  `treeweft_llm_response_conditions_total{condition="model_changed"}` rises by one and
+  `condition="model_mismatch"` by three (SC-010); the series exists at zero for every operation.
+- [X] T038 [US2] Implement `check` in `src/treeweft/domain/llm_response.py` (keep `observe`
+  returning the mismatch), add the `model_changed` condition to
+  `src/treeweft/infrastructure/metrics.py`, and record it in `_chat` in
+  `src/treeweft/adapters/llm_api/llm_adapter.py`.
+- [X] T039 [P] [US3] Add failing tests to `tests/unit/test_agent_loop_tool_stats.py`: three
+  unknown-tool attempts and three unparseable-argument attempts each give
+  `failed_tool_calls == 3` with `looped is False` and no entry in the repeat figures; a
+  text-protocol turn with no valid action is a failed call; the count survives hitting the
+  turn cap (FR-025).
+- [X] T040 [P] [US3] Add failing tests to `tests/unit/test_agent_metrics.py`,
+  `tests/unit/test_rollup.py`, `tests/unit/test_agentic_runner.py` and
+  `tests/unit/test_opik_tracing.py` for `mean_failed_tool_calls` and `hit_cap_share` per arm
+  (null when no row carries the field; `hit_cap_share` available for older rows that recorded
+  `hit_cap`), the "Mean failed calls" and "Hit turn cap" table rows, the row field, the rollup
+  data fields and the feedback score (FR-026).
+- [X] T041 [US3] Implement the failed-call count in both loops in
+  `src/treeweft/application/benchmark/agent_loop.py`, the row field in
+  `src/treeweft/application/benchmark/agentic_runner.py`, the per-arm means in
+  `src/treeweft/domain/benchmark/agent_metrics.py`, the table rows and rollup fields in
+  `src/treeweft/domain/benchmark/rollup.py`, and the score in
+  `src/treeweft/adapters/benchmark/opik_tracing.py`.
+- [X] T042 [P] [US3] Write failing tests in `tests/unit/test_gold_truncation.py` against a real
+  cache file in a temp directory: each generated gold record carries `truncated` (true, false,
+  or none when the server did not say); the marker is written to the cache and read back
+  without regenerating; cut-off query ids are printed on every run that uses them; a record
+  cached before the marker is unknown, used as before and not regenerated; `regen` replaces an
+  unknown marker (FR-027 to FR-029). Add tests to `tests/unit/test_agentic_runner.py` that the
+  query row carries `gold_truncated` and the summary total `gold_truncated_queries` is null
+  when no marker is known.
+- [X] T043 [US3] Record the marker in `src/treeweft/application/benchmark/gold.py` and print
+  the affected ids; carry `gold_truncated` into the row and `gold_truncated_queries` into the
+  summary in `src/treeweft/application/benchmark/agentic_runner.py`.
+- [X] T044 Update `spec.md` (clarifications, scenarios, FR-025 to FR-031, SC-010 to SC-012),
+  the two contracts, `data-model.md`, `research.md`, `docs/observability-runbook.md`,
+  `docs/benchmark-eval.md` and `CHANGELOG.md`; run the full unit suite and confirm
+  `git diff origin/main -- contracts/` is still empty.
+
 ## Implementation notes (2026-10-06)
 
 - **T016** landed in a new file, `tests/unit/test_agent_loop_tool_stats.py`, not as an extension

@@ -102,6 +102,13 @@ a restart forgets the baseline; with several worker processes each keeps its own
 **Concurrency**: the service is single-threaded asyncio and the check contains no `await`, so a
 plain dictionary is safe without a lock.
 
+**Added after review — the moment of change (FR-031)**: the baseline latches, so after one
+swap every later call is a mismatch. That makes the mismatch counter grow with call volume and
+leaves an alert firing until restart, unable to show a second change. A second flag,
+`model_changed`, compares against the previous call's served name and so fires once per swap.
+Both are kept: the change is the alert, the mismatch is the record of how long the service ran
+on a different model.
+
 ## R6. Truncated and empty
 
 **Decision**:
@@ -229,6 +236,8 @@ when the stack is unavailable.
 - Acting on a truncated or empty response (retry, reject, keep out of the summary cache). This
   could move search quality and needs a benchmark run first.
 - Embedding and reranker calls.
-- Gold-answer generation and query generation in the harness: a cut-off gold answer would also
-  matter, but the spec covers agent and judge responses only.
+- Query generation in the harness is not checked for cut-off responses.
+- Acting on a cut-off gold answer (regenerating it automatically, or excluding its query).
+  Gold answers are now marked and reported (FR-027 to FR-029); regenerating changes the
+  reference every arm is judged against, so it stays a deliberate `--regen-gold`.
 - A dashboard panel for the new counters. The existing dashboard is left untouched.

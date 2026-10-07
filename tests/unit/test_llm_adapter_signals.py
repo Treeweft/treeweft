@@ -101,7 +101,7 @@ def _conditions(operation: str = OP) -> dict[str, float]:
             "treeweft_llm_response_conditions_total",
             {"operation": operation, "condition": c},
         )
-        for c in ("model_mismatch", "truncated", "empty")
+        for c in ("model_mismatch", "model_changed", "truncated", "empty")
     }
 
 
@@ -253,7 +253,8 @@ async def test_ordinary_response_is_checked_and_clean(endpoint, spans):
     await llm_adapter._chat(MESSAGES, 60, operation=OP)
 
     assert _flags(_only_span(spans)) == {
-        "model_mismatch": False, "truncated": False, "empty": False,
+        "model_mismatch": False, "model_changed": False,
+        "truncated": False, "empty": False,
     }
     assert _conditions() == before
 
@@ -275,6 +276,26 @@ async def test_served_model_change_is_flagged(endpoint, spans):
     assert after["model_mismatch"] == before["model_mismatch"] + 1
     assert after["truncated"] == before["truncated"]
     assert after["empty"] == before["empty"]
+
+
+@pytest.mark.asyncio
+async def test_one_swap_counts_one_change_but_a_mismatch_on_every_later_call(
+    endpoint, spans
+):
+    before = _conditions()
+
+    endpoint.body = _body(model="m-1")
+    await llm_adapter._chat(MESSAGES, 60, operation=OP)
+    endpoint.body = _body(model="m-2")
+    for _ in range(3):
+        await llm_adapter._chat(MESSAGES, 60, operation=OP)
+
+    flags = [_flags(s) for s in spans.get_finished_spans()]
+    assert [f["model_changed"] for f in flags] == [False, True, False, False]
+    assert [f["model_mismatch"] for f in flags] == [False, True, True, True]
+    after = _conditions()
+    assert after["model_changed"] == before["model_changed"] + 1
+    assert after["model_mismatch"] == before["model_mismatch"] + 3
 
 
 @pytest.mark.asyncio
@@ -353,7 +374,8 @@ async def test_two_conditions_on_one_response_are_both_recorded(endpoint, spans)
     await llm_adapter._chat(MESSAGES, 60, operation=OP)
 
     flags = _flags(spans.get_finished_spans()[1])
-    assert flags == {"model_mismatch": True, "truncated": True, "empty": False}
+    assert flags == {"model_mismatch": True, "model_changed": True,
+                     "truncated": True, "empty": False}
     after = _conditions()
     assert after["model_mismatch"] == before["model_mismatch"] + 1
     assert after["truncated"] == before["truncated"] + 1

@@ -65,9 +65,11 @@ def test_scores_from_judge_and_retrieval(ot):
 
 
 def test_scores_include_call_stats_when_the_row_has_them(ot):
-    arm = {"recall@1": 1.0, "looped": True, "repeated_tool_calls": 2}
+    arm = {"recall@1": 1.0, "looped": True, "repeated_tool_calls": 2,
+           "failed_tool_calls": 3}
     scores = {s["name"]: s["value"] for s in ot._scores(arm)}
-    assert scores == {"recall@1": 1.0, "looped": 1.0, "repeated_tool_calls": 2.0}
+    assert scores == {"recall@1": 1.0, "looped": 1.0, "repeated_tool_calls": 2.0,
+                      "failed_tool_calls": 3.0}
 
     not_looped = {s["name"]: s["value"]
                   for s in ot._scores({"looped": False, "repeated_tool_calls": 0})}

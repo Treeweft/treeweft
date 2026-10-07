@@ -6,7 +6,8 @@ from .significance import sign_test
 
 # Repeat-call figures a summary carries per arm since they were introduced.
 # A summary from before then has none: reported as None / "n/a", never 0.
-_CALL_STAT_KEYS = ("looped_share", "mean_repeated_tool_calls")
+_CALL_STAT_KEYS = ("looped_share", "mean_repeated_tool_calls",
+                   "mean_failed_tool_calls", "hit_cap_share")
 _NA = "n/a"
 
 
@@ -287,6 +288,10 @@ def format_comparison_table(summary: dict) -> str:
         f"| Mean turns | {_num(grep_arm.get('mean_turns'))} | {_num(tl_arm.get('mean_turns'))} | — | — |",
         f"| Looped queries | {_pct(grep_arm.get('looped_share'))} | {_pct(tl_arm.get('looped_share'))} | — | — |",
         f"| Mean repeated calls | {_num(grep_arm.get('mean_repeated_tool_calls'))} | {_num(tl_arm.get('mean_repeated_tool_calls'))} | — | — |",
+        # Attempts that ran nothing (unknown tool, bad arguments): the model
+        # failing at the protocol, not a property of the arm's tools.
+        f"| Mean failed calls | {_num(grep_arm.get('mean_failed_tool_calls'))} | {_num(tl_arm.get('mean_failed_tool_calls'))} | — | — |",
+        f"| Hit turn cap | {_pct(grep_arm.get('hit_cap_share'))} | {_pct(tl_arm.get('hit_cap_share'))} | — | — |",
     ]
     per_tool = (
         "\nCalls per tool (mean per query)\n\n"

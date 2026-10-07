@@ -14,14 +14,21 @@ Added, Fixed.
   input and output tokens and finish reason, next to the unchanged
   `treeweft.*` attributes. Three conditions are flagged on the span and
   counted per operation: the served model changing while the service runs,
-  a response cut off at the token limit, and an empty response. New
+  a response cut off at the token limit, and an empty response. The model change is reported
+  two ways: `model_changed` once per swap (alert on this) and
+  `model_mismatch` on every call that differs from the model the process
+  started with. New
   metrics: `treeweft_llm_tokens_total{operation,direction}` and
   `treeweft_llm_response_conditions_total{operation,condition}`.
   Detection only: what a call returns, retries and caches is unchanged.
   See `docs/observability-runbook.md`, "LLM response signals".
 - Agentic benchmark: per query and arm, calls per tool, exact repeated
-  calls, a looped flag (the same call three or more times), and markers
-  for agent answers and judge verdicts cut off at the token limit. The
+  calls, a looped flag (the same call three or more times), failed calls
+  (attempts that ran no tool), the share of queries that hit the turn
+  cap, and markers for agent answers, judge verdicts and gold answers cut
+  off at the token limit. Cut-off gold answers are stored in the gold
+  cache, counted in the summary and printed by query id; gold cached
+  earlier shows as unknown until regenerated. The
   comparison table and the multi-repo rollup report them; results from
   before show `n/a`. Additive: every existing figure is computed as
   before. See `docs/benchmark-eval.md`, "Reading the output".
