@@ -191,10 +191,30 @@ def _arm_row(rr: AgentRunResult, retrieved: list[str], relevant: list[str],
         "recall@10": recall_at_k(retrieved, relevant, 10),
         "mrr": round(_mrr_multi(retrieved, relevant), 4),
         "judge": judge_dict,
+        # Written with or without --debug-transcripts: the transcript these
+        # are derived from is not kept by default.
+        "tool_call_counts": rr.tool_call_counts,
+        "repeated_tool_calls": rr.repeated_tool_calls,
+        "looped": rr.looped,
+        "agent_truncated_responses": rr.truncated_responses,
+        "agent_truncated": rr.truncated_responses > 0,
     }
     if debug_transcripts:
         row["transcript"] = rr.transcript
     return row
+
+
+def _truncation_totals(rows: list[dict]) -> dict:
+    """Run-wide counts of agent responses and judge verdicts that stopped at
+    the token limit, across every arm and query. Counted and marked only —
+    the affected queries stay in every aggregate."""
+    agent = judge = 0
+    for row in rows:
+        for arm in (row.get("arms") or {}).values():
+            agent += arm.get("agent_truncated_responses") or 0
+            judge += bool((arm.get("judge") or {}).get("truncated"))
+    return {"agent_truncated_responses": agent,
+            "judge_truncated_responses": judge}
 
 
 async def _run_arm(arm: str, query: str, repo: str, search_url: str,
@@ -497,6 +517,7 @@ async def run_agentic(
     # `model`/`judge_model` names above) — the drift canary for alias remaps.
     agg["served_models"] = sorted(agent_llm.served_models)
     agg["judge_served_models"] = sorted(judge_llm.served_models | gold_llm.served_models)
+    agg.update(_truncation_totals(rows))
     # The effective protocol this run actually used (protocol change = new
     # baseline epoch — never compare native_tools rows against react rows).
     agg["agent_protocol"] = agent_protocol

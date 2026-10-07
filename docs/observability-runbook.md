@@ -329,6 +329,56 @@ Add a `local.file_match` block to the host alloy config tailing `/var/log/treewe
 - Click a span in Tempo → "Logs for this span" jumps to Loki with the matching `otelTraceID` log lines
 - Indexer dashboard panels populate from the imported `treeweft-indexer-traces.json`
 
+## LLM response signals
+
+Every LLM chat call the indexer makes records what the endpoint reported about the response:
+the model it says it served, token usage, and why generation stopped. Three conditions are
+derived from that and counted per operation in `treeweft_llm_response_conditions_total`:
+
+| `condition` | Means | What to do |
+|---|---|---|
+| `model_mismatch` | The endpoint reported a different served model from the first one it reported for the same configured model since the indexer started. | Any increase means the model changed under a running service. Check what the LLM endpoint is serving before trusting summaries written since, and before any benchmark run. |
+| `truncated` | Generation stopped at the token limit (`finish_reason` of `length` or `max_tokens`). | A sustained rate on `chunk_summary` means `LLM_SUMMARY_MAX_TOKENS` is too low for the prompt version in use, or a reasoning model is spending the budget on thinking. |
+| `empty` | No usable text came back after reasoning blocks were removed. | Usually a reasoning model that used the whole budget thinking, or a provider-side filter. |
+
+These are detection only. A truncated or empty response is returned to the caller, cached and
+retried exactly as before; nothing is rejected on these signals.
+
+Limits of the mismatch rule, by design:
+
+- It compares against the first served name seen, not against the configured name, because a
+  local server may report a file path and a vendor may report the dated model behind an alias.
+  A wrong model served from the very first call is therefore **not** flagged. Both names are
+  on every `llm.chat` span (`gen_ai.request.model`, `gen_ai.response.model`); verifying the
+  served model before a long run is still required.
+- A restart forgets the baseline, and each worker process keeps its own.
+- An endpoint that does not report a served model is never flagged, and its spans carry no
+  `treeweft.llm.model_mismatch` attribute at all. Absence means "could not check".
+
+Token usage per operation is in `treeweft_llm_tokens_total{operation,direction}`. It is not
+incremented for an endpoint that omits `usage`, so a flat series can mean no calls or no usage
+reporting.
+
+```promql
+# Tokens per hour by operation
+sum by (operation, direction) (increase(treeweft_llm_tokens_total[1h]))
+
+# Any model drift in the last day — alert on > 0
+sum(increase(treeweft_llm_response_conditions_total{condition="model_mismatch"}[1d]))
+
+# Chunk summaries cut off at the token limit
+rate(treeweft_llm_response_conditions_total{operation="chunk_summary",condition="truncated"}[15m])
+```
+
+```traceql
+{ name = "llm.chat" && span.treeweft.llm.truncated = true }
+{ name = "llm.chat" && span.treeweft.llm.model_mismatch = true }
+{ name = "llm.chat" && span.gen_ai.usage.output_tokens > 500 }
+```
+
+Every series exists at 0 from startup for each LLM operation the code defines plus `unknown`
+(a caller that names no operation). Operations nothing calls yet stay at 0.
+
 ## Files in this repo
 
 | Path | Role |

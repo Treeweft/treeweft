@@ -64,6 +64,16 @@ def test_scores_from_judge_and_retrieval(ot):
                       "recall@1": 1.0, "recall@5": 0.8, "mrr": 0.75}
 
 
+def test_scores_include_call_stats_when_the_row_has_them(ot):
+    arm = {"recall@1": 1.0, "looped": True, "repeated_tool_calls": 2}
+    scores = {s["name"]: s["value"] for s in ot._scores(arm)}
+    assert scores == {"recall@1": 1.0, "looped": 1.0, "repeated_tool_calls": 2.0}
+
+    not_looped = {s["name"]: s["value"]
+                  for s in ot._scores({"looped": False, "repeated_tool_calls": 0})}
+    assert not_looped == {"looped": 0.0, "repeated_tool_calls": 0.0}
+
+
 def test_scores_skip_missing(ot):
     # No judge, partial retrieval — only present values are emitted.
     scores = {s["name"]: s["value"] for s in ot._scores({"recall@1": 0.0})}

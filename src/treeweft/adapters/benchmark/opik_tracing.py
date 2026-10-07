@@ -91,6 +91,8 @@ def _scores(arm_row: dict) -> list[dict]:
         ("recall@1", arm_row.get("recall@1")),
         ("recall@5", arm_row.get("recall@5")),
         ("mrr", arm_row.get("mrr")),
+        ("looped", arm_row.get("looped")),
+        ("repeated_tool_calls", arm_row.get("repeated_tool_calls")),
     ):
         if val is not None:
             out.append({"name": name, "value": float(val)})

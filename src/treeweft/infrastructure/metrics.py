@@ -7,6 +7,8 @@ updating those.
 from prometheus_client import Counter, Histogram, Gauge, generate_latest, CollectorRegistry
 from prometheus_client import ProcessCollector
 
+from treeweft.domain.audit import Operation
+
 registry = CollectorRegistry()
 
 # Expose process-level metrics (process_resident_memory_bytes, process_cpu_*,
@@ -66,6 +68,40 @@ encoding_fallbacks = Counter(
     "Files indexed via UTF-8 replacement fallback (invalid UTF-8 input)",
     registry=registry,
 )
+
+# ── LLM response counters ───────────────────────────────────────────
+
+# Label values come from the Operation enum so the two cannot drift; "unknown"
+# is what _chat records when a caller names no operation.
+LLM_OPERATIONS = tuple(op.value for op in Operation) + ("unknown",)
+
+llm_tokens_total = Counter(
+    "treeweft_llm_tokens_total",
+    "Tokens the LLM endpoint reported for service chat calls. Not incremented "
+    "for a response that omits usage, so a flat series can mean either no "
+    "calls or an endpoint that does not report usage.",
+    ["operation", "direction"],  # direction: input | output
+    registry=registry,
+)
+for _op in LLM_OPERATIONS:
+    for _direction in ("input", "output"):
+        llm_tokens_total.labels(operation=_op, direction=_direction)
+
+llm_response_conditions_total = Counter(
+    "treeweft_llm_response_conditions_total",
+    "Service LLM responses on which a condition was detected. "
+    "condition=model_mismatch: the endpoint reported a different served model "
+    "from the first one seen for that requested model since startup; "
+    "condition=truncated: generation stopped at the token limit; "
+    "condition=empty: no usable text came back. Detection only — the call's "
+    "result is unchanged. Any model_mismatch means the model moved under a "
+    "running service.",
+    ["operation", "condition"],
+    registry=registry,
+)
+for _op in LLM_OPERATIONS:
+    for _condition in ("model_mismatch", "truncated", "empty"):
+        llm_response_conditions_total.labels(operation=_op, condition=_condition)
 
 # ── Incremental-job counters ────────────────────────────────────────
 

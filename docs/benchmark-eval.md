@@ -309,6 +309,31 @@ statistical power than any single-repo run.
 | Mean correctness | LLM-judge score (1–5) for factual accuracy of the agent's final answer against the cached gold answer |
 | win-rate | Fraction of resolved (non-tie) queries where treeweft arm scored strictly higher |
 | p-value | Two-sided binomial sign-test p-value (ties excluded) |
+| Mean turns | Average agent turns per query |
+| Looped queries | Share of queries in which the agent made the same tool call, with the same arguments, three or more times |
+| Mean repeated calls | Average number of tool calls per query that exactly repeated an earlier call |
+| Calls per tool | Below the table: mean executed calls per query for each tool the arm has |
+
+**Reading the repeat figures.** They measure two different things. *Looped queries* and
+*mean repeated calls* count exact repeats, which show an agent that is stuck. *Calls per
+tool* shows an agent that searched again with different wording, or read more files, to
+make up for a thinner answer — the compensatory fetching that has sunk every
+payload-trimming idea so far, and that exact repeats do not catch. Two calls are the same
+only when the tool and arguments match exactly (key order and whitespace aside); there is no
+similarity matching. Calls with unparseable arguments or an unknown tool name ran nothing and
+are not counted. The threshold of three is recorded as `loop_threshold` in `_summary.json`.
+
+**Cut-off responses.** `_summary.json` carries `agent_truncated_responses` and
+`judge_truncated_responses`: how many agent responses and judge verdicts stopped at the
+token limit. Each affected query is marked in its row, per arm (`agent_truncated`,
+`judge.truncated`), so it can be found again. Marked queries are **not** excluded: every
+mean, win rate and p-value is computed over all queries exactly as before. A cut-off verdict
+is usually unparseable and so already scored 1/1 with `parse_ok: false`; the marker tells you
+why.
+
+**Older results.** Summaries written before these figures existed show `n/a` for them,
+never zero. Every existing figure is computed as before, so this is not a new baseline
+epoch: results from before and after remain comparable.
 
 The `_summary.json` file also carries `quality_per_1k_tokens` — correctness divided by
 tokens-per-query normalized to 1000 — for comparing arms that trade quality for
@@ -340,7 +365,9 @@ n and/or larger effects give tighter conclusions.
 | saved% | Token savings % for treeweft |
 | r@5 win-rt / r@5 p | Recall@5 win-rate and its sign-test p-value |
 | corr win-rt / corr p | Correctness win-rate and its sign-test p-value |
-| **Pooled** row | n_queries-weighted means; pooled win/loss counts → pooled p-value |
+| looped g/t | Share of queries that looped, grep / treeweft; `n/a` for a cell from before the figure existed |
+| repeats g/t | Mean repeated calls per query, grep / treeweft |
+| **Pooled** row | n_queries-weighted means; pooled win/loss counts → pooled p-value. The looped and repeats columns are pooled over only the repos that have them |
 
 ### Baseline epochs
 
