@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from collections.abc import Iterable
 
 # The same tool with the same arguments this many times in one run is a loop.
 LOOP_THRESHOLD = 3
@@ -19,10 +20,13 @@ class ToolCallTally:
     Two calls are the same when the tool name matches and the arguments are
     equal ignoring key order and whitespace. There is no similarity matching:
     any other difference makes them different calls.
+
+    `tools` names the tools the arm exposes, so one that is never called is
+    reported as 0 rather than missing.
     """
 
-    def __init__(self) -> None:
-        self._by_tool: Counter[str] = Counter()
+    def __init__(self, tools: Iterable[str] = ()) -> None:
+        self._by_tool: Counter[str] = Counter({t: 0 for t in tools})
         self._by_call: Counter[tuple[str, str]] = Counter()
 
     def record(self, tool: str, args: dict | None) -> None:

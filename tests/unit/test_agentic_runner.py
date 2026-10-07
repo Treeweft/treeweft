@@ -184,6 +184,13 @@ def test_arm_row_marks_only_the_arm_whose_agent_was_cut_off():
     assert clean["agent_truncated"] is False
 
 
+def test_arm_row_leaves_agent_marker_unknown_when_no_finish_reason_was_reported():
+    row = _arm_row(_result_with_call_stats(truncated_responses=None), [], [], {})
+
+    assert row["agent_truncated_responses"] is None
+    assert row["agent_truncated"] is None
+
+
 def test_arm_row_judge_block_carries_the_verdict_marker():
     from treeweft.domain.benchmark.judge_schema import JudgeScore
 

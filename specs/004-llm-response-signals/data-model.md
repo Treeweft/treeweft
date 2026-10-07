@@ -15,7 +15,7 @@ What one chat response reports about itself. Immutable. Built from the parsed re
 | `input_tokens` | integer or none | `usage.prompt_tokens` | `usage` absent, or not an integer |
 | `output_tokens` | integer or none | `usage.completion_tokens` | `usage` absent, or not an integer |
 | `finish_reason` | text or none | `choices[0].finish_reason` | absent or null |
-| `truncated` | boolean or none | `finish_reason`, compared case-insensitively, is `length` or `max_tokens` | `finish_reason` unset |
+| `truncated` | boolean or none | `finish_reason`, compared case-insensitively, is `length`, `max_tokens` or `model_context_window_exceeded` | `finish_reason` unset |
 | `empty` | boolean or none | content absent, or empty after reasoning blocks are removed | no `choices` |
 
 Rules:
@@ -92,11 +92,13 @@ Invariants:
 | `tool_call_counts` | mapping tool → integer | empty |
 | `repeated_tool_calls` | integer | 0 |
 | `looped` | boolean | false |
-| `truncated_responses` | integer | 0 |
+| `truncated_responses` | integer or none | none |
 
 `truncated_responses` counts agent responses in the run whose finish reason indicates the token
 limit, including the forced final answer. A response with an unknown finish reason is not
-counted.
+counted, and when no response in the run reported a finish reason the value is none, not 0:
+"could not tell" must not read as "none were cut off". `tool_call_counts` holds an entry for
+every tool the arm exposes, 0 for one never called.
 
 ### JudgeScore (existing, extended)
 

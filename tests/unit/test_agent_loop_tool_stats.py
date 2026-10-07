@@ -107,7 +107,8 @@ async def test_three_identical_calls_and_two_different(native):
     assert res.tool_call_counts == {"search_code": 3, "read_file": 2}
     assert res.repeated_tool_calls == 2
     assert res.looped is True
-    assert res.truncated_responses == 0
+    # This client reports no finish reason: unknown, not "none were cut off".
+    assert res.truncated_responses is None
     # Existing figures and the work done are what they always were.
     assert res.tool_calls == 5 == len(executed)
     assert sum(res.tool_call_counts.values()) == res.tool_calls
@@ -124,7 +125,8 @@ async def test_four_different_searches_are_counted_not_repeated(native):
 
     res = await _run(_ChatOnlyLLM(steps, native), [], native)
 
-    assert res.tool_call_counts == {"search_code": 4}
+    # read_file is exposed and was never called: zero, not missing.
+    assert res.tool_call_counts == {"search_code": 4, "read_file": 0}
     assert res.repeated_tool_calls == 0
     assert res.looped is False
 
@@ -158,7 +160,7 @@ async def test_unknown_tool_is_not_counted(native):
 
     res = await _run(_ChatOnlyLLM(steps, native), executed, native)
 
-    assert res.tool_call_counts == {"search_code": 1}
+    assert res.tool_call_counts == {"search_code": 1, "read_file": 0}
     assert res.repeated_tool_calls == 0
     assert res.looped is False
     assert res.tool_calls == 1 == len(executed)
@@ -177,7 +179,7 @@ async def test_unparseable_arguments_are_not_counted_native():
 
     res = await _run(_ChatOnlyLLM(steps, True), executed, True)
 
-    assert res.tool_call_counts == {"search_code": 1}
+    assert res.tool_call_counts == {"search_code": 1, "read_file": 0}
     assert res.repeated_tool_calls == 0
     assert res.looped is False
     assert res.tool_calls == 1 == len(executed)
@@ -194,6 +196,26 @@ async def test_truncated_responses_are_counted(native):
     assert res.truncated_responses == 1
     assert res.tool_calls == 2
     assert res.turns == 3
+
+
+@PROTOCOLS
+@pytest.mark.asyncio
+async def test_reported_and_not_truncated_is_zero_not_unknown(native):
+    llm = _FullLLM([("search_code", {"query": "x"}), "FINAL"], native, ["stop", "stop"])
+
+    res = await _run(llm, [], native)
+
+    assert res.truncated_responses == 0
+
+
+@PROTOCOLS
+@pytest.mark.asyncio
+async def test_no_finish_reason_ever_reported_is_unknown(native):
+    llm = _FullLLM([("search_code", {"query": "x"}), "FINAL"], native, [None, None])
+
+    res = await _run(llm, [], native)
+
+    assert res.truncated_responses is None
 
 
 @PROTOCOLS
@@ -216,7 +238,7 @@ async def test_forced_final_answer_truncation_is_counted(native):
 
     assert res.hit_cap is True
     assert res.truncated_responses == 1
-    assert res.tool_call_counts == {"search_code": 2}
+    assert res.tool_call_counts == {"search_code": 2, "read_file": 0}
 
 
 @PROTOCOLS
@@ -233,5 +255,5 @@ async def test_figures_survive_an_llm_failure_mid_run(native):
     res = await _run(_Failing(steps, native), [], native)
 
     assert res.error
-    assert res.tool_call_counts == {"search_code": 2}
+    assert res.tool_call_counts == {"search_code": 2, "read_file": 0}
     assert res.repeated_tool_calls == 1

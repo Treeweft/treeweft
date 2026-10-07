@@ -196,8 +196,10 @@ def _arm_row(rr: AgentRunResult, retrieved: list[str], relevant: list[str],
         "tool_call_counts": rr.tool_call_counts,
         "repeated_tool_calls": rr.repeated_tool_calls,
         "looped": rr.looped,
+        # None when the endpoint never reported a finish reason.
         "agent_truncated_responses": rr.truncated_responses,
-        "agent_truncated": rr.truncated_responses > 0,
+        "agent_truncated": (None if rr.truncated_responses is None
+                            else rr.truncated_responses > 0),
     }
     if debug_transcripts:
         row["transcript"] = rr.transcript

@@ -93,6 +93,15 @@ def test_invariants_hold():
     assert t.looped is True and t.repeated >= 2
 
 
+def test_exposed_tools_never_called_are_reported_as_zero():
+    t = ToolCallTally(["search_code", "read_file"])
+    t.record("search_code", {"query": "x"})
+
+    assert t.counts_by_tool == {"search_code": 1, "read_file": 0}
+    assert t.repeated == 0
+    assert ToolCallTally(["a", "b"]).counts_by_tool == {"a": 0, "b": 0}
+
+
 def test_counts_by_tool_is_a_copy():
     t = _tally(("A", {}))
     t.counts_by_tool["A"] = 99

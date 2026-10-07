@@ -8,11 +8,11 @@ measured", never as zero.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `tool_call_counts` | object, tool name → int | executed calls per tool in this run; tools never called are omitted |
+| `tool_call_counts` | object, tool name → int | executed calls per tool in this run, for every tool the arm exposes; a tool never called is present with 0 |
 | `repeated_tool_calls` | int | executed calls whose tool and arguments equal an earlier call's |
 | `looped` | bool | some call was made 3 or more times with the same arguments |
-| `agent_truncated_responses` | int | agent responses in this run that stopped at the token limit |
-| `agent_truncated` | bool | `agent_truncated_responses > 0` |
+| `agent_truncated_responses` | int or null | agent responses in this run that stopped at the token limit; null when no response reported a finish reason |
+| `agent_truncated` | bool or null | `agent_truncated_responses > 0`; null when that count is null |
 
 `arms.<arm>.judge` gains:
 

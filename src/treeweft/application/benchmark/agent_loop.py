@@ -70,10 +70,20 @@ class AgentRunResult:
     repeated_tool_calls: int = 0
     looped: bool = False
     # Agent responses that stopped at the token limit, forced final included.
-    truncated_responses: int = 0
+    # None when no response reported a finish reason: unknown, not zero.
+    truncated_responses: int | None = None
 
 
-def _call_stats(tally: ToolCallTally, truncated: int) -> dict:
+def _count_truncation(so_far: int | None, finish_reason: str | None) -> int | None:
+    """Add one response to the running count; an unreported finish reason
+    leaves it as it was, so a run that never reports one stays None."""
+    cut = is_truncation(finish_reason)
+    if cut is None:
+        return so_far
+    return (so_far or 0) + int(cut)
+
+
+def _call_stats(tally: ToolCallTally, truncated: int | None) -> dict:
     """The AgentRunResult fields derived from a run's tally."""
     return {
         "tool_call_counts": tally.counts_by_tool,
@@ -160,8 +170,8 @@ async def run_agent(
     acct = TokenAccount()
     transcript: list[dict] = []
     tool_calls = 0
-    tally = ToolCallTally()
-    truncated = 0
+    tally = ToolCallTally(tool_map)
+    truncated: int | None = None
     last_answer = ""
     t0 = time.monotonic()
 
@@ -187,7 +197,7 @@ async def run_agent(
                 **_call_stats(tally, truncated),
             )
         content, usage = reply.content, reply.usage
-        truncated += bool(is_truncation(reply.finish_reason))
+        truncated = _count_truncation(truncated, reply.finish_reason)
         acct.add(usage, prompt_text=prompt_text, completion_text=content,
                  prompt_categories=prompt_cats)
         action = parse_action(content)
@@ -245,7 +255,7 @@ async def run_agent(
     try:
         reply = await chat_full(llm, sent)
         content, usage = reply.content, reply.usage
-        truncated += bool(is_truncation(reply.finish_reason))
+        truncated = _count_truncation(truncated, reply.finish_reason)
         acct.add(usage, prompt_text=prompt_text, completion_text=content,
                  prompt_categories=prompt_cats)
         forced = parse_action(content)
@@ -331,8 +341,8 @@ async def _run_agent_native(
     acct = TokenAccount()
     transcript: list[dict] = []
     tool_calls = 0
-    tally = ToolCallTally()
-    truncated = 0
+    tally = ToolCallTally(tool_map)
+    truncated: int | None = None
     last_answer = ""
     t0 = time.monotonic()
 
@@ -354,7 +364,7 @@ async def _run_agent_native(
                 **_call_stats(tally, truncated),
             )
         content, usage, tcs = reply.content, reply.usage, reply.tool_calls
-        truncated += bool(is_truncation(reply.finish_reason))
+        truncated = _count_truncation(truncated, reply.finish_reason)
         # Tool-call JSON is billed completion output — include it in the
         # tiktoken fallback text so `used_fallback` totals stay comparable.
         completion_text = (content or "") + (
@@ -427,7 +437,7 @@ async def _run_agent_native(
     try:
         reply = await chat_full(llm, messages, tools=schemas)
         content, usage, tcs = reply.content, reply.usage, reply.tool_calls
-        truncated += bool(is_truncation(reply.finish_reason))
+        truncated = _count_truncation(truncated, reply.finish_reason)
         completion_text = (content or "") + (
             json.dumps(tcs, default=str) if tcs else "")
         acct.add(usage, prompt_text=prompt_text, completion_text=completion_text,

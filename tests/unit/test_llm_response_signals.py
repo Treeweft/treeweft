@@ -73,6 +73,7 @@ def test_null_finish_reason_is_none_and_truncated_unknown():
     ("max_tokens", True),
     ("LENGTH", True),
     ("Max_Tokens", True),
+    ("model_context_window_exceeded", True),
     ("stop", False),
     ("tool_calls", False),
 ])
@@ -169,6 +170,17 @@ def test_strip_thinking_removes_blocks_case_insensitively():
 
 def test_strip_thinking_treats_none_as_empty():
     assert strip_thinking(None) == ""
+
+
+def test_adapter_strips_with_the_same_pattern():
+    """The adapter keeps its own _strip_thinking (it must raise on None), but
+    it must not keep its own copy of the pattern."""
+    from treeweft.adapters.llm_api import llm_adapter
+    from treeweft.domain import llm_response
+
+    assert llm_adapter._THINK_TAG_RE is llm_response.THINK_TAG_RE
+    with pytest.raises(TypeError):
+        llm_adapter._strip_thinking(None)
 
 
 def test_agent_protocol_reexports_the_same_function():

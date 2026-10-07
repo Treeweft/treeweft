@@ -482,6 +482,10 @@ T021 tests/unit/test_opik_tracing.py
   `chat_full(llm, ...)`, in `adapters/benchmark/agent_llm.py`, used by both loops and the judge.
 - **T026**: the run-wide totals are computed by a small helper, `_truncation_totals(rows)`.
 - **T006**: the response body is parsed once into a local; see research R6, "As built".
+- **After code review (same day)**: an arm's `agent_truncated` is null, not false, when no
+  response reported a finish reason; `tool_call_counts` lists every exposed tool, 0 when never
+  called (FR-022); `model_context_window_exceeded` counts as truncation; the adapter strips
+  with the domain module's pattern while keeping its own raising `_strip_thinking`.
 - **T033 is not done.** No indexer was running on this machine (`localhost:8001` refused the
   connection), so the live `/metrics`, trace, dashboard and throughput checks were not run. The
   metrics exposition was checked in-process instead: `metrics.get_metrics()` emits 10 token

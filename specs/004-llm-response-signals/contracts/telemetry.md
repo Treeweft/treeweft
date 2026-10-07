@@ -37,7 +37,7 @@ The span name and tracer name are unchanged.
 | Attribute | Type | `true` when | Absent when |
 |---|---|---|---|
 | `treeweft.llm.model_mismatch` | bool | served model differs from the first served model seen for this requested model since startup | the response reports no served model |
-| `treeweft.llm.truncated` | bool | finish reason, compared case-insensitively, is `length` or `max_tokens` | the response reports no finish reason |
+| `treeweft.llm.truncated` | bool | finish reason, compared case-insensitively, is `length`, `max_tokens` or `model_context_window_exceeded` | the response reports no finish reason |
 | `treeweft.llm.empty` | bool | no message content, or none left after reasoning blocks are removed | the response has no choices |
 
 ### Never recorded

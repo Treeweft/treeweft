@@ -326,7 +326,8 @@ are not counted. The threshold of three is recorded as `loop_threshold` in `_sum
 **Cut-off responses.** `_summary.json` carries `agent_truncated_responses` and
 `judge_truncated_responses`: how many agent responses and judge verdicts stopped at the
 token limit. Each affected query is marked in its row, per arm (`agent_truncated`,
-`judge.truncated`), so it can be found again. Marked queries are **not** excluded: every
+`judge.truncated`), so it can be found again. Both markers are `null`, not `false`, when the
+endpoint never reported why generation stopped. Marked queries are **not** excluded: every
 mean, win rate and p-value is computed over all queries exactly as before. A cut-off verdict
 is usually unparseable and so already scored 1/1 with `parse_ok: false`; the marker tells you
 why.

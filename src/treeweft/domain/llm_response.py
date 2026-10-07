@@ -8,16 +8,23 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+# The one definition of a reasoning block. The service adapter strips with this
+# same pattern, so `ResponseSignals.empty` and what the adapter returns cannot
+# drift apart.
+THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
 # OpenAI-compatible endpoints report "length"; Anthropic's native API reports
-# "max_tokens". Compared lower-cased.
-TRUNCATION_REASONS = frozenset({"length", "max_tokens"})
+# "max_tokens", or "model_context_window_exceeded" when the context window ran
+# out first. Compared lower-cased. A reason not listed here reads as "not
+# truncated", so add a provider's spelling when a new one is supported.
+TRUNCATION_REASONS = frozenset(
+    {"length", "max_tokens", "model_context_window_exceeded"}
+)
 
 
 def strip_thinking(text: str | None) -> str:
     """Remove <think>...</think> blocks left over from reasoning models."""
-    return _THINK_TAG_RE.sub("", text or "").strip()
+    return THINK_TAG_RE.sub("", text or "").strip()
 
 
 def is_truncation(finish_reason: str | None) -> bool | None:

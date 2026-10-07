@@ -10,7 +10,11 @@ import httpx
 
 from treeweft.adapters.postgresql.connection import get_pool
 from treeweft.config import require_env
-from treeweft.domain.llm_response import ResponseSignals, ServedModelBaseline
+from treeweft.domain.llm_response import (
+    THINK_TAG_RE as _THINK_TAG_RE,
+    ResponseSignals,
+    ServedModelBaseline,
+)
 from treeweft.domain.priority_slots import Priority, PrioritySlots
 from treeweft.infrastructure import metrics
 
@@ -45,11 +49,11 @@ LLM_COMPAT_CHAT_TEMPLATE_KWARGS = (
 # generation from a deterministic rejection from a transient failure.
 SummaryOutcome = tuple[str | None, Literal["cached", "generated", "rejected", "error"]]
 
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
-
-
 def _strip_thinking(text: str) -> str:
-    """Remove <think>...</think> blocks left over from reasoning models."""
+    """Remove <think>...</think> blocks left over from reasoning models.
+
+    Unlike the domain's `strip_thinking`, this raises on None: that is what
+    makes a null-content response surface from `_chat` as None."""
     return _THINK_TAG_RE.sub("", text).strip()
 
 

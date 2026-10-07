@@ -419,6 +419,22 @@ class TestCallStatsAggregation:
         assert summary["grep"]["mean_tool_calls_by_tool"]["grep"] == 2.25
         assert summary["grep"]["n"] == 6
 
+    def test_unknown_agent_marker_is_not_counted_as_truncated(self):
+        rows = _stat_rows()
+        for r in rows:
+            r["arms"]["grep"]["agent_truncated"] = None
+            r["arms"]["grep"]["agent_truncated_responses"] = None
+        summary = aggregate(rows, ["grep", "treeweft"], repo="r", model="m")
+        assert summary["grep"]["agent_truncated_queries"] is None
+        assert summary["treeweft"]["agent_truncated_queries"] == 0
+
+    def test_exposed_tool_never_called_is_reported_as_zero(self):
+        rows = _stat_rows()
+        for r in rows:
+            r["arms"]["treeweft"]["tool_call_counts"].setdefault("hydrate_chunks", 0)
+        summary = aggregate(rows, ["grep", "treeweft"], repo="r", model="m")
+        assert summary["treeweft"]["mean_tool_calls_by_tool"]["hydrate_chunks"] == 0.0
+
     def test_unknown_judge_marker_is_not_counted_as_truncated(self):
         rows = _stat_rows()
         for r in rows:
