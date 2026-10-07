@@ -413,7 +413,7 @@ turns and judge scores for the existing scripted tests are unchanged.
 - [X] T034 Re-read spec.md's FR-001 to FR-024 and SC-001 to SC-009 against the finished code and
   list, for each, the test or check that covers it; report any that are covered only by a live
   check that was not run.
-- [ ] T035 Open a pull request from `004-llm-response-signals` to `main` on `origin` whose
+- [X] T035 Open a pull request from `004-llm-response-signals` to `main` on `origin` whose
   description reports the verification actually performed, including anything not run. Do not
   merge and do not push to `main`. Do not add a generated-by attribution line to the pull
   request or to commits.
