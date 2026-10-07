@@ -10,6 +10,11 @@ import httpx
 
 from treeweft.adapters.postgresql.connection import get_pool
 from treeweft.config import require_env
+from treeweft.domain.llm_response import (
+    THINK_TAG_RE as _THINK_TAG_RE,
+    ResponseSignals,
+    ServedModelBaseline,
+)
 from treeweft.domain.priority_slots import Priority, PrioritySlots
 from treeweft.infrastructure import metrics
 
@@ -44,16 +49,19 @@ LLM_COMPAT_CHAT_TEMPLATE_KWARGS = (
 # generation from a deterministic rejection from a transient failure.
 SummaryOutcome = tuple[str | None, Literal["cached", "generated", "rejected", "error"]]
 
-_THINK_TAG_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
-
-
 def _strip_thinking(text: str) -> str:
-    """Remove <think>...</think> blocks left over from reasoning models."""
+    """Remove <think>...</think> blocks left over from reasoning models.
+
+    Unlike the domain's `strip_thinking`, this raises on None: that is what
+    makes a null-content response surface from `_chat` as None."""
     return _THINK_TAG_RE.sub("", text).strip()
 
 
 _client: httpx.AsyncClient | None = None
 _slots: PrioritySlots | None = None
+# The served model first reported for each requested model. Lives for the
+# process: a restart forgets it, and each worker process keeps its own.
+_served_baseline = ServedModelBaseline()
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -78,6 +86,52 @@ def _get_slots() -> PrioritySlots:
             LLM_CONCURRENCY, reserved=llm_search_reserved_slots(LLM_CONCURRENCY)
         )
     return _slots
+
+
+def _record_response(span, data, operation: str) -> None:
+    """Put what the endpoint reported about a response on the span and the
+    counters, and flag model drift (the standing mismatch and the moment of
+    change), truncation and an empty answer. A value it
+    did not report is left unset, and a condition that could not be evaluated
+    is left off the span. Detection only — nothing here changes what _chat
+    returns. Never raises: observability must not fail a call that would
+    otherwise have succeeded."""
+    try:
+        signals = ResponseSignals.from_response(data)
+        if signals.served_model is not None:
+            span.set_attribute("gen_ai.response.model", signals.served_model)
+        if signals.input_tokens is not None:
+            span.set_attribute("gen_ai.usage.input_tokens", signals.input_tokens)
+        if signals.output_tokens is not None:
+            span.set_attribute("gen_ai.usage.output_tokens", signals.output_tokens)
+        if signals.finish_reason is not None:
+            span.set_attribute(
+                "gen_ai.response.finish_reasons", [signals.finish_reason]
+            )
+        for direction, count in (
+            ("input", signals.input_tokens),
+            ("output", signals.output_tokens),
+        ):
+            if count is not None and count > 0:
+                metrics.llm_tokens_total.labels(
+                    operation=operation, direction=direction
+                ).inc(count)
+        mismatch, changed = _served_baseline.check(LLM_MODEL, signals.served_model)
+        for condition, detected in (
+            ("model_mismatch", mismatch),
+            ("model_changed", changed),
+            ("truncated", signals.truncated),
+            ("empty", signals.empty),
+        ):
+            if detected is None:
+                continue
+            span.set_attribute(f"treeweft.llm.{condition}", detected)
+            if detected:
+                metrics.llm_response_conditions_total.labels(
+                    operation=operation, condition=condition
+                ).inc()
+    except Exception:
+        pass
 
 
 async def _chat(
@@ -109,12 +163,20 @@ async def _chat(
         # and strip <think> tags from the response below. Strict OpenAI-compatible
         # APIs reject unknown params, hence the gate.
         body["chat_template_kwargs"] = {"enable_thinking": LLM_ENABLE_THINKING}
+    op_label = operation or "unknown"
     with get_tracer("treeweft.llm").start_as_current_span(
         "llm.chat",
         attributes={
             "treeweft.llm_model": LLM_MODEL,
-            "treeweft.operation": operation or "unknown",
+            "treeweft.operation": op_label,
             "treeweft.max_tokens": max_tokens,
+            # OpenTelemetry generative-AI semantic conventions, alongside the
+            # treeweft.* names the Grafana dashboard queries. No
+            # gen_ai.provider.name: the endpoint is any OpenAI-compatible
+            # server and we don't know which.
+            "gen_ai.operation.name": "chat",
+            "gen_ai.request.model": LLM_MODEL,
+            "gen_ai.request.max_tokens": max_tokens,
         },
     ) as _span:
         async with slots.hold(priority):
@@ -126,7 +188,9 @@ async def _chat(
                     timeout=request_timeout,
                 )
                 resp.raise_for_status()
-                content = resp.json()["choices"][0]["message"]["content"]
+                data = resp.json()
+                _record_response(_span, data, op_label)
+                content = data["choices"][0]["message"]["content"]
                 return _strip_thinking(content)
             except Exception as exc:
                 try:

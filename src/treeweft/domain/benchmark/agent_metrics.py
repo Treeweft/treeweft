@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from treeweft.domain.benchmark.metrics import count_tokens
 from treeweft.domain.benchmark.significance import sign_test, win_loss_tie
+from treeweft.domain.benchmark.tool_call_stats import LOOP_THRESHOLD
 
 # Token categories tracked per turn's *prompt* (plus "completion" for output).
 # system = system prompt + tool schemas/descriptions (re-sent every turn);
@@ -159,6 +160,54 @@ def _mean(values: list[float]) -> float:
     return sum(vals) / len(vals) if vals else 0.0
 
 
+def _mean_or_none(values: list) -> float | None:
+    """Like `_mean`, but None when nothing was measured. Used for fields that
+    results from before they existed do not carry: 0.0 there would read as
+    "measured, and none found"."""
+    vals = [v for v in values if v is not None]
+    return round(sum(vals) / len(vals), 4) if vals else None
+
+
+def _call_stat_means(arms: list[dict]) -> dict:
+    """Per-arm repeat-call, per-tool and truncation figures.
+
+    Every value is None when no row carries the underlying field. Within
+    `mean_tool_calls_by_tool`, a row that has the field but never called a
+    tool counts as zero for it; a row without the field is left out.
+    """
+    looped = [a.get("looped") for a in arms]
+    counted = [a["tool_call_counts"] for a in arms
+               if isinstance(a.get("tool_call_counts"), dict)]
+    by_tool = None
+    if counted:
+        tools = sorted({t for c in counted for t in c})
+        by_tool = {
+            t: round(sum(c.get(t, 0) for c in counted) / len(counted), 4)
+            for t in tools
+        }
+    agent_cut = [a.get("agent_truncated") for a in arms]
+    judge_cut = [(a.get("judge") or {}).get("truncated") for a in arms]
+
+    def _count(flags: list) -> int | None:
+        known = [f for f in flags if f is not None]
+        return sum(1 for f in known if f) if known else None
+
+    return {
+        "looped_share": _mean_or_none(
+            [None if v is None else float(bool(v)) for v in looped]),
+        "mean_repeated_tool_calls": _mean_or_none(
+            [a.get("repeated_tool_calls") for a in arms]),
+        "mean_failed_tool_calls": _mean_or_none(
+            [a.get("failed_tool_calls") for a in arms]),
+        "hit_cap_share": _mean_or_none(
+            [None if a.get("hit_cap") is None else float(bool(a["hit_cap"]))
+             for a in arms]),
+        "mean_tool_calls_by_tool": by_tool,
+        "agent_truncated_queries": _count(agent_cut),
+        "judge_truncated_queries": _count(judge_cut),
+    }
+
+
 _ARM_NUMERIC_FIELDS = (
     "total_tokens",
     "prompt_tokens",
@@ -219,6 +268,7 @@ def _arm_means(rows: list[dict], arm: str, model: str | None = None) -> dict:
         # said why. Name the model instead — an unpriced run is the one you
         # most need to notice, because it is the one costing money.
         out["cost_unpriced"] = model
+    out.update(_call_stat_means(arms))
     out["n"] = len(arms)
     return out
 
@@ -295,6 +345,8 @@ def aggregate(rows: list[dict], arms: list[str], *, repo: str, model: str) -> di
     }
     for arm in arms:
         summary[arm] = _arm_means(rows, arm, model)
+    # Recorded so `looped` stays interpretable if the threshold ever changes.
+    summary["loop_threshold"] = LOOP_THRESHOLD
 
     # zero-match guard: an arm that read files but never matched a ground-truth file
     # across the entire run is a path/GT normalization bug, not a retriever that

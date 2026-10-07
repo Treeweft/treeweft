@@ -12,10 +12,12 @@ import json
 import time
 from dataclasses import dataclass, field
 
-from treeweft.adapters.benchmark.agent_llm import AgentLLM
+from treeweft.adapters.benchmark.agent_llm import AgentLLM, chat_full
 from treeweft.adapters.benchmark.tool_base import Tool
 from treeweft.domain.benchmark.agent_metrics import TokenAccount, categorize_prompt
 from treeweft.domain.benchmark.agent_protocol import parse_action
+from treeweft.domain.benchmark.tool_call_stats import ToolCallTally
+from treeweft.domain.llm_response import is_truncation
 
 _SYSTEM_TEMPLATE = """You are a code-search agent. Answer the user's question about a codebase by \
 investigating it with the tools provided. Work in a loop, ONE step per turn:
@@ -62,6 +64,38 @@ class AgentRunResult:
     latency_s: float = 0.0
     hit_cap: bool = False
     error: str = ""
+    # Executed calls per tool, exact repeats of an earlier call, and whether
+    # any call was made LOOP_THRESHOLD or more times (tool_call_stats).
+    tool_call_counts: dict[str, int] = field(default_factory=dict)
+    repeated_tool_calls: int = 0
+    looped: bool = False
+    # Agent responses that stopped at the token limit, forced final included.
+    # None when no response reported a finish reason: unknown, not zero.
+    truncated_responses: int | None = None
+    # Attempts that ran nothing: an unknown tool, unparseable arguments, or a
+    # ReAct turn with no valid action. A protocol failure by the model, kept
+    # apart from the repeat figures, which are about what the tools returned.
+    failed_tool_calls: int = 0
+
+
+def _count_truncation(so_far: int | None, finish_reason: str | None) -> int | None:
+    """Add one response to the running count; an unreported finish reason
+    leaves it as it was, so a run that never reports one stays None."""
+    cut = is_truncation(finish_reason)
+    if cut is None:
+        return so_far
+    return (so_far or 0) + int(cut)
+
+
+def _call_stats(tally: ToolCallTally, truncated: int | None, failed: int) -> dict:
+    """The AgentRunResult fields derived from a run's tally."""
+    return {
+        "failed_tool_calls": failed,
+        "tool_call_counts": tally.counts_by_tool,
+        "repeated_tool_calls": tally.repeated,
+        "looped": tally.looped,
+        "truncated_responses": truncated,
+    }
 
 
 def build_system_prompt(tools: list[Tool]) -> str:
@@ -141,6 +175,9 @@ async def run_agent(
     acct = TokenAccount()
     transcript: list[dict] = []
     tool_calls = 0
+    tally = ToolCallTally(tool_map)
+    truncated: int | None = None
+    failed = 0
     last_answer = ""
     t0 = time.monotonic()
 
@@ -149,7 +186,7 @@ async def run_agent(
         prompt_text = "\n".join(m["content"] for m in sent)
         prompt_cats = categorize_prompt(sent)
         try:
-            content, usage, _ = await llm.chat(sent)
+            reply = await chat_full(llm, sent)
         except Exception as e:
             # One bad LLM call (e.g. context overflow on a small model) ends
             # this arm gracefully with the best answer so far — never aborts
@@ -163,7 +200,10 @@ async def run_agent(
                 transcript=transcript,
                 latency_s=round(time.monotonic() - t0, 3),
                 error=f"llm call failed at turn {turn}: {e}",
+                **_call_stats(tally, truncated, failed),
             )
+        content, usage = reply.content, reply.usage
+        truncated = _count_truncation(truncated, reply.finish_reason)
         acct.add(usage, prompt_text=prompt_text, completion_text=content,
                  prompt_categories=prompt_cats)
         action = parse_action(content)
@@ -179,11 +219,13 @@ async def run_agent(
                 retrieved_files=retrieved_files,
                 transcript=transcript,
                 latency_s=round(time.monotonic() - t0, 3),
+                **_call_stats(tally, truncated, failed),
             )
 
         messages.append({"role": "assistant", "content": content})
 
         if action.kind == "none" or action.tool not in tool_map:
+            failed += 1
             hint = action.error or f"unknown tool {action.tool!r}"
             obs = (
                 f"OBSERVATION: Could not run that step ({hint}). Emit exactly one "
@@ -195,6 +237,7 @@ async def run_agent(
             continue
 
         tool_calls += 1
+        tally.record(action.tool, action.args)
         try:
             result = await tool_map[action.tool].run(**action.args)
         except Exception as e:  # tool must never crash the loop
@@ -217,7 +260,9 @@ async def run_agent(
     prompt_cats = categorize_prompt(sent)
     err = ""
     try:
-        content, usage, _ = await llm.chat(sent)
+        reply = await chat_full(llm, sent)
+        content, usage = reply.content, reply.usage
+        truncated = _count_truncation(truncated, reply.finish_reason)
         acct.add(usage, prompt_text=prompt_text, completion_text=content,
                  prompt_categories=prompt_cats)
         forced = parse_action(content)
@@ -236,6 +281,7 @@ async def run_agent(
         latency_s=round(time.monotonic() - t0, 3),
         hit_cap=True,
         error=err,
+        **_call_stats(tally, truncated, failed),
     )
 
 
@@ -302,6 +348,9 @@ async def _run_agent_native(
     acct = TokenAccount()
     transcript: list[dict] = []
     tool_calls = 0
+    tally = ToolCallTally(tool_map)
+    truncated: int | None = None
+    failed = 0
     last_answer = ""
     t0 = time.monotonic()
 
@@ -309,7 +358,7 @@ async def _run_agent_native(
         prompt_text = "\n".join(_msg_text(m) for m in messages)
         prompt_cats = categorize_prompt(messages)
         try:
-            content, usage, tcs = await llm.chat(messages, tools=schemas)
+            reply = await chat_full(llm, messages, tools=schemas)
         except Exception as e:
             return AgentRunResult(
                 final_answer=last_answer,
@@ -320,7 +369,10 @@ async def _run_agent_native(
                 transcript=transcript,
                 latency_s=round(time.monotonic() - t0, 3),
                 error=f"llm call failed at turn {turn}: {e}",
+                **_call_stats(tally, truncated, failed),
             )
+        content, usage, tcs = reply.content, reply.usage, reply.tool_calls
+        truncated = _count_truncation(truncated, reply.finish_reason)
         # Tool-call JSON is billed completion output — include it in the
         # tiktoken fallback text so `used_fallback` totals stay comparable.
         completion_text = (content or "") + (
@@ -342,6 +394,7 @@ async def _run_agent_native(
                 retrieved_files=retrieved_files,
                 transcript=transcript,
                 latency_s=round(time.monotonic() - t0, 3),
+                **_call_stats(tally, truncated, failed),
             )
 
         # Assistant turn WITH its tool_calls — required context for the
@@ -361,14 +414,17 @@ async def _run_agent_native(
             rec["tool"] = name
             rec["args"] = args if args is not None else fn.get("arguments")
             if arg_err:
+                failed += 1
                 result: dict | str = {"error": arg_err}
                 rec["observation_error"] = arg_err
             elif name not in tool_map:
+                failed += 1
                 err_msg = f"unknown tool {name!r}"
                 result = {"error": err_msg}
                 rec["observation_error"] = err_msg
             else:
                 tool_calls += 1
+                tally.record(name, args)
                 try:
                     result = await tool_map[name].run(**args)
                 except Exception as e:  # tool must never crash the loop
@@ -389,7 +445,9 @@ async def _run_agent_native(
     prompt_cats = categorize_prompt(messages)
     err = ""
     try:
-        content, usage, tcs = await llm.chat(messages, tools=schemas)
+        reply = await chat_full(llm, messages, tools=schemas)
+        content, usage, tcs = reply.content, reply.usage, reply.tool_calls
+        truncated = _count_truncation(truncated, reply.finish_reason)
         completion_text = (content or "") + (
             json.dumps(tcs, default=str) if tcs else "")
         acct.add(usage, prompt_text=prompt_text, completion_text=completion_text,
@@ -410,4 +468,5 @@ async def _run_agent_native(
         latency_s=round(time.monotonic() - t0, 3),
         hit_cap=True,
         error=err,
+        **_call_stats(tally, truncated, failed),
     )

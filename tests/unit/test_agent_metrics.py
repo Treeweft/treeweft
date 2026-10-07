@@ -321,3 +321,174 @@ class TestZeroMatchGuard:
         assert "zero_match_warning" in result
         flagged = {s["arm"] for s in result["zero_match_warning"]}
         assert flagged == {"grep", "treeweft"}
+
+
+# ── Repeat-call, per-tool and truncation figures ─────────────────────────────
+
+def _with_call_stats(row: dict, *, grep: dict, treeweft: dict) -> dict:
+    """Add the per-run call figures a current harness writes to each arm."""
+    for arm, extra in (("grep", grep), ("treeweft", treeweft)):
+        row["arms"][arm].update(extra)
+    return row
+
+
+def _stats(counts: dict, repeated: int = 0, looped: bool = False,
+           agent_truncated: bool = False, judge_truncated=False) -> dict:
+    return {
+        "tool_call_counts": counts,
+        "repeated_tool_calls": repeated,
+        "looped": looped,
+        "agent_truncated_responses": int(agent_truncated),
+        "agent_truncated": agent_truncated,
+        "failed_tool_calls": 2 if looped else 0,
+        "hit_cap": looped,
+        "_judge_truncated": judge_truncated,
+    }
+
+
+def _stat_rows() -> list[dict]:
+    specs = [
+        (_stats({"grep": 4, "read_file": 2}, repeated=2, looped=True),
+         _stats({"search_code": 2, "read_file": 1})),
+        (_stats({"grep": 2}, agent_truncated=True),
+         _stats({"search_code": 1}, judge_truncated=True)),
+        (_stats({"grep": 3, "glob": 1}, repeated=1),
+         _stats({"search_code": 3, "read_file": 3}, repeated=2, looped=True)),
+        (_stats({}),
+         _stats({"search_code": 2})),
+    ]
+    rows = []
+    for g, t in specs:
+        row = _make_row(grep_correctness=0.5, tl_correctness=0.8,
+                        grep_recall5=0.0, tl_recall5=1.0)
+        for arm, s in (("grep", g), ("treeweft", t)):
+            s = dict(s)
+            row["arms"][arm]["judge"]["truncated"] = s.pop("_judge_truncated")
+            row["arms"][arm].update(s)
+        rows.append(row)
+    return rows
+
+
+class TestCallStatsAggregation:
+    def test_per_arm_figures(self):
+        summary = aggregate(_stat_rows(), ["grep", "treeweft"], repo="r", model="m")
+
+        g, t = summary["grep"], summary["treeweft"]
+        assert g["looped_share"] == 0.25
+        assert g["mean_repeated_tool_calls"] == 0.75
+        assert g["agent_truncated_queries"] == 1
+        assert g["judge_truncated_queries"] == 0
+        assert t["looped_share"] == 0.25
+        assert t["mean_repeated_tool_calls"] == 0.5
+        assert t["agent_truncated_queries"] == 0
+        assert t["judge_truncated_queries"] == 1
+
+    def test_failed_calls_and_turn_cap(self):
+        summary = aggregate(_stat_rows(), ["grep", "treeweft"], repo="r", model="m")
+
+        # One of four rows per arm is the looped one: 2 failed calls, hit the cap.
+        assert summary["grep"]["mean_failed_tool_calls"] == 0.5
+        assert summary["grep"]["hit_cap_share"] == 0.25
+        assert summary["treeweft"]["mean_failed_tool_calls"] == 0.5
+        assert summary["treeweft"]["hit_cap_share"] == 0.25
+
+    def test_turn_cap_share_is_available_for_older_rows_that_recorded_it(self, mixed_rows):
+        import copy
+
+        rows = copy.deepcopy(mixed_rows)
+        for i, r in enumerate(rows):
+            r["arms"]["grep"]["hit_cap"] = i == 0
+        summary = aggregate(rows, ["grep", "treeweft"], repo="r", model="m")
+
+        assert summary["grep"]["hit_cap_share"] == 0.2
+        assert summary["grep"]["mean_failed_tool_calls"] is None
+        assert summary["treeweft"]["hit_cap_share"] is None
+
+    def test_loop_threshold_is_recorded(self):
+        summary = aggregate(_stat_rows(), ["grep", "treeweft"], repo="r", model="m")
+        assert summary["loop_threshold"] == 3
+
+    def test_tool_never_called_in_a_row_counts_as_zero(self):
+        summary = aggregate(_stat_rows(), ["grep", "treeweft"], repo="r", model="m")
+
+        # grep arm: grep 4+2+3+0 over 4 rows; glob only once; read_file once.
+        assert summary["grep"]["mean_tool_calls_by_tool"] == {
+            "glob": 0.25, "grep": 2.25, "read_file": 0.5,
+        }
+        assert summary["treeweft"]["mean_tool_calls_by_tool"] == {
+            "read_file": 1.0, "search_code": 2.0,
+        }
+
+    def test_each_arm_lists_only_its_own_tools(self):
+        summary = aggregate(_stat_rows(), ["grep", "treeweft"], repo="r", model="m")
+        assert "search_code" not in summary["grep"]["mean_tool_calls_by_tool"]
+        assert "grep" not in summary["treeweft"]["mean_tool_calls_by_tool"]
+
+    def test_rows_from_before_the_feature_are_not_available_not_zero(self, mixed_rows):
+        summary = aggregate(mixed_rows, ["grep", "treeweft"], repo="r", model="m")
+
+        for arm in ("grep", "treeweft"):
+            for key in ("looped_share", "mean_repeated_tool_calls",
+                        "mean_tool_calls_by_tool", "agent_truncated_queries",
+                        "judge_truncated_queries", "mean_failed_tool_calls",
+                        "hit_cap_share"):
+                assert summary[arm][key] is None, (arm, key)
+
+    def test_rows_without_the_field_are_left_out_of_the_mean(self, mixed_rows):
+        rows = _stat_rows() + mixed_rows[:2]
+        summary = aggregate(rows, ["grep", "treeweft"], repo="r", model="m")
+
+        # Still averaged over the four rows that measured it, not all six.
+        assert summary["grep"]["looped_share"] == 0.25
+        assert summary["grep"]["mean_tool_calls_by_tool"]["grep"] == 2.25
+        assert summary["grep"]["n"] == 6
+
+    def test_unknown_agent_marker_is_not_counted_as_truncated(self):
+        rows = _stat_rows()
+        for r in rows:
+            r["arms"]["grep"]["agent_truncated"] = None
+            r["arms"]["grep"]["agent_truncated_responses"] = None
+        summary = aggregate(rows, ["grep", "treeweft"], repo="r", model="m")
+        assert summary["grep"]["agent_truncated_queries"] is None
+        assert summary["treeweft"]["agent_truncated_queries"] == 0
+
+    def test_exposed_tool_never_called_is_reported_as_zero(self):
+        rows = _stat_rows()
+        for r in rows:
+            r["arms"]["treeweft"]["tool_call_counts"].setdefault("hydrate_chunks", 0)
+        summary = aggregate(rows, ["grep", "treeweft"], repo="r", model="m")
+        assert summary["treeweft"]["mean_tool_calls_by_tool"]["hydrate_chunks"] == 0.0
+
+    def test_unknown_judge_marker_is_not_counted_as_truncated(self):
+        rows = _stat_rows()
+        for r in rows:
+            r["arms"]["treeweft"]["judge"]["truncated"] = None
+        summary = aggregate(rows, ["grep", "treeweft"], repo="r", model="m")
+        assert summary["treeweft"]["judge_truncated_queries"] is None
+
+    def test_existing_figures_are_unchanged_by_the_new_fields(self, mixed_rows):
+        import copy
+
+        before = aggregate(mixed_rows, ["grep", "treeweft"], repo="r", model="m")
+        marked = copy.deepcopy(mixed_rows)
+        for r in marked:
+            _with_call_stats(
+                r,
+                grep=_stats({"grep": 9}, repeated=5, looped=True, agent_truncated=True),
+                treeweft=_stats({"search_code": 1}),
+            )
+            for arm in ("grep", "treeweft"):
+                r["arms"][arm].pop("_judge_truncated")
+                r["arms"][arm]["judge"]["truncated"] = True
+        after = aggregate(marked, ["grep", "treeweft"], repo="r", model="m")
+
+        new_arm_keys = {"looped_share", "mean_repeated_tool_calls",
+                        "mean_tool_calls_by_tool", "agent_truncated_queries",
+                        "judge_truncated_queries", "mean_failed_tool_calls",
+                        "hit_cap_share"}
+        for arm in ("grep", "treeweft"):
+            assert {k: v for k, v in after[arm].items() if k not in new_arm_keys} == \
+                   {k: v for k, v in before[arm].items() if k not in new_arm_keys}
+        # Marked (truncated) queries stay in every win rate and p-value.
+        assert after["comparison"] == before["comparison"]
+        assert after["comparisons"] == before["comparisons"]

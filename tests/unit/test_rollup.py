@@ -312,3 +312,170 @@ class TestFormatRollupTable:
         rollup = multi_repo_rollup([])
         table = format_rollup_table(rollup)
         assert "Pooled" in table
+
+
+# ── Repeat-call figures in the tables ────────────────────────────────────────
+
+def _with_stats(summary: dict, *, grep: dict, treeweft: dict) -> dict:
+    summary["grep"].update({"mean_turns": 6.2, **grep})
+    summary["treeweft"].update({"mean_turns": 4.1, **treeweft})
+    return summary
+
+
+@pytest.fixture
+def summary_stats(summary_a):
+    return _with_stats(
+        summary_a,
+        grep={"looped_share": 0.08, "mean_repeated_tool_calls": 0.42,
+              "mean_failed_tool_calls": 1.5, "hit_cap_share": 0.1,
+              "mean_tool_calls_by_tool": {"grep": 3.1, "glob": 0.8, "read_file": 2.4}},
+        treeweft={"looped_share": 0.02, "mean_repeated_tool_calls": 0.1,
+                  "mean_failed_tool_calls": 0.25, "hit_cap_share": 0.0,
+                  "mean_tool_calls_by_tool": {"search_code": 1.7, "read_file": 1.2}},
+    )
+
+
+def _old_table_lines(summary: dict) -> list[str]:
+    """The table as it was before the feature: header + the three rows."""
+    return format_comparison_table(summary).splitlines()[:8]
+
+
+class TestComparisonTableCallStats:
+    def test_new_rows_are_present(self, summary_stats):
+        table = format_comparison_table(summary_stats)
+        assert "| Mean turns | 6.20 | 4.10 | — | — |" in table
+        assert "| Looped queries | 8.0% | 2.0% | — | — |" in table
+        assert "| Mean repeated calls | 0.42 | 0.10 | — | — |" in table
+        assert "| Mean failed calls | 1.50 | 0.25 | — | — |" in table
+        assert "| Hit turn cap | 10.0% | 0.0% | — | — |" in table
+
+    def test_calls_per_tool_lists_each_arms_own_tools(self, summary_stats):
+        table = format_comparison_table(summary_stats)
+        assert "Calls per tool (mean per query)" in table
+        assert "- grep: glob 0.8, grep 3.1, read_file 2.4" in table
+        assert "- treeweft: read_file 1.2, search_code 1.7" in table
+
+    def test_existing_rows_are_untouched_and_come_first(self, summary_a):
+        import copy
+
+        plain = copy.deepcopy(summary_a)
+        with_stats = _with_stats(
+            copy.deepcopy(summary_a),
+            grep={"looped_share": 0.5, "mean_repeated_tool_calls": 1.0,
+                  "mean_tool_calls_by_tool": {"grep": 1.0}},
+            treeweft={"looped_share": 0.0, "mean_repeated_tool_calls": 0.0,
+                      "mean_tool_calls_by_tool": {"search_code": 1.0}},
+        )
+        assert _old_table_lines(with_stats) == _old_table_lines(plain)
+        assert _old_table_lines(plain)[-1].startswith("| Mean correctness |")
+
+    def test_summary_from_before_the_feature_shows_not_available(self, summary_a):
+        table = format_comparison_table(summary_a)
+        assert "| Mean turns | n/a | n/a | — | — |" in table
+        assert "| Looped queries | n/a | n/a | — | — |" in table
+        assert "| Mean repeated calls | n/a | n/a | — | — |" in table
+        assert "| Mean failed calls | n/a | n/a | — | — |" in table
+        assert "| Hit turn cap | n/a | n/a | — | — |" in table
+        assert "- grep: n/a" in table
+        assert "- treeweft: n/a" in table
+
+    def test_zero_is_shown_as_zero_not_as_not_available(self, summary_a):
+        s = _with_stats(
+            summary_a,
+            grep={"looped_share": 0.0, "mean_repeated_tool_calls": 0.0,
+                  "mean_tool_calls_by_tool": {}},
+            treeweft={"looped_share": 0.0, "mean_repeated_tool_calls": 0.0,
+                      "mean_tool_calls_by_tool": {}},
+        )
+        table = format_comparison_table(s)
+        assert "| Looped queries | 0.0% | 0.0% | — | — |" in table
+        assert "- grep: none" in table
+
+
+class TestRollupCallStats:
+    def _rollup(self, summary_stats, summary_b):
+        return multi_repo_rollup([summary_stats, summary_b])
+
+    def test_per_repo_fields(self, summary_stats, summary_b):
+        with_stats, without = self._rollup(summary_stats, summary_b)["repos"]
+        assert with_stats["grep_looped_share"] == 0.08
+        assert with_stats["treeweft_looped_share"] == 0.02
+        assert with_stats["grep_mean_repeated_tool_calls"] == 0.42
+        assert with_stats["treeweft_mean_repeated_tool_calls"] == 0.1
+        assert with_stats["grep_mean_failed_tool_calls"] == 1.5
+        assert with_stats["grep_hit_cap_share"] == 0.1
+        assert without["grep_mean_failed_tool_calls"] is None
+        assert without["treeweft_hit_cap_share"] is None
+        assert with_stats["treeweft_mean_tool_calls_by_tool"] == {
+            "search_code": 1.7, "read_file": 1.2}
+        for key in ("grep_looped_share", "treeweft_looped_share",
+                    "grep_mean_repeated_tool_calls",
+                    "treeweft_mean_repeated_tool_calls",
+                    "grep_mean_tool_calls_by_tool",
+                    "treeweft_mean_tool_calls_by_tool"):
+            assert without[key] is None, key
+
+    def test_pooled_is_over_repos_that_have_the_figures(self, summary_stats, summary_b):
+        pooled = self._rollup(summary_stats, summary_b)["pooled"]
+        # Only summary_stats measured it, so pooled equals its own figures.
+        assert pooled["grep_looped_share"] == 0.08
+        assert pooled["treeweft_mean_repeated_tool_calls"] == 0.1
+
+    def test_pooled_is_weighted_by_query_count(self, summary_a, summary_b):
+        a = _with_stats(summary_a,
+                        grep={"looped_share": 0.1, "mean_repeated_tool_calls": 1.0},
+                        treeweft={"looped_share": 0.0, "mean_repeated_tool_calls": 0.0})
+        b = _with_stats(summary_b,
+                        grep={"looped_share": 0.4, "mean_repeated_tool_calls": 2.0},
+                        treeweft={"looped_share": 0.2, "mean_repeated_tool_calls": 1.0})
+        na, nb = a["n_queries"], b["n_queries"]
+        pooled = multi_repo_rollup([a, b])["pooled"]
+        assert pooled["grep_looped_share"] == pytest.approx(
+            (0.1 * na + 0.4 * nb) / (na + nb), abs=1e-4)
+        assert pooled["treeweft_mean_repeated_tool_calls"] == pytest.approx(
+            nb / (na + nb), abs=1e-4)
+
+    def test_pooled_not_available_when_no_repo_has_figures(self, summary_a, summary_b):
+        pooled = multi_repo_rollup([summary_a, summary_b])["pooled"]
+        assert pooled["grep_looped_share"] is None
+        assert pooled["treeweft_mean_repeated_tool_calls"] is None
+
+    def test_existing_rollup_fields_are_unchanged(self, summary_a, summary_b):
+        import copy
+
+        before = multi_repo_rollup([copy.deepcopy(summary_a), summary_b])
+        after = multi_repo_rollup([
+            _with_stats(copy.deepcopy(summary_a),
+                        grep={"looped_share": 0.9, "mean_repeated_tool_calls": 9.0},
+                        treeweft={"looped_share": 0.9, "mean_repeated_tool_calls": 9.0}),
+            summary_b,
+        ])
+        new = ("looped_share", "repeated_tool_calls", "tool_calls_by_tool",
+               "failed_tool_calls", "hit_cap_share")
+        for key, value in before["pooled"].items():
+            if not key.endswith(new):
+                assert after["pooled"][key] == value, key
+        for b_repo, a_repo in zip(before["repos"], after["repos"]):
+            for key, value in b_repo.items():
+                if not key.endswith(new):
+                    assert a_repo[key] == value, key
+
+    def test_table_has_two_new_columns(self, summary_stats, summary_b):
+        table = format_rollup_table(self._rollup(summary_stats, summary_b))
+        header, _sep, first, second, pooled = table.splitlines()
+        assert header.endswith("| corr p | looped g/t | repeats g/t |")
+        assert first.endswith("| 8.0% / 2.0% | 0.42 / 0.10 |")
+        assert second.endswith("| n/a | n/a |")
+        assert pooled.endswith("| 8.0% / 2.0% | 0.42 / 0.10 |")
+
+    def test_existing_columns_are_unchanged(self, summary_a, summary_b):
+        table = format_rollup_table(multi_repo_rollup([summary_a, summary_b]))
+        header, sep, *rows = table.splitlines()
+        assert header.startswith(
+            "| Repo | n | grep tok | treeweft tok | saved% "
+            "| r@5 win-rt | r@5 p | corr win-rt | corr p |")
+        assert sep.startswith(
+            "|------|--:|---------:|-------------:|------:"
+            "|----------:|------:|------------:|-------:|")
+        assert all(r.endswith("| n/a | n/a |") for r in rows)
+        assert all(r.count("|") == header.count("|") for r in rows)
