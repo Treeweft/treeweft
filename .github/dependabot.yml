@@ -5,7 +5,10 @@
 # patch bumps; majors still arrive individually so they get a real review.
 version: 2
 updates:
-  - package-ecosystem: "pip"
+  # `uv`, not `pip`: the pip updater edits pyproject.toml but never uv.lock,
+  # so a range-widening update fails `uv sync --locked` in CI (#71). The uv
+  # updater keeps both files in step.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
