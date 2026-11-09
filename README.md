@@ -27,10 +27,6 @@ grep/glob/read agent at **11–47% lower cost** — with the largest savings on 
 questions where you don't know the name of what you're looking for. See
 [Benchmarks](#benchmarks).
 
-> Treeweft was previously named **Treeloom**. Upgrading an existing install?
-> See [Migrating from Treeloom](docs/migrating-from-treeloom.md). Compatibility
-> with Treeloom names ends on 2026-11-01.
-
 ## How It Works
 
 ```
