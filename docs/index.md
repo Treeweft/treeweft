@@ -124,7 +124,6 @@ find, never a number, so they don't drift when results are refreshed.
 
 simple-mode
 upgrading
-migrating-from-treeloom
 docker-images
 engineering-notes
 result-provenance
