@@ -6,44 +6,7 @@ substitutes from. Existing env vars are NOT overridden — compose-set values
 inside the container always win.
 """
 import os
-import warnings
 from pathlib import Path
-from typing import MutableMapping
-
-# Treeloom back-compat: remove on 2026-11-01 (#14): _LEGACY_PREFIX,
-# _alias_legacy_env and the two calls to it at the bottom of this file.
-_LEGACY_PREFIX = "TREELOOM_"
-_PREFIX = "TREEWEFT_"
-
-
-def _alias_legacy_env(
-    environ: MutableMapping[str, str], reported: set[str] | None = None
-) -> set[str]:
-    """Honor pre-rebrand TREELOOM_* vars as fallbacks for TREEWEFT_*.
-
-    Each legacy var is copied to its new name unless the new name is already
-    set to a non-empty value (the new name wins; empty counts as unset, since
-    compose's `X=${X:-}` passes empty strings). Warns once per call about
-    legacy names not already in `reported`, and returns the updated set so a
-    second pass (after .env loads) only reports what the first pass missed.
-    """
-    reported = set() if reported is None else reported
-    found = sorted(
-        k for k in environ if k.startswith(_LEGACY_PREFIX) and k not in reported
-    )
-    for key in found:
-        new_key = _PREFIX + key[len(_LEGACY_PREFIX):]
-        if not environ.get(new_key):
-            environ[new_key] = environ[key]
-    if found:
-        warnings.warn(
-            "Treeloom was renamed to Treeweft; rename these env vars to "
-            f"TREEWEFT_*: {', '.join(found)} (still honored until 2026-11-01, "
-            "see docs/migrating-from-treeloom.md)",
-            FutureWarning,
-            stacklevel=2,
-        )
-    return reported | set(found)
 
 
 def _parse_dotenv_value(raw: str) -> str:
@@ -105,12 +68,7 @@ def _load_dotenv_if_present() -> None:
             return
 
 
-# Treeloom back-compat: remove on 2026-11-01 (#14).
-# Alias before .env loads (so a legacy TREELOOM_SKIP_DOTENV still applies) and
-# again after (for legacy names that only an old .env sets).
-_reported_legacy = _alias_legacy_env(os.environ)
 _load_dotenv_if_present()
-_alias_legacy_env(os.environ, _reported_legacy)
 
 
 def _apply_profile_defaults() -> None:

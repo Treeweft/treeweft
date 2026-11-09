@@ -47,6 +47,14 @@ Added, Fixed.
 
 ### Operator configuration
 
+- Treeloom compatibility is removed (#14). `TREELOOM_*` environment
+  variables are now ignored; rename each to `TREEWEFT_*` with the same
+  suffix (`TREELOOM_PROFILE` → `TREEWEFT_PROFILE`). `benchmark rollup` no
+  longer rewrites the `treeloom` arm and `treeloom_*` keys in pre-rename
+  `_summary.json` files, so those files no longer combine with new runs:
+  replace `treeloom` with `treeweft` in their arm names and keys first.
+  The "Migrating from Treeloom" page is gone. No API, response field or MCP
+  tool changes.
 - The indexer container reads the whole `.env`. Service addresses in `.env`
   are for a host-run indexer and are replaced in the container; set the new
   `DOCKER_MILVUS_URI`, `DOCKER_NEO4J_URI`, `DOCKER_EMBEDDING_URL`,
