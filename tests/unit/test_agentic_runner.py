@@ -142,3 +142,117 @@ async def test_run_agent_transcript_records_tool_observations():
     # And the same observation went back to the model as a user turn — the
     # transcript mirrors what was actually sent.
     assert res.transcript[0]["tool"] == "search_code"
+
+
+# ── Repeat-call, per-tool and truncation fields in the row ──────────────────
+
+def _result_with_call_stats(**overrides) -> AgentRunResult:
+    fields = dict(
+        final_answer="answer",
+        turns=6,
+        tool_calls=5,
+        token_account=TokenAccount(),
+        retrieved_files=["src/foo.py"],
+        tool_call_counts={"search_code": 3, "read_file": 2},
+        repeated_tool_calls=2,
+        looped=True,
+        truncated_responses=0,
+        failed_tool_calls=4,
+    )
+    fields.update(overrides)
+    return AgentRunResult(**fields)
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_arm_row_carries_call_stats_with_and_without_transcripts(debug):
+    row = _arm_row(_result_with_call_stats(), ["src/foo.py"], ["src/foo.py"],
+                   {"correctness": 5}, debug_transcripts=debug)
+
+    assert row["tool_call_counts"] == {"search_code": 3, "read_file": 2}
+    assert row["repeated_tool_calls"] == 2
+    assert row["looped"] is True
+    assert row["agent_truncated_responses"] == 0
+    assert row["agent_truncated"] is False
+    assert row["failed_tool_calls"] == 4
+    assert sum(row["tool_call_counts"].values()) == row["tool_calls"]
+
+
+def test_arm_row_marks_only_the_arm_whose_agent_was_cut_off():
+    cut = _arm_row(_result_with_call_stats(truncated_responses=2), [], [], {})
+    clean = _arm_row(_result_with_call_stats(), [], [], {})
+
+    assert cut["agent_truncated"] is True
+    assert cut["agent_truncated_responses"] == 2
+    assert clean["agent_truncated"] is False
+
+
+def test_arm_row_leaves_agent_marker_unknown_when_no_finish_reason_was_reported():
+    row = _arm_row(_result_with_call_stats(truncated_responses=None), [], [], {})
+
+    assert row["agent_truncated_responses"] is None
+    assert row["agent_truncated"] is None
+
+
+def test_arm_row_judge_block_carries_the_verdict_marker():
+    from treeweft.domain.benchmark.judge_schema import JudgeScore
+
+    judge = JudgeScore(1, 1, "unparseable judge output", parse_ok=False,
+                       truncated=True).as_dict()
+    row = _arm_row(_result_with_call_stats(), [], [], judge)
+
+    assert row["judge"]["truncated"] is True
+    assert row["judge"]["parse_ok"] is False
+
+
+def test_truncation_totals_cover_all_arms_and_queries():
+    from treeweft.application.benchmark.agentic_runner import _truncation_totals
+
+    def arm(agent: int, judge) -> dict:
+        return {"agent_truncated_responses": agent, "judge": {"truncated": judge}}
+
+    rows = [
+        {"arms": {"grep": arm(2, False), "treeweft": arm(0, True)}},
+        {"arms": {"grep": arm(1, None), "treeweft": arm(0, True)}},
+        # A row from before the feature contributes nothing and does not raise.
+        {"arms": {"grep": {"judge": {"correctness": 3}}, "treeweft": {}}},
+    ]
+
+    assert _truncation_totals(rows) == {
+        "agent_truncated_responses": 3,
+        "judge_truncated_responses": 2,
+        # No row says whether its gold answer was cut off: unknown, not zero.
+        "gold_truncated_queries": None,
+    }
+
+
+def test_gold_truncation_total_counts_known_markers_only():
+    from treeweft.application.benchmark.agentic_runner import _truncation_totals
+
+    rows = [
+        {"gold_truncated": True, "arms": {}},
+        {"gold_truncated": False, "arms": {}},
+        {"gold_truncated": None, "arms": {}},   # gold cached before the marker
+        {"arms": {}},                           # row from before the feature
+    ]
+
+    assert _truncation_totals(rows)["gold_truncated_queries"] == 1
+    assert _truncation_totals(rows[1:2])["gold_truncated_queries"] == 0
+
+
+@pytest.mark.parametrize("marker", [True, False, None])
+@pytest.mark.asyncio
+async def test_query_row_carries_the_gold_marker(marker):
+    from treeweft.application.benchmark.agentic_runner import run_one_query
+
+    gold_rec = {"gold_answer": "the reference"}
+    if marker is not None:
+        gold_rec["truncated"] = marker
+
+    row = await run_one_query(
+        {"id": "q1", "query": "where?", "relevant_files": []}, gold_rec,
+        repo="/repo", search_url="", agent_llm=None, judge_llm=None,
+        arms=[], max_turns=1,
+    )
+
+    assert row["gold_truncated"] is marker
+    assert row["gold_answer"] == "the reference"

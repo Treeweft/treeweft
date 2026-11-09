@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import asyncio
 
-from treeweft.adapters.benchmark.agent_llm import AgentLLM
+from treeweft.adapters.benchmark.agent_llm import AgentLLM, chat_full
 from treeweft.domain.benchmark.judge_schema import JudgeScore, parse_judge_json
+from treeweft.domain.llm_response import is_truncation
 
 _JUDGE_SYSTEM = (
     "You are a strict, fair evaluator for a code-search benchmark. Compare a "
@@ -56,8 +57,12 @@ async def judge_answer(
     last_err: Exception | None = None
     for attempt in (1, 2):
         try:
-            content, _, _ = await llm.chat(messages, max_tokens=256)
-            return parse_judge_json(content)
+            reply = await chat_full(llm, messages, max_tokens=256)
+            score = parse_judge_json(reply.content)
+            # Set whatever parse_ok is: a cut-off verdict is usually broken
+            # JSON, and that is exactly the row that needs the marker.
+            score.truncated = is_truncation(reply.finish_reason)
+            return score
         except Exception as e:
             last_err = e
             if attempt == 1:

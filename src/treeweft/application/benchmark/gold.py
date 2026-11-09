@@ -11,7 +11,8 @@ import json
 import os
 from pathlib import Path
 
-from treeweft.adapters.benchmark.agent_llm import AgentLLM
+from treeweft.adapters.benchmark.agent_llm import AgentLLM, chat_full
+from treeweft.domain.llm_response import is_truncation
 
 GOLD_DIR = Path("benchmarks/gold")
 _PER_FILE_CHARS = 6000
@@ -113,7 +114,8 @@ async def build_gold(
                 "error": "no readable ground-truth files",
             }
             continue
-        content, _, _ = await answerer.chat(
+        reply = await chat_full(
+            answerer,
             [
                 {"role": "system", "content": _GOLD_SYSTEM},
                 {
@@ -132,10 +134,19 @@ async def build_gold(
         cache[qid] = {
             "id": qid,
             "query": q["query"],
-            "gold_answer": strip_thinking(content),
+            "gold_answer": strip_thinking(reply.content),
             "relevant_files": q.get("relevant_files", []),
             "entity": q.get("entity", {}),
+            # A cut-off gold answer is cached and then judged against by every
+            # arm, so it has to be findable. None when the server did not say;
+            # records cached before this field existed simply lack it.
+            "truncated": is_truncation(reply.finish_reason),
         }
 
     _write_cache(path, cache)
+    cut_off = [q["id"] for q in queries if cache.get(q["id"], {}).get("truncated")]
+    if cut_off:
+        print(f"[gold] {len(cut_off)} gold answer(s) cut off at the token limit; "
+              f"every arm is judged against a truncated reference for: "
+              f"{', '.join(cut_off)}. Regenerate with --regen-gold.")
     return cache
