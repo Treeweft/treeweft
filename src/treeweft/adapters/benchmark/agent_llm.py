@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+from dataclasses import dataclass
 
 import httpx
 
@@ -17,6 +18,42 @@ from treeweft.adapters.benchmark.llm_client import (
     resolve_llm_config,
     resolve_model_route,
 )
+
+
+@dataclass
+class ChatResult:
+    """One chat completion, with the reason generation stopped.
+
+    `finish_reason` is the OpenAI-compatible `finish_reason`, or the native
+    Anthropic `stop_reason`; None when the server reports neither.
+    """
+
+    content: str
+    usage: dict | None
+    tool_calls: list[dict] | None
+    finish_reason: str | None = None
+
+
+async def chat_full(
+    llm,
+    messages: list[dict],
+    *,
+    tools: list[dict] | None = None,
+    max_tokens: int | None = None,
+) -> ChatResult:
+    """`llm.chat_full(...)` when the client has it, else `llm.chat(...)` with
+    an unknown finish reason — so a client that only implements chat() (every
+    scripted test fake) keeps working."""
+    kwargs: dict = {}
+    if tools is not None:
+        kwargs["tools"] = tools
+    if max_tokens is not None:
+        kwargs["max_tokens"] = max_tokens
+    full = getattr(llm, "chat_full", None)
+    if full is not None:
+        return await full(messages, **kwargs)
+    content, usage, tool_calls = await llm.chat(messages, **kwargs)
+    return ChatResult(content=content, usage=usage, tool_calls=tool_calls)
 
 
 class AgentLLM:
@@ -308,6 +345,22 @@ class AgentLLM:
         dict (or None if the server omits it). `tool_calls` is populated only
         when `tools` are passed and the model emits native tool calls.
         """
+        r = await self.chat_full(messages, tools=tools, max_tokens=max_tokens)
+        return r.content, r.usage, r.tool_calls
+
+    async def chat_full(
+        self,
+        messages: list[dict],
+        *,
+        tools: list[dict] | None = None,
+        max_tokens: int | None = None,
+    ) -> ChatResult:
+        """`chat()`, plus the reason generation stopped.
+
+        The finish reason is returned, never kept on `self`: arms and judges
+        share one client under `asyncio.gather`, so a "last finish reason"
+        attribute would belong to whichever call happened to finish last.
+        """
         if self.native_anthropic:
             body = self._anthropic_body(messages, tools, max_tokens)
             async with httpx.AsyncClient(
@@ -319,7 +372,8 @@ class AgentLLM:
             self._record_served_model(data)
             content, tool_calls = self._extract_anthropic(data)
             usage = self._normalize_anthropic_usage(data.get("usage") or {})
-            return content, usage, tool_calls
+            return ChatResult(content, usage, tool_calls,
+                              finish_reason=data.get("stop_reason") or None)
 
         body = self._build_body(messages, tools, max_tokens)
         async with httpx.AsyncClient(timeout=self.timeout, headers=self._headers()) as client:
@@ -333,4 +387,5 @@ class AgentLLM:
         content = message.get("content") or ""
         usage = data.get("usage")
         tool_calls = message.get("tool_calls")
-        return content, usage, tool_calls
+        return ChatResult(content, usage, tool_calls,
+                          finish_reason=choice.get("finish_reason") or None)

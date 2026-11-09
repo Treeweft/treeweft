@@ -13,6 +13,9 @@ class JudgeScore:
     completeness: int
     rationale: str
     parse_ok: bool
+    # Whether the verdict response stopped at the token limit. None when the
+    # server did not say, or when no judge call produced a response.
+    truncated: bool | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -20,6 +23,7 @@ class JudgeScore:
             "completeness": self.completeness,
             "rationale": self.rationale,
             "parse_ok": self.parse_ok,
+            "truncated": self.truncated,
         }
 
 
