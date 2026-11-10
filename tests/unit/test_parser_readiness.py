@@ -49,12 +49,21 @@ def _fresh(monkeypatch):
     parsers.reset_download_log()
 
 
-def _mock_get_language(monkeypatch, bad=(), calls=None):
+def _mock_get_language(monkeypatch, bad=(), calls=None, error=None, cached=None):
+    """Mock the pack. `cached` is what downloaded_languages() reports (default:
+    every language, so no skip logic kicks in); TSParser is a no-op."""
+    monkeypatch.setattr(parsers, "TSParser", lambda language: object())
+    monkeypatch.setattr(
+        parsers._pack,
+        "downloaded_languages",
+        lambda: list(parsers._languages()) if cached is None else list(cached),
+    )
+
     def fake(lang):
         if calls is not None:
             calls.append(lang)
         if lang in bad:
-            raise pack.DownloadError(f"cannot fetch {lang}")
+            raise (error or pack.DownloadError)(f"cannot fetch {lang}")
         return object()
 
     monkeypatch.setattr(parsers._pack, "get_language", fake)
@@ -115,6 +124,87 @@ class TestCheckParsers:
         monkeypatch.setattr(parsers, "check_parsers", lambda: seen.append(threading.get_ident()) or parsers.ParserReadiness(True))
         asyncio.run(parsers.check_parsers_async())
         assert seen and seen[0] != threading.get_ident()
+
+
+class TestOutageAndRealParser:
+    def test_outage_stops_fetching_after_first_failure(self, monkeypatch, clock):
+        calls = []
+        _mock_get_language(monkeypatch, bad=set(parsers._languages()), calls=calls, cached={"python"})
+        result = parsers.check_parsers(force=True)
+        langs = parsers._languages()
+        first_bad = next(l for l in langs if l != "python")
+        assert set(calls) <= {first_bad, "python"}
+        assert first_bad in calls
+        assert set(result.failures) == set(langs)
+        other = next(l for l in langs if l not in (first_bad, "python"))
+        assert result.failures[other] == f"not downloaded (skipped after the {first_bad} failure)"
+        assert result.failures["python"].startswith("DownloadError")  # cached, so it was tried
+
+    def test_cached_languages_still_load_after_a_failure(self, monkeypatch, clock):
+        calls = []
+        langs = parsers._languages()
+        _mock_get_language(monkeypatch, bad={langs[0]}, calls=calls, cached=set(langs[1:]))
+        result = parsers.check_parsers(force=True)
+        assert set(result.failures) == {langs[0]}
+        assert calls == langs
+
+    def test_checksum_mismatch_also_triggers_the_skip(self, monkeypatch, clock):
+        calls = []
+        langs = parsers._languages()
+        _mock_get_language(monkeypatch, bad={langs[0]}, calls=calls, cached=set(),
+                           error=pack.ChecksumMismatchError)
+        result = parsers.check_parsers(force=True)
+        assert calls == [langs[0]]
+        assert len(result.failures) == len(langs)
+        assert result.failures[langs[1]] == f"not downloaded (skipped after the {langs[0]} failure)"
+
+    def test_downloaded_languages_error_is_an_empty_set(self, monkeypatch, clock):
+        calls = []
+        langs = parsers._languages()
+        _mock_get_language(monkeypatch, bad={langs[0]}, calls=calls)
+
+        def boom():
+            raise RuntimeError("cache unreadable")
+
+        monkeypatch.setattr(parsers._pack, "downloaded_languages", boom)
+        result = parsers.check_parsers(force=True)
+        assert calls == [langs[0]]
+        assert set(result.failures) == set(langs)
+
+    def test_non_fetch_error_does_not_trigger_the_skip(self, monkeypatch, clock):
+        calls = []
+        langs = parsers._languages()
+        _mock_get_language(monkeypatch, bad={langs[0]}, calls=calls, error=pack.DynamicLoadError, cached=set())
+        result = parsers.check_parsers(force=True)
+        assert calls == langs
+        assert set(result.failures) == {langs[0]}
+
+    def test_parser_rejection_is_a_failure(self, monkeypatch, clock):
+        _mock_get_language(monkeypatch)
+
+        def reject(language):
+            raise TypeError("an instance of Language was expected")
+
+        monkeypatch.setattr(parsers, "TSParser", reject)
+        result = parsers.check_parsers(force=True)
+        assert not result.ok
+        assert set(result.failures) == set(parsers._languages())
+        assert "TypeError" in result.failures["python"]
+
+    def test_parser_rejection_for_one_language_only(self, monkeypatch, clock):
+        _mock_get_language(monkeypatch)
+        built = []
+
+        def pick(language):
+            built.append(language)
+            if language == "BAD":
+                raise TypeError("nope")
+            return object()
+
+        monkeypatch.setattr(parsers._pack, "get_language", lambda l: "BAD" if l == "go" else l)
+        monkeypatch.setattr(parsers, "TSParser", pick)
+        result = parsers.check_parsers(force=True)
+        assert set(result.failures) == {"go"}
 
 
 class TestRequireParsers:
@@ -287,6 +377,107 @@ class TestDownloadFailureLogging:
         assert "HTTP 503 from github" in errors[0].getMessage()
         warnings_ = [r for r in caplog.records if r.levelno == logging.WARNING]
         assert len(warnings_) == 1  # the repeat stays visible, below ERROR
+
+
+class TestSiblingErrors:
+    @pytest.mark.parametrize(
+        "exc", [pack.DownloadError, pack.ChecksumMismatchError, pack.CacheLockError,
+                pack.DynamicLoadError, pack.LockPoisonedError]
+    )
+    def test_make_chunker_logs_each_sibling_error(self, monkeypatch, caplog, exc):
+        def boom(lang):
+            raise exc("sibling failure detail")
+
+        monkeypatch.setattr(ts_indexer, "get_language", boom)
+        with caplog.at_level(logging.DEBUG, logger=parsers.logger.name):
+            chunker = ts_indexer._make_chunker("python")
+        assert type(chunker).__name__ == "TokenChunker"
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert "sibling failure detail" in errors[0].getMessage()
+
+    def test_tuple_covers_exactly_the_siblings(self):
+        assert set(ts_indexer.PARSER_UNAVAILABLE_ERRORS) == {
+            pack.DownloadError, pack.ChecksumMismatchError, pack.CacheLockError,
+            pack.DynamicLoadError, pack.LockPoisonedError,
+        }
+
+    def test_graph_extractor_logs_sibling_error(self, monkeypatch, caplog):
+        from treeweft.adapters.tree_sitter import graph_extractor as ge
+
+        def boom(lang):
+            raise pack.ChecksumMismatchError("bad sum")
+
+        monkeypatch.setattr(ge, "get_language", boom)
+        with caplog.at_level(logging.DEBUG, logger=parsers.logger.name):
+            ge.extract_graph("a.py", "x = 1\n")
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1 and "bad sum" in errors[0].getMessage()
+
+
+@pytest.mark.asyncio
+class TestStartupTask:
+    @staticmethod
+    async def _run(monkeypatch, check):
+        from treeweft.application import lifecycle
+
+        monkeypatch.setattr(parsers, "check_parsers_async", check)
+        task = asyncio.create_task(lifecycle._warm_parsers())
+        await task
+
+    async def test_success_logs_info(self, monkeypatch, caplog):
+        async def ok():
+            return parsers.ParserReadiness(ok=True)
+
+        with caplog.at_level(logging.INFO):
+            await self._run(monkeypatch, ok)
+        msgs = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        n = len(parsers._languages())
+        assert f"tree-sitter parsers ready ({n} languages)" in msgs
+
+    async def test_failure_logs_error_and_does_not_raise(self, monkeypatch, caplog):
+        async def bad():
+            return parsers.ParserReadiness(ok=False, failures={"go": "DownloadError: x"})
+
+        with caplog.at_level(logging.INFO):
+            await self._run(monkeypatch, bad)
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert errors and "go" in errors[0].getMessage()
+
+    async def test_exception_is_swallowed(self, monkeypatch, caplog):
+        async def boom():
+            raise RuntimeError("kaboom")
+
+        await self._run(monkeypatch, boom)  # must not raise
+
+    async def test_startup_starts_task_and_shutdown_cancels_it(self, monkeypatch):
+        from treeweft.application import lifecycle
+
+        gate = asyncio.Event()
+        started = []
+
+        async def hang():
+            started.append(1)
+            await gate.wait()
+
+        monkeypatch.setattr(lifecycle, "_warm_parsers", hang)
+        monkeypatch.setattr(state, "_parser_warmup_task", None)
+        lifecycle.start_parser_warmup()
+        task = state._parser_warmup_task
+        assert task is not None
+        await asyncio.sleep(0)
+        assert started == [1] and not task.done()
+        await lifecycle.stop_parser_warmup()
+        assert task.cancelled()
+
+    async def test_startup_wires_the_warmup(self, monkeypatch):
+        """lifecycle.startup() source calls start_parser_warmup and shutdown
+        calls stop_parser_warmup (full startup is driven in test_refresh_hooks)."""
+        import inspect
+        from treeweft.application import lifecycle
+
+        assert "start_parser_warmup()" in inspect.getsource(lifecycle.startup)
+        assert "stop_parser_warmup()" in inspect.getsource(lifecycle.shutdown)
 
 
 class TestCli:

@@ -665,6 +665,45 @@ async def startup(app):
     # ── Index-status refresh loop (ADR-004 §3) ────────────────────────────
     index_guard.start_refresh_loop()
 
+    # ── Tree-sitter parser warm-up (never blocks or fails startup) ────────
+    start_parser_warmup()
+
+
+async def _warm_parsers() -> None:
+    """Load every parser once at startup so a cold host cache downloads them
+    here, not inside the first index request. Logs only; never raises."""
+    from treeweft.adapters.tree_sitter import parsers
+
+    try:
+        result = await parsers.check_parsers_async()
+        if result.ok:
+            logger.info(
+                "tree-sitter parsers ready (%d languages)", len(parsers._languages())
+            )
+        else:
+            logger.error(
+                "tree-sitter parsers unavailable for: %s",
+                "; ".join(f"{k}: {v}" for k, v in sorted(result.failures.items())),
+            )
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001
+        logger.exception("tree-sitter parser warm-up failed")
+
+
+def start_parser_warmup() -> None:
+    _state._parser_warmup_task = asyncio.create_task(_warm_parsers())
+
+
+async def stop_parser_warmup() -> None:
+    task = _state._parser_warmup_task
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
 
 async def shutdown(app):
     await index_guard.stop_refresh_loop()
@@ -689,6 +728,7 @@ async def shutdown(app):
             await _state._fleet_refresh_task
         except asyncio.CancelledError:
             pass
+    await stop_parser_warmup()
     await graph_store.close()
     if _state._job_queue is not None:
         await _state._job_queue.stop()

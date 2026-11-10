@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import tree_sitter_language_pack as _pack
+from tree_sitter import Parser as TSParser
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,19 @@ def _languages() -> list[str]:
     return sorted(set(LANGUAGE_MAP.values()))
 
 
+# Fetch failures: once one happens the network is presumed down, so languages
+# that are not already cached are marked failed without another attempt.
+_FETCH_ERRORS = (_pack.DownloadError, _pack.ChecksumMismatchError)
+
+
+def _cached_languages() -> set[str]:
+    """Languages already in the pack's cache (no network). Empty on error."""
+    try:
+        return set(_pack.downloaded_languages())
+    except Exception:  # noqa: BLE001
+        return set()
+
+
 def check_parsers(force: bool = False) -> ParserReadiness:
     """Load every `LANGUAGE_MAP` language. A full success is cached for the
     process; a result with failures only for `TREEWEFT_PARSER_RETRY_SECONDS`
@@ -86,11 +100,21 @@ def check_parsers(force: bool = False) -> ParserReadiness:
             if _cached.ok or _clock() - _cached_at < retry_seconds():
                 return _cached
         failures: dict[str, str] = {}
+        fetch_failed: str | None = None
+        cached: set[str] = set()
         for lang in _languages():
+            if fetch_failed is not None and lang not in cached:
+                failures[lang] = f"not downloaded (skipped after the {fetch_failed} failure)"
+                continue
             try:
-                _pack.get_language(lang)
+                # A real parser, not just a Language: pack 1.9.x returns a Rust
+                # Language that tree_sitter.Parser rejects (CLAUDE.md invariant).
+                TSParser(_pack.get_language(lang))
             except Exception as exc:  # noqa: BLE001
                 failures[lang] = f"{type(exc).__name__}: {exc}"
+                if fetch_failed is None and isinstance(exc, _FETCH_ERRORS):
+                    fetch_failed = lang
+                    cached = _cached_languages()
         _cached = ParserReadiness(ok=not failures, failures=failures)
         _cached_at = _clock()
         return _cached
