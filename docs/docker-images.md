@@ -155,6 +155,30 @@ Remember the container cannot see host paths unless they are mounted, and
 service URLs in `.env` that point at `localhost` must be rewritten to
 addresses reachable from inside the container.
 
+## Parser prefetch (offline indexer)
+
+`tree-sitter-language-pack` downloads each grammar from GitHub on first use.
+If that fails at runtime the indexer silently chunks on character windows, so
+`Dockerfile.indexer` downloads every `LANGUAGE_MAP` parser at build time
+(`python -m treeweft.adapters.tree_sitter.parsers --prefetch`, which retries
+with backoff). The step exits non-zero unless every parser loads, so a failed
+download fails the image build at that step. The cache lives in
+`/root/.cache/tree-sitter-language-pack/`; the image runs as root, so build and
+runtime match. If a `USER` line is ever added, the cache must move with it.
+
+The image therefore needs no egress for parsers and works with
+`--network none`. To verify:
+
+```bash
+docker build -f Dockerfile.indexer -t treeweft-indexer:parsers .
+docker run --rm --network none treeweft-indexer:parsers \
+  python -m treeweft.adapters.tree_sitter.parsers; echo $?
+```
+
+Expect every language listed as `ok` and exit code `0`. CI runs the same
+prefetch before the test suites, with `~/.cache/tree-sitter-language-pack`
+cached per pack version.
+
 ## Releasing (maintainers)
 
 The publish workflow is `.github/workflows/docker-publish.yml`. It needs two
