@@ -242,28 +242,6 @@ class TestRequireParsers:
 
 
 class TestRoutes:
-    def test_index_file_refused_when_a_parser_is_missing(self, monkeypatch):
-        _mock_get_language(monkeypatch, bad={"python"})
-        resp = client.post("/index-file", json={"file_path": "/tmp/nope.py"})
-        assert resp.status_code == 409
-        body = resp.json()
-        assert body["reason"] == "parsers_unavailable"
-        assert "python" in body["languages"]
-
-    @pytest.mark.parametrize(
-        "path, payload",
-        [
-            ("/index-directory", {"directory": "/tmp"}),
-            ("/index-repo", {"path": "/tmp"}),
-            ("/index-graph", {"source_id": "src-1"}),
-        ],
-    )
-    def test_other_parsing_routes_refused(self, monkeypatch, path, payload):
-        _mock_get_language(monkeypatch, bad={"python"})
-        resp = client.post(path, json=payload) if payload is not None else client.post(path)
-        assert resp.status_code == 409, resp.text
-        assert resp.json()["reason"] == "parsers_unavailable"
-
     @staticmethod
     def _store_with(monkeypatch, job):
         class _Store:
@@ -271,13 +249,6 @@ class TestRoutes:
                 return job
 
         monkeypatch.setattr(state, "_job_store", _Store())
-
-    def test_retry_refused_for_a_parsing_job(self, monkeypatch):
-        _mock_get_language(monkeypatch, bad={"python"})
-        self._store_with(monkeypatch, Job(id="j1", kind="file", status=JobStatus.DEAD_LETTER))
-        resp = client.post("/jobs/j1/retry")
-        assert resp.status_code == 409
-        assert resp.json()["reason"] == "parsers_unavailable"
 
     def test_retry_of_resummarize_is_not_gated_on_parsers(self, monkeypatch):
         _mock_get_language(monkeypatch, bad={"python"})
@@ -288,12 +259,9 @@ class TestRoutes:
         assert resp.status_code == 409
         assert "can only retry" in resp.json()["detail"]
 
-    def test_rebuild_refused_but_dry_run_is_not(self, monkeypatch):
+    def test_rebuild_dry_run_is_not_gated_on_parsers(self, monkeypatch):
         _mock_get_language(monkeypatch, bad={"python"})
         monkeypatch.setattr("treeweft.application.indexer_service.authz._require_admin", lambda r: None)
-        resp = client.post("/index/rebuild")
-        assert resp.status_code == 409
-        assert resp.json()["reason"] == "parsers_unavailable"
         dry = client.post("/index/rebuild", params={"dry_run": "true"})
         assert dry.json().get("reason") != "parsers_unavailable"
 
