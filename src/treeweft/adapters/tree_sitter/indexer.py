@@ -6,7 +6,9 @@ from pathlib import Path
 import tiktoken
 from chonkie import CodeChunker, RecursiveChunker, TokenChunker
 from tree_sitter import Parser as TSParser
-from tree_sitter_language_pack import get_language
+from tree_sitter_language_pack import DownloadError, get_language
+
+from treeweft.adapters.tree_sitter.parsers import log_download_failure
 
 from treeweft.infrastructure.fileio import read_source
 
@@ -148,6 +150,9 @@ def _make_chunker(lang: str):
         )
         chunker.parser = TSParser(get_language(lang))
         return chunker
+    except DownloadError as exc:
+        log_download_failure(lang, exc)
+        return TokenChunker(tokenizer=_tiktoken_enc, chunk_size=CHUNK_SIZE)
     except Exception:
         logger.warning(
             "no structural chunker for language %r — using token windows", lang

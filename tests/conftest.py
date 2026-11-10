@@ -298,3 +298,17 @@ def _compatible_indexer(request, monkeypatch):
     state = mcp_compat.CompatState(ttl=float("inf"))
     state.mark_ok()
     monkeypatch.setattr(mcp_compat, "STATE", state)
+
+
+@pytest.fixture(autouse=True)
+def _parsers_ready(request, monkeypatch):
+    """Pre-seed tree-sitter parser readiness as ok, so route and runner tests
+    never load (or download) real parsers. Tests of the check itself opt out
+    with @pytest.mark.real_parser_check."""
+    from treeweft.adapters.tree_sitter import parsers
+
+    if request.node.get_closest_marker("real_parser_check"):
+        parsers.reset_cache()
+        return
+    monkeypatch.setattr(parsers, "_cached", parsers.ParserReadiness(ok=True))
+    monkeypatch.setattr(parsers, "_cached_at", 0.0)
