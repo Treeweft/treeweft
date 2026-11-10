@@ -204,3 +204,104 @@ class TestRouteClassification:
                     continue
                 unclassified.append(key)
         assert not unclassified, f"routes not covered by the gate test or EXEMPT: {unclassified}"
+
+
+# ── parser gate (#95 / #102 / #105) ────────────────────────────────────────
+#
+# Every write route whose job parses code must call
+# `index_guard.require_parsers()` right after `require_writable()`, or a
+# parser outage silently builds a structure-less index on TokenChunker
+# windows. Each route is either parser-gated (and proven so by an HTTP call)
+# or parser-exempt with a reason.
+
+PARSER_GATED_REQUESTS = [
+    ("POST", "/index-file", {"file_path": "/tmp/nope.py"}),
+    ("POST", "/index-directory", {"directory": "/tmp"}),
+    ("POST", "/index-repo", {"path": "/tmp"}),
+    ("POST", "/index-graph", {"source_id": "src-1"}),
+    ("POST", "/jobs/{job_id}/retry", None),  # needs a non-resummarize job in the store
+    ("POST", "/index/rebuild", None),  # real (non-dry-run) rebuild only
+]
+
+# (method, path) write routes that do NOT parse code, with why.
+PARSER_EXEMPT = {
+    ("POST", "/build-community"): "graph-signal backfill over already-indexed data — parses no code",
+    ("GET", "/build-community"): "status poll only — parses no code",
+}
+
+
+class TestParserGateClassification:
+    def test_every_write_route_is_parser_gated_or_exempt(self):
+        gated = {(m, p) for m, p, _ in PARSER_GATED_REQUESTS}
+        assert not gated & set(PARSER_EXEMPT), "route is both parser-gated and parser-exempt"
+
+        unclassified = []
+        for route in app.routes:
+            path = getattr(route, "path", None)
+            if path is None:
+                continue
+            if not (path.startswith(WRITE_PREFIXES) or path == "/jobs/{job_id}/retry"):
+                continue
+            for method in getattr(route, "methods", None) or set():
+                if method in ("HEAD", "OPTIONS"):
+                    continue
+                key = (method, path)
+                if key not in gated and key not in PARSER_EXEMPT:
+                    unclassified.append(key)
+        assert not unclassified, (
+            f"write routes neither parser-gated nor parser-exempt: {sorted(unclassified)}. "
+            "If the route's job parses code, call index_guard.require_parsers() right after "
+            "require_writable() and add it to PARSER_GATED_REQUESTS; otherwise add a reasoned "
+            "PARSER_EXEMPT entry in tests/unit/test_index_gate_routes.py."
+        )
+
+    def test_gated_and_exempt_entries_are_real_routes(self):
+        real = {
+            (m, getattr(r, "path", None))
+            for r in app.routes
+            for m in (getattr(r, "methods", None) or set())
+        }
+        stale = [k for k in {(m, p) for m, p, _ in PARSER_GATED_REQUESTS} | set(PARSER_EXEMPT) if k not in real]
+        assert not stale, f"classified routes that no longer exist: {stale}"
+
+
+@pytest.mark.real_parser_check
+class TestParserGatedRoutesRefused:
+    @pytest.fixture(autouse=True)
+    def _parsers_down(self, monkeypatch):
+        import tree_sitter_language_pack as pack
+
+        from treeweft.adapters.tree_sitter import parsers
+
+        def get_language(lang):
+            if lang == "python":
+                raise pack.DownloadError("mocked: no network")
+            return object()
+
+        parsers.reset_cache()
+        monkeypatch.setattr(parsers, "TSParser", lambda language: object())
+        monkeypatch.setattr(parsers._pack, "get_language", get_language)
+        monkeypatch.setattr(parsers._pack, "downloaded_languages", lambda: list(parsers._languages()))
+        monkeypatch.setattr("treeweft.application.indexer_service.authz._require_admin", _no_admin_required)
+        yield
+        parsers.reset_cache()
+
+    @pytest.mark.parametrize("method,path,body", PARSER_GATED_REQUESTS, ids=[p for _, p, _ in PARSER_GATED_REQUESTS])
+    def test_parser_gated_route_returns_409(self, monkeypatch, method, path, body):
+        if path == "/jobs/{job_id}/retry":
+            from treeweft.application import indexer_state as state
+            from treeweft.domain.jobs import Job, JobStatus
+
+            job = Job(id="j1", kind="file", status=JobStatus.DEAD_LETTER)
+
+            class _Store:
+                async def get(self, job_id):
+                    return job
+
+            monkeypatch.setattr(state, "_job_store", _Store())
+            path = "/jobs/j1/retry"
+        resp = client.request(method, path, json=body) if body is not None else client.request(method, path)
+        assert resp.status_code == 409, resp.text
+        payload = resp.json()
+        assert payload["reason"] == "parsers_unavailable"
+        assert "python" in payload["languages"]
