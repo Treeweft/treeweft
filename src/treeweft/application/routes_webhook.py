@@ -235,6 +235,9 @@ async def handle_webhook(request: Request):
     gate = await index_guard.require_writable()
     if gate is not None:
         return gate
+    gate = await index_guard.require_parsers()
+    if gate is not None:
+        return gate
 
     if existing_source is None:
         # 6. Not indexed yet — create full index job. Guard against a

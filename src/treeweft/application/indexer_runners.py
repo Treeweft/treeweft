@@ -160,6 +160,34 @@ def _restore_request_options(jd: dict) -> str:
 
 
 def dispatch_job(job) -> "Coroutine | None":
+    """`_build_runner`, with every parsing kind (all but `resummarize`) gated
+    on tree-sitter parser readiness when the runner starts. Stays synchronous:
+    the check runs inside the returned coroutine."""
+    coro = _build_runner(job)
+    if coro is None or job.kind == "resummarize":
+        return coro
+    return _run_if_parsers_ready(job.id, coro)
+
+
+async def _run_if_parsers_ready(job_id: str, coro: "Coroutine"):
+    from treeweft.adapters.tree_sitter import parsers
+
+    readiness = await parsers.check_parsers_async()
+    if readiness.ok:
+        return await coro
+    coro.close()
+    jd = _state._jobs.get(job_id) or {"job_id": job_id}
+    jd["status"] = "failed"
+    jd["error"] = "parsers_unavailable: " + "; ".join(
+        f"{lang}: {err}" for lang, err in sorted(readiness.failures.items())
+    )
+    jd["finished_at"] = time.time()
+    await _persist_job(jd)
+    metrics.queue_depth.dec()
+    logger.error("job %s failed: %s", job_id, jd["error"])
+
+
+def _build_runner(job) -> "Coroutine | None":
     """Reconstruct a runner coroutine for a persisted Job row.
 
     Workers in the Postgres-backed queue use this to translate a popped
