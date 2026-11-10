@@ -21,6 +21,15 @@ Added, Fixed.
   failure is logged at ERROR once per language. `python -m
   treeweft.adapters.tree_sitter.parsers [--prefetch [--attempts N]]` checks
   (and downloads) every parser and exits non-zero if any is missing.
+- Parser readiness follow-ups. The check builds a real `tree_sitter.Parser`
+  per language (catching a pack whose `Language` the parser rejects) and, after
+  the first download or checksum failure, marks uncached languages failed
+  without fetching them, so an outage no longer costs one timeout per language.
+  The indexer now starts the check in the background at startup (INFO
+  `tree-sitter parsers ready (N languages)`, ERROR with the failures; never
+  fails startup), and the chunker and graph extractor log every
+  language-pack load error (checksum, cache lock, dynamic load, lock poisoned),
+  not only `DownloadError`.
 - LLM response signals. Every `llm.chat` span now also carries the
   OpenTelemetry generative-AI attributes: requested model, served model,
   input and output tokens and finish reason, next to the unchanged
