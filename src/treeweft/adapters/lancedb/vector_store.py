@@ -100,9 +100,9 @@ def _schema(dim: int | None = None):
 def _current_stamp_metadata(tbl) -> dict[str, str]:
     """The vector field's existing metadata as str→str, or {} if none.
 
-    lancedb 0.33 hands metadata back as bytes→bytes but only accepts
-    str→str on the way in (`replace_field_metadata`), so every read here
-    decodes it for round-tripping through a write.
+    lancedb hands field metadata back as bytes→bytes, so every read here
+    decodes it. Writes go through `update_field_metadata`, which merges into
+    the existing map (see `_stamp_field_metadata`).
     """
     raw = dict(tbl.schema.field("vector").metadata or {})
     out: dict[str, str] = {}
@@ -114,10 +114,18 @@ def _current_stamp_metadata(tbl) -> dict[str, str]:
 
 
 def _stamp_field_metadata(tbl, stamp: IndexStamp) -> None:
-    merged = _current_stamp_metadata(tbl)
-    merged[_STAMP_SCHEMA_KEY] = str(stamp.schema)
-    merged[_STAMP_MODEL_KEY] = stamp.embedding_model
-    tbl.replace_field_metadata("vector", merged)
+    # update_field_metadata merges by default (replace=False): other keys on
+    # the vector field survive and only the two stamp keys are overwritten.
+    # It also treats a None value as "delete this key", so refuse empty values
+    # instead of silently erasing the stamp (ADR-004 §3).
+    values = {
+        _STAMP_SCHEMA_KEY: str(stamp.schema),
+        _STAMP_MODEL_KEY: stamp.embedding_model,
+    }
+    empty = [k for k, v in values.items() if not isinstance(v, str) or not v]
+    if empty:
+        raise ValueError(f"refusing to write an empty index stamp value: {empty}")
+    tbl.update_field_metadata({"path": "vector", "metadata": values})
 
 
 def _get_table():
@@ -125,6 +133,8 @@ def _get_table():
     global _table
     if _table is not None:
         return _table
+    from lancedb.index import FTS
+
     with _lock:
         if _table is not None:
             return _table
@@ -150,7 +160,7 @@ def _get_table():
         if not has_fts:
             # Native (non-tantivy) FTS: BM25, persisted in the table dir, and
             # rows added later are searched without reindexing (spike-verified).
-            tbl.create_fts_index("chunk_text", use_tantivy=False)
+            tbl.create_index("chunk_text", config=FTS())
         _table = tbl
     return _table
 

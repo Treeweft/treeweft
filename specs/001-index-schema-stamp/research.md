@@ -32,6 +32,9 @@ Milvus integration test (T-level detail in `tasks.md`) is the gate for it.
   tables beats two. Field metadata is still table schema metadata, so this satisfies ADR-004's
   wording and needs no ADR amendment. `replace_field_metadata` replaces rather than merges, so the
   writer reads the existing field metadata first and merges into it.
+  *Update (#96, lancedb >= 0.34):* the adapter now uses `tbl.update_field_metadata({"path":
+  "vector", "metadata": {...}})`, which merges by default, so the read-and-merge step is gone;
+  `replace_field_metadata` is deprecated.
 - ChromaDB is a third selectable vector store (`VECTOR_STORE=chromadb`, `retriever.py:26`) that
   ADR-004's table does not list. Spec FR-002 covers "every supported vector store", so it gets a
   stamp too. Collection metadata is its natural place. chromadb 1.5.9 is installed; whether

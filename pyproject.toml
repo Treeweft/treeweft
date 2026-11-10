@@ -62,11 +62,11 @@ dev = ["pytest>=8", "pytest-asyncio>=1.0", "pytest-mock>=3.12", "testcontainers[
 # Install with: pip install -e .[chromadb]   /   .[lancedb]
 # or .[all-backends] for every supported store.
 chromadb = ["chromadb>=0.5"]
-lancedb = ["lancedb>=0.33"]
+lancedb = ["lancedb>=0.34"]
 # The simple deployment profile (TREEWEFT_PROFILE=simple, docs/simple-mode.md):
 # embedded LanceDB vectors + SQLite graph + in-process CPU reranker.
 simple = [
-    "lancedb>=0.33",
+    "lancedb>=0.34",
     "fastembed>=0.7",
     "aiosqlite>=0.20",
 ]
@@ -79,7 +79,7 @@ local-st = ["sentence-transformers>=3.0"]
 opik = ["opik>=2.0"]
 all-backends = [
     "chromadb>=0.5",
-    "lancedb>=0.33",
+    "lancedb>=0.34",
 ]
 
 [project.urls]
