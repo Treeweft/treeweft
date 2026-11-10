@@ -770,6 +770,13 @@ class TestLifecycleRecoveryResummarizeExemption:
         await lifecycle.startup(app)
         return persisted, queue
 
+    async def test_startup_starts_the_parser_warmup(self, monkeypatch):
+        """#103: startup() kicks off the tree-sitter parser warm-up."""
+        calls = []
+        monkeypatch.setattr(lifecycle, "start_parser_warmup", lambda: calls.append(1))
+        await self._run_startup(monkeypatch, done=[], incomplete=[])
+        assert calls == [1]
+
     async def test_interrupted_resummarize_is_reenqueued_despite_done_source(
         self, monkeypatch
     ):

@@ -470,15 +470,6 @@ class TestStartupTask:
         await lifecycle.stop_parser_warmup()
         assert task.cancelled()
 
-    async def test_startup_wires_the_warmup(self, monkeypatch):
-        """lifecycle.startup() source calls start_parser_warmup and shutdown
-        calls stop_parser_warmup (full startup is driven in test_refresh_hooks)."""
-        import inspect
-        from treeweft.application import lifecycle
-
-        assert "start_parser_warmup()" in inspect.getsource(lifecycle.startup)
-        assert "stop_parser_warmup()" in inspect.getsource(lifecycle.shutdown)
-
 
 class TestCli:
     def test_check_only_makes_no_download_call(self, monkeypatch, capsys):
