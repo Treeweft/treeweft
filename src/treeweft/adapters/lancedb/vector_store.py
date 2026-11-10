@@ -47,7 +47,7 @@ FTS_COLUMN = "chunk_text"
 # LanceDB mechanism that survives add/delete/FTS/optimize/reopen AND can be
 # applied to a table created before the stamp existed (research R1) — a
 # table's own top-level schema metadata can be set at create_table() but not
-# changed afterwards in lancedb 0.33.
+# changed afterwards in lancedb 0.34.
 _STAMP_SCHEMA_KEY = "treeweft.index_schema"
 _STAMP_MODEL_KEY = "treeweft.embedding_model"
 
@@ -100,9 +100,9 @@ def _schema(dim: int | None = None):
 def _current_stamp_metadata(tbl) -> dict[str, str]:
     """The vector field's existing metadata as str→str, or {} if none.
 
-    lancedb 0.33 hands metadata back as bytes→bytes but only accepts
-    str→str on the way in (`replace_field_metadata`), so every read here
-    decodes it for round-tripping through a write.
+    lancedb hands field metadata back as bytes→bytes, so every read here
+    decodes it. Writes go through `update_field_metadata`, which merges into
+    the existing map (see `_stamp_field_metadata`).
     """
     raw = dict(tbl.schema.field("vector").metadata or {})
     out: dict[str, str] = {}
@@ -114,10 +114,17 @@ def _current_stamp_metadata(tbl) -> dict[str, str]:
 
 
 def _stamp_field_metadata(tbl, stamp: IndexStamp) -> None:
-    merged = _current_stamp_metadata(tbl)
-    merged[_STAMP_SCHEMA_KEY] = str(stamp.schema)
-    merged[_STAMP_MODEL_KEY] = stamp.embedding_model
-    tbl.replace_field_metadata("vector", merged)
+    # update_field_metadata merges by default (replace=False): other keys on
+    # the vector field survive and only the two stamp keys are overwritten.
+    tbl.update_field_metadata(
+        {
+            "path": "vector",
+            "metadata": {
+                _STAMP_SCHEMA_KEY: str(stamp.schema),
+                _STAMP_MODEL_KEY: stamp.embedding_model,
+            },
+        }
+    )
 
 
 def _get_table():
@@ -125,6 +132,8 @@ def _get_table():
     global _table
     if _table is not None:
         return _table
+    from lancedb.index import FTS
+
     with _lock:
         if _table is not None:
             return _table
@@ -150,7 +159,7 @@ def _get_table():
         if not has_fts:
             # Native (non-tantivy) FTS: BM25, persisted in the table dir, and
             # rows added later are searched without reindexing (spike-verified).
-            tbl.create_fts_index("chunk_text", use_tantivy=False)
+            tbl.create_index("chunk_text", config=FTS())
         _table = tbl
     return _table
 

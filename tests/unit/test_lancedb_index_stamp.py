@@ -3,6 +3,8 @@
 Real embedded LanceDB in a tmp dir — no mocking (constitution II allows
 embedded, in-process stores).
 """
+import warnings
+
 import pytest
 
 from treeweft.adapters.lancedb import vector_store as vs
@@ -57,9 +59,9 @@ class TestWriteStampMerges:
     async def test_merges_with_an_unrelated_existing_key(self):
         await vs.init_collection()
         tbl = vs._get_table()
-        existing = vs._current_stamp_metadata(tbl)
-        existing["unrelated.key"] = "keep-me"
-        tbl.replace_field_metadata("vector", existing)
+        tbl.update_field_metadata(
+            {"path": "vector", "metadata": {"unrelated.key": "keep-me"}}
+        )
 
         await vs.write_stamp(STAMP)
 
@@ -67,6 +69,104 @@ class TestWriteStampMerges:
         assert meta.get("unrelated.key") == "keep-me"
         obs = await vs.observe_index()
         assert obs.stamp == STAMP
+
+
+class TestRestampOverwritesStampKeysOnly:
+    async def test_overwrites_both_stamp_keys_and_keeps_others(self):
+        await vs.init_collection()
+        tbl = vs._get_table()
+        tbl.update_field_metadata(
+            {"path": "vector", "metadata": {"unrelated.key": "keep-me"}}
+        )
+        old = IndexStamp(schema=1, embedding_model="old-model", vector_dim=DIM)
+        await vs.write_stamp(old)
+        new = IndexStamp(schema=2, embedding_model="new-model", vector_dim=DIM)
+        await vs.write_stamp(new)
+
+        meta = vs._current_stamp_metadata(tbl)
+        assert meta["unrelated.key"] == "keep-me"
+        assert meta[vs._STAMP_SCHEMA_KEY] == "2"
+        assert meta[vs._STAMP_MODEL_KEY] == "new-model"
+        assert (await vs.observe_index()).stamp == new
+
+    async def test_stamping_emits_no_deprecation_warning(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            await vs.init_collection()
+            await vs.write_stamp(STAMP)
+
+
+def _fts_indices(tbl):
+    return [i for i in tbl.list_indices() if i.columns == ["chunk_text"]]
+
+
+def _old_api_table(stamp: IndexStamp):
+    """A table as the pre-#96 code built it: deprecated stamp + FTS calls."""
+    import lancedb
+
+    db = lancedb.connect(vs.LANCEDB_PATH)
+    tbl = db.create_table(vs.TABLE_NAME, schema=vs._schema())
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        tbl.replace_field_metadata(
+            "vector",
+            {
+                vs._STAMP_SCHEMA_KEY: str(stamp.schema),
+                vs._STAMP_MODEL_KEY: stamp.embedding_model,
+            },
+        )
+        tbl.create_fts_index("chunk_text", use_tantivy=False)
+    return tbl
+
+
+class TestOldTableCompatibility:
+    async def test_opens_old_table_keeps_stamp_and_adds_no_second_index(self):
+        _old_api_table(STAMP)
+        before = [(i.name, i.index_type) for i in _fts_indices(_reopen())]
+        assert len(before) == 1
+
+        vs._db = None
+        vs._table = None
+        tbl = vs._get_table()
+
+        after = [(i.name, i.index_type) for i in _fts_indices(tbl)]
+        assert after == before
+        assert (await vs.observe_index()).stamp == STAMP
+
+
+def _reopen():
+    import lancedb
+
+    return lancedb.connect(vs.LANCEDB_PATH).open_table(vs.TABLE_NAME)
+
+
+class TestHybridSearchParity:
+    async def test_old_and_new_fts_index_give_same_ranking(self, tmp_path, monkeypatch):
+        rows = [
+            {"text": f"def handler_{i}(): return widget_{i % 3} parse token {i}",
+             "file_path": f"/r/f{i}.py", "language": "python",
+             "start_line": 1, "end_line": 2, "source_id": "s1"}
+            for i in range(12)
+        ]
+        vecs = [_vec(i) for i in range(12)]
+
+        async def run(use_old: bool):
+            monkeypatch.setattr(vs, "LANCEDB_PATH", str(tmp_path / ("old" if use_old else "new")))
+            monkeypatch.setattr(vs, "_db", None)
+            monkeypatch.setattr(vs, "_table", None)
+            if use_old:
+                _old_api_table(STAMP)
+            await vs.insert_chunks(rows, vecs)
+            hits = vs.hybrid_search("widget_1 parse", _vec(3), top_k=8)
+            return [
+                (h["entity"]["file_path"], round(h["distance"], 9)) for h in hits
+            ]
+
+        # Row ids are random uuids per insert, so rank by the (unique)
+        # file_path plus the fused score instead.
+        old = await run(True)
+        new = await run(False)
+        assert old and old == new
 
 
 class TestStampSurvivesLifecycle:
