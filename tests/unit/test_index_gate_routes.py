@@ -179,6 +179,34 @@ EXEMPT = {
 }
 
 
+def _flat_routes(routes=None, prefix=""):
+    """Every (method, path) the app serves, descending into routers mounted
+    with `app.include_router` (they appear in `app.routes` as path-less
+    `_IncludedRouter` entries in current FastAPI, so a plain walk misses them)."""
+    out = set()
+    for route in app.routes if routes is None else routes:
+        path = getattr(route, "path", None)
+        if path is not None:
+            for method in getattr(route, "methods", None) or set():
+                if method not in ("HEAD", "OPTIONS"):
+                    out.add((method, prefix + path))
+            continue
+        inner = getattr(route, "original_router", None)
+        if inner is not None:
+            ctx = getattr(route, "include_context", None)
+            out |= _flat_routes(inner.routes, prefix + (getattr(ctx, "prefix", "") or ""))
+    return out
+
+
+def test_flat_routes_sees_included_routers():
+    """Guards the helper itself: routes from the auth, webhook and prompts
+    routers must be visible, or every classification below is blind to them."""
+    routes = _flat_routes()
+    assert ("POST", "/webhook") in routes
+    assert ("POST", "/auth/login") in routes
+    assert ("POST", "/sources/{source_id}/resummarize") in routes
+
+
 class TestRouteClassification:
     def test_every_matching_route_is_read_write_or_exempt(self):
         read_paths = {p for _, p, _ in READ_REQUESTS}
@@ -187,46 +215,56 @@ class TestRouteClassification:
         write_paths = {"/jobs/{job_id}/retry" if "retry" in p else p for p in write_paths}
 
         unclassified = []
-        for route in app.routes:
-            path = getattr(route, "path", None)
-            methods = getattr(route, "methods", None) or set()
-            if path is None:
-                continue
+        for method, path in sorted(_flat_routes()):
             matches_prefix = any(path.startswith(p) for p in READ_PREFIXES + WRITE_PREFIXES)
             is_retry = path == "/jobs/{job_id}/retry"
             if not matches_prefix and not is_retry:
                 continue
-            for method in methods:
-                key = (method, path)
-                if key in EXEMPT:
-                    continue
-                if path in read_paths or path in write_paths or is_retry:
-                    continue
-                unclassified.append(key)
+            key = (method, path)
+            if key in EXEMPT:
+                continue
+            if path in read_paths or path in write_paths or is_retry:
+                continue
+            unclassified.append(key)
         assert not unclassified, f"routes not covered by the gate test or EXEMPT: {unclassified}"
 
 
 # ── parser gate (#95 / #102 / #105) ────────────────────────────────────────
 #
 # Every write route whose job parses code must call
-# `index_guard.require_parsers()` right after `require_writable()`, or a
+# `index_guard.require_parsers()` before the job is queued, or a
 # parser outage silently builds a structure-less index on TokenChunker
 # windows. Each route is either parser-gated (and proven so by an HTTP call)
 # or parser-exempt with a reason.
 
 PARSER_GATED_REQUESTS = [
-    ("POST", "/index-file", {"file_path": "/tmp/nope.py"}),
-    ("POST", "/index-directory", {"directory": "/tmp"}),
-    ("POST", "/index-repo", {"path": "/tmp"}),
+    ("POST", "/index-file", {"file_path": "/tmp/does-not-exist.py"}),
+    # Non-existent paths: the parser gate answers first; if it ever regresses
+    # the handler 404s instead of walking a real directory.
+    ("POST", "/index-directory", {"directory": "/tmp/does-not-exist-dir"}),
+    ("POST", "/index-repo", {"path": "/tmp/does-not-exist-repo"}),
     ("POST", "/index-graph", {"source_id": "src-1"}),
     ("POST", "/jobs/{job_id}/retry", None),  # needs a non-resummarize job in the store
     ("POST", "/index/rebuild", None),  # real (non-dry-run) rebuild only
 ]
 
-# (method, path) write routes that do NOT parse code, with why.
+# (method, path) write routes that are NOT parser-gated, with why.
 PARSER_EXEMPT = {
     ("POST", "/build-community"): "graph-signal backfill over already-indexed data — parses no code",
     ("GET", "/build-community"): "status poll only — parses no code",
+    ("POST", "/webhook"): (
+        "deliberately ungated (#102): a 409 would drop the push (forges don't redeliver "
+        "4xx); the queued job hits the runner-side parser check and dead-letters instead"
+    ),
+    ("POST", "/sources/{source_id}/resummarize"): "re-summarizes stored chunks — parses no code",
+}
+
+# Write routes outside WRITE_PREFIXES that queue (or could queue) index work,
+# so their parser-gate status is an explicit, reviewed decision.
+PARSER_SCOPE_EXTRA = {
+    "/jobs/{job_id}/retry",
+    "/webhook",
+    "/sources/{source_id}/resummarize",
 }
 
 
@@ -235,32 +273,20 @@ class TestParserGateClassification:
         gated = {(m, p) for m, p, _ in PARSER_GATED_REQUESTS}
         assert not gated & set(PARSER_EXEMPT), "route is both parser-gated and parser-exempt"
 
-        unclassified = []
-        for route in app.routes:
-            path = getattr(route, "path", None)
-            if path is None:
-                continue
-            if not (path.startswith(WRITE_PREFIXES) or path == "/jobs/{job_id}/retry"):
-                continue
-            for method in getattr(route, "methods", None) or set():
-                if method in ("HEAD", "OPTIONS"):
-                    continue
-                key = (method, path)
-                if key not in gated and key not in PARSER_EXEMPT:
-                    unclassified.append(key)
+        unclassified = [
+            key for key in sorted(_flat_routes())
+            if (key[1].startswith(WRITE_PREFIXES) or key[1] in PARSER_SCOPE_EXTRA)
+            and key not in gated and key not in PARSER_EXEMPT
+        ]
         assert not unclassified, (
             f"write routes neither parser-gated nor parser-exempt: {sorted(unclassified)}. "
-            "If the route's job parses code, call index_guard.require_parsers() right after "
-            "require_writable() and add it to PARSER_GATED_REQUESTS; otherwise add a reasoned "
+            "If the route's job parses code, call index_guard.require_parsers() before the job is "
+            "queued and add it to PARSER_GATED_REQUESTS; otherwise add a reasoned "
             "PARSER_EXEMPT entry in tests/unit/test_index_gate_routes.py."
         )
 
     def test_gated_and_exempt_entries_are_real_routes(self):
-        real = {
-            (m, getattr(r, "path", None))
-            for r in app.routes
-            for m in (getattr(r, "methods", None) or set())
-        }
+        real = _flat_routes()
         stale = [k for k in {(m, p) for m, p, _ in PARSER_GATED_REQUESTS} | set(PARSER_EXEMPT) if k not in real]
         assert not stale, f"classified routes that no longer exist: {stale}"
 
