@@ -371,6 +371,17 @@ def _preparing_body() -> dict:
     }
 
 
+def _parsers_unavailable_body(failures: dict[str, str]) -> dict:
+    prefix = "Tree-sitter parsers unavailable for: "
+    suffix = ". Index jobs are refused until they load; this retries automatically."
+    return {
+        "detail": _truncate_for_detail(prefix, ", ".join(sorted(failures)), suffix),
+        "reason": "parsers_unavailable",
+        "index_status": "parsers_unavailable",
+        "languages": dict(failures),
+    }
+
+
 # ── Route gates ───────────────────────────────────────────────────────────
 
 def require_searchable() -> "JSONResponse | None":
@@ -453,6 +464,18 @@ async def dispatch_allowed(job) -> bool:
 
     _refusal_details.pop(job.id, None)
     return True
+
+
+async def require_parsers() -> "JSONResponse | None":
+    """409 when a `LANGUAGE_MAP` tree-sitter parser cannot load, so an index
+    job is refused instead of silently chunking on the TokenChunker fallback.
+    Call right after `require_writable()` on every route that parses code."""
+    from treeweft.adapters.tree_sitter import parsers
+
+    readiness = await parsers.check_parsers_async()
+    if readiness.ok:
+        return None
+    return JSONResponse(status_code=409, content=_parsers_unavailable_body(readiness.failures))
 
 
 def refusal_detail(job_id: str) -> str:

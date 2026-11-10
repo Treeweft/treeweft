@@ -26,6 +26,18 @@ RUN pip install --no-cache-dir . && \
 # openaipublic.blob.core.windows.net on first call.
 RUN python -c "import tiktoken; tiktoken.get_encoding('cl100k_base')"
 
+# Pre-download the tree-sitter parsers for the same reason. tree-sitter-
+# language-pack fetches each grammar from GitHub on first use; when that fails
+# at runtime the indexer silently falls back to character windows. The CLI
+# retries with backoff, then exits non-zero unless every LANGUAGE_MAP parser
+# loads, so a failed download fails the build here. It runs against the
+# installed package (the `pip install .` above), before PYTHONPATH is set, so
+# it exercises what `pip` shipped. The cache lands under the build user's
+# ~/.cache/tree-sitter-language-pack: this image runs as root with no USER
+# line, so build and runtime match. If a USER is ever added, move the cache
+# (or set the pack's cache dir) so the runtime user finds it.
+RUN python -m treeweft.adapters.tree_sitter.parsers --prefetch
+
 ENV PYTHONPATH=/app/src
 ENV RUST_MIN_STACK=8388608
 

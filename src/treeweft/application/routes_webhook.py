@@ -235,6 +235,9 @@ async def handle_webhook(request: Request):
     gate = await index_guard.require_writable()
     if gate is not None:
         return gate
+    # Deliberately NOT gated on index_guard.require_parsers(): a 409 here
+    # drops the push (forges don't redeliver 4xx). The job is queued and the
+    # runner-side parser check dead-letters it instead (issue #95).
 
     if existing_source is None:
         # 6. Not indexed yet — create full index job. Guard against a

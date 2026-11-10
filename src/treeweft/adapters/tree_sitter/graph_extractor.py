@@ -1,9 +1,10 @@
 from pathlib import Path
 
-from tree_sitter_language_pack import get_language
+from tree_sitter_language_pack import DownloadError, get_language
 from tree_sitter import Parser as TSParser, Language, Query, QueryCursor
 
 from treeweft.adapters.tree_sitter.indexer import LANGUAGE_MAP
+from treeweft.adapters.tree_sitter.parsers import log_download_failure
 
 
 def _run_query(lang, query_str, root_node):
@@ -445,6 +446,9 @@ def extract_graph(file_path: str, source: str) -> tuple[list[Entity], list[Relat
     queries = LANGUAGE_QUERIES[lang]
     try:
         lang_obj = get_language(lang)
+    except DownloadError as exc:
+        log_download_failure(lang, exc)
+        return _fallback_module_entity(file_path, source)
     except Exception:
         return _fallback_module_entity(file_path, source)
 

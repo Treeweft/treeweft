@@ -9,6 +9,18 @@ Added, Fixed.
 
 ### Added
 
+- Tree-sitter parser readiness. When a `LANGUAGE_MAP` parser cannot load (for
+  example a failed download), index routes (`/index-file`, `/index-directory`,
+  `/index-repo`, `/index-graph`, job retry, `POST /index/rebuild`) answer 409
+  with `reason: parsers_unavailable` and the failing languages, and queued
+  index jobs end `failed` with `parsers_unavailable: ...` instead of silently
+  chunking on token windows. The push webhook still queues its job (a 409
+  would drop the push); retryable jobs go through the retry path and end in
+  `dead_letter`, recoverable with `POST /jobs/{id}/retry`. A failed check is retried
+  after `TREEWEFT_PARSER_RETRY_SECONDS` (default 30). A parser download
+  failure is logged at ERROR once per language. `python -m
+  treeweft.adapters.tree_sitter.parsers [--prefetch [--attempts N]]` checks
+  (and downloads) every parser and exits non-zero if any is missing.
 - LLM response signals. Every `llm.chat` span now also carries the
   OpenTelemetry generative-AI attributes: requested model, served model,
   input and output tokens and finish reason, next to the unchanged
