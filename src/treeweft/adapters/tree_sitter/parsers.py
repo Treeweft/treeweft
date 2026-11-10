@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 import tree_sitter_language_pack as _pack
+from tree_sitter import Parser as TSParser
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,28 @@ def _languages() -> list[str]:
     return sorted(set(LANGUAGE_MAP.values()))
 
 
+# Every way a mapped language's parser can be unavailable (download, checksum,
+# cache lock, dynamic load, parser setup, ...): the pack's common base class.
+# `_make_chunker` and `graph_extractor` catch it around parser setup only.
+PARSER_UNAVAILABLE_ERRORS = (_pack.Error,)
+
+# Fetch failures. After FETCH_FAILURES_BEFORE_SKIP of them the network is
+# presumed down, so languages not already cached are marked failed without
+# another attempt (each can hang until a socket timeout). One failure is not
+# enough: a single missing or corrupt release asset must not block the rest.
+_FETCH_ERRORS = (_pack.DownloadError, _pack.ChecksumMismatchError)
+FETCH_FAILURES_BEFORE_SKIP = 2
+
+
+def _cached_languages() -> set[str] | None:
+    """Languages already in the pack's cache (no network); None if the cache
+    can't be read, in which case nothing is skipped."""
+    try:
+        return set(_pack.downloaded_languages())
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def check_parsers(force: bool = False) -> ParserReadiness:
     """Load every `LANGUAGE_MAP` language. A full success is cached for the
     process; a result with failures only for `TREEWEFT_PARSER_RETRY_SECONDS`
@@ -86,11 +109,24 @@ def check_parsers(force: bool = False) -> ParserReadiness:
             if _cached.ok or _clock() - _cached_at < retry_seconds():
                 return _cached
         failures: dict[str, str] = {}
+        fetch_failed: list[str] = []
+        cached: set[str] | None = None
         for lang in _languages():
+            if cached is not None and lang not in cached:
+                failures[lang] = (
+                    f"not downloaded (skipped after the {' and '.join(fetch_failed)} failures)"
+                )
+                continue
             try:
-                _pack.get_language(lang)
+                # A real parser, not just a Language: pack 1.9.x returns a Rust
+                # Language that tree_sitter.Parser rejects (CLAUDE.md invariant).
+                TSParser(_pack.get_language(lang))
             except Exception as exc:  # noqa: BLE001
                 failures[lang] = f"{type(exc).__name__}: {exc}"
+                if isinstance(exc, _FETCH_ERRORS) and len(fetch_failed) < FETCH_FAILURES_BEFORE_SKIP:
+                    fetch_failed.append(lang)
+                    if len(fetch_failed) == FETCH_FAILURES_BEFORE_SKIP:
+                        cached = _cached_languages()
         _cached = ParserReadiness(ok=not failures, failures=failures)
         _cached_at = _clock()
         return _cached
@@ -117,8 +153,8 @@ def log_download_failure(lang: str, exc: BaseException) -> None:
     level = logging.ERROR if first else logging.WARNING
     logger.log(
         level,
-        "tree-sitter parser download failed for %r: %s — falling back to token windows",
-        lang, exc,
+        "tree-sitter parser for %r could not load (%s: %s) — falling back to token windows",
+        lang, type(exc).__name__, exc,
     )
 
 
