@@ -113,6 +113,21 @@ jobs:
         # the quickstart example doubles as the CI config — which also
         # keeps .env.example loadable.
         run: cp .env.example .env
+      - name: Read tree-sitter-language-pack version
+        id: ts-pack
+        run: echo "version=$(uv run --locked --no-sync python -c "import importlib.metadata as m; print(m.version('tree-sitter-language-pack'))")" >> "$GITHUB_OUTPUT"
+      - name: Cache tree-sitter parsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/tree-sitter-language-pack
+          key: ts-parsers-${{ runner.os }}-${{ steps.ts-pack.outputs.version }}
+      - name: Prefetch tree-sitter parsers
+        # Parsers download from GitHub on first use; a failure there would
+        # otherwise surface as many unrelated test failures. This retries,
+        # then fails here naming the languages that did not load. It runs
+        # after the quickstart env is in place: the language list is read
+        # from the indexer module, which fails loud on unset service vars.
+        run: uv run --locked --no-sync python -m treeweft.adapters.tree_sitter.parsers --prefetch
       - name: Unit tests
         run: uv run --locked --no-sync pytest tests/unit -q
 
@@ -171,6 +186,21 @@ jobs:
         run: uv sync --locked --extra dev --extra all-backends --extra simple
       - name: Provide the quickstart env
         run: cp .env.example .env
+      - name: Read tree-sitter-language-pack version
+        id: ts-pack
+        run: echo "version=$(uv run --locked --no-sync python -c "import importlib.metadata as m; print(m.version('tree-sitter-language-pack'))")" >> "$GITHUB_OUTPUT"
+      - name: Cache tree-sitter parsers
+        uses: actions/cache@v6
+        with:
+          path: ~/.cache/tree-sitter-language-pack
+          key: ts-parsers-${{ runner.os }}-${{ steps.ts-pack.outputs.version }}
+      - name: Prefetch tree-sitter parsers
+        # Parsers download from GitHub on first use; a failure there would
+        # otherwise surface as many unrelated test failures. This retries,
+        # then fails here naming the languages that did not load. It runs
+        # after the quickstart env is in place: the language list is read
+        # from the indexer module, which fails loud on unset service vars.
+        run: uv run --locked --no-sync python -m treeweft.adapters.tree_sitter.parsers --prefetch
       - name: Integration tests
         env:
           TREEWEFT_ITEST_CONTAINERS: "1"
