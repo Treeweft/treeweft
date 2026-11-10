@@ -85,4 +85,4 @@ _community_build_task: "Any | None" = None
 _freshness_sampler_task: "Any | None" = None
 _login_purge_task: "Any | None" = None
 _fleet_refresh_task: "Any | None" = None
-_parser_warmup_task: "Any | None" = None
+_parser_warmup_thread: "Any | None" = None

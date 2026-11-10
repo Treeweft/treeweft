@@ -69,17 +69,26 @@ def _languages() -> list[str]:
     return sorted(set(LANGUAGE_MAP.values()))
 
 
-# Fetch failures: once one happens the network is presumed down, so languages
-# that are not already cached are marked failed without another attempt.
+# Every way a mapped language's parser can be unavailable (download, checksum,
+# cache lock, dynamic load, parser setup, ...): the pack's common base class.
+# `_make_chunker` and `graph_extractor` catch it around parser setup only.
+PARSER_UNAVAILABLE_ERRORS = (_pack.Error,)
+
+# Fetch failures. After FETCH_FAILURES_BEFORE_SKIP of them the network is
+# presumed down, so languages not already cached are marked failed without
+# another attempt (each can hang until a socket timeout). One failure is not
+# enough: a single missing or corrupt release asset must not block the rest.
 _FETCH_ERRORS = (_pack.DownloadError, _pack.ChecksumMismatchError)
+FETCH_FAILURES_BEFORE_SKIP = 2
 
 
-def _cached_languages() -> set[str]:
-    """Languages already in the pack's cache (no network). Empty on error."""
+def _cached_languages() -> set[str] | None:
+    """Languages already in the pack's cache (no network); None if the cache
+    can't be read, in which case nothing is skipped."""
     try:
         return set(_pack.downloaded_languages())
     except Exception:  # noqa: BLE001
-        return set()
+        return None
 
 
 def check_parsers(force: bool = False) -> ParserReadiness:
@@ -100,11 +109,13 @@ def check_parsers(force: bool = False) -> ParserReadiness:
             if _cached.ok or _clock() - _cached_at < retry_seconds():
                 return _cached
         failures: dict[str, str] = {}
-        fetch_failed: str | None = None
-        cached: set[str] = set()
+        fetch_failed: list[str] = []
+        cached: set[str] | None = None
         for lang in _languages():
-            if fetch_failed is not None and lang not in cached:
-                failures[lang] = f"not downloaded (skipped after the {fetch_failed} failure)"
+            if cached is not None and lang not in cached:
+                failures[lang] = (
+                    f"not downloaded (skipped after the {' and '.join(fetch_failed)} failures)"
+                )
                 continue
             try:
                 # A real parser, not just a Language: pack 1.9.x returns a Rust
@@ -112,9 +123,10 @@ def check_parsers(force: bool = False) -> ParserReadiness:
                 TSParser(_pack.get_language(lang))
             except Exception as exc:  # noqa: BLE001
                 failures[lang] = f"{type(exc).__name__}: {exc}"
-                if fetch_failed is None and isinstance(exc, _FETCH_ERRORS):
-                    fetch_failed = lang
-                    cached = _cached_languages()
+                if isinstance(exc, _FETCH_ERRORS) and len(fetch_failed) < FETCH_FAILURES_BEFORE_SKIP:
+                    fetch_failed.append(lang)
+                    if len(fetch_failed) == FETCH_FAILURES_BEFORE_SKIP:
+                        cached = _cached_languages()
         _cached = ParserReadiness(ok=not failures, failures=failures)
         _cached_at = _clock()
         return _cached
@@ -141,8 +153,8 @@ def log_download_failure(lang: str, exc: BaseException) -> None:
     level = logging.ERROR if first else logging.WARNING
     logger.log(
         level,
-        "tree-sitter parser download failed for %r: %s — falling back to token windows",
-        lang, exc,
+        "tree-sitter parser for %r could not load (%s: %s) — falling back to token windows",
+        lang, type(exc).__name__, exc,
     )
 
 

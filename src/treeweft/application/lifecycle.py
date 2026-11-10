@@ -19,6 +19,7 @@ Nothing here imports `indexer_service`; state comes from `indexer_state`.
 from __future__ import annotations
 
 import logging
+import threading
 from treeweft import graph_store
 from treeweft.application import index_guard
 from treeweft.application import indexer_state as _state
@@ -669,13 +670,13 @@ async def startup(app):
     start_parser_warmup()
 
 
-async def _warm_parsers() -> None:
+def _warm_parsers() -> None:
     """Load every parser once at startup so a cold host cache downloads them
     here, not inside the first index request. Logs only; never raises."""
     from treeweft.adapters.tree_sitter import parsers
 
     try:
-        result = await parsers.check_parsers_async()
+        result = parsers.check_parsers()
         if result.ok:
             logger.info(
                 "tree-sitter parsers ready (%d languages)", len(parsers._languages())
@@ -685,24 +686,18 @@ async def _warm_parsers() -> None:
                 "tree-sitter parsers unavailable for: %s",
                 "; ".join(f"{k}: {v}" for k, v in sorted(result.failures.items())),
             )
-    except asyncio.CancelledError:
-        raise
     except Exception:  # noqa: BLE001
         logger.exception("tree-sitter parser warm-up failed")
 
 
 def start_parser_warmup() -> None:
-    _state._parser_warmup_task = asyncio.create_task(_warm_parsers())
-
-
-async def stop_parser_warmup() -> None:
-    task = _state._parser_warmup_task
-    if task is not None and not task.done():
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    """Run `_warm_parsers` on a daemon thread, not `asyncio.to_thread`: a
+    download stuck until its socket timeout can't be cancelled, and an
+    executor thread would hold up interpreter shutdown until it returned.
+    A daemon thread needs no stop step."""
+    t = threading.Thread(target=_warm_parsers, name="treeweft-parser-warmup", daemon=True)
+    _state._parser_warmup_thread = t
+    t.start()
 
 
 async def shutdown(app):
@@ -728,7 +723,6 @@ async def shutdown(app):
             await _state._fleet_refresh_task
         except asyncio.CancelledError:
             pass
-    await stop_parser_warmup()
     await graph_store.close()
     if _state._job_queue is not None:
         await _state._job_queue.stop()

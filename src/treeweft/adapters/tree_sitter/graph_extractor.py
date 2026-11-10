@@ -3,8 +3,8 @@ from pathlib import Path
 from tree_sitter_language_pack import get_language
 from tree_sitter import Parser as TSParser, Language, Query, QueryCursor
 
-from treeweft.adapters.tree_sitter.indexer import LANGUAGE_MAP, PARSER_UNAVAILABLE_ERRORS
-from treeweft.adapters.tree_sitter.parsers import log_download_failure
+from treeweft.adapters.tree_sitter.indexer import LANGUAGE_MAP
+from treeweft.adapters.tree_sitter.parsers import PARSER_UNAVAILABLE_ERRORS, log_download_failure
 
 
 def _run_query(lang, query_str, root_node):
