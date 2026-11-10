@@ -50,6 +50,7 @@ from treeweft.retriever import (
 from dataclasses import dataclass
 from typing import Any, Coroutine
 import asyncio
+import collections.abc
 import os
 
 _SUMMARIZING_KINDS = frozenset({"repo", "directory"})
@@ -159,14 +160,43 @@ def _restore_request_options(jd: dict) -> str:
     return payload.get("pattern") or "**/*"
 
 
-def dispatch_job(job) -> "Coroutine | None":
+class _ParserGatedRunner(collections.abc.Coroutine):
+    """A runner coroutine behind the parser check (`_run_if_parsers_ready`).
+
+    Not a bare `async def` wrapper: startup recovery (`lifecycle.py`) probes
+    `dispatch_job()` and `.close()`s the result without awaiting it, and
+    closing an unstarted wrapper never runs its body, so the inner runner would
+    be left un-closed ("coroutine ... was never awaited"). `close()` here closes
+    both. Subclassing `Coroutine` keeps `asyncio.run`/`create_task` working."""
+
+    __slots__ = ("_outer", "_coro")
+
+    def __init__(self, job_id: str, coro: "Coroutine"):
+        self._coro = coro
+        self._outer = _run_if_parsers_ready(job_id, coro)
+
+    def send(self, value):
+        return self._outer.send(value)
+
+    def throw(self, *args):
+        return self._outer.throw(*args)
+
+    def close(self) -> None:
+        self._outer.close()
+        self._coro.close()
+
+    def __await__(self):
+        return self._outer.__await__()
+
+
+def dispatch_job(job) -> "Coroutine | _ParserGatedRunner | None":
     """`_build_runner`, with every parsing kind (all but `resummarize`) gated
     on tree-sitter parser readiness when the runner starts. Stays synchronous:
-    the check runs inside the returned coroutine."""
+    the check runs when the returned awaitable is awaited."""
     coro = _build_runner(job)
     if coro is None or job.kind == "resummarize":
         return coro
-    return _run_if_parsers_ready(job.id, coro)
+    return _ParserGatedRunner(job.id, coro)
 
 
 async def _run_if_parsers_ready(job_id: str, coro: "Coroutine"):
@@ -184,7 +214,20 @@ async def _run_if_parsers_ready(job_id: str, coro: "Coroutine"):
     jd["finished_at"] = time.time()
     await _persist_job(jd)
     metrics.queue_depth.dec()
-    logger.error("job %s failed: %s", job_id, jd["error"])
+    from treeweft.infrastructure.logging import log as struct_log
+    struct_log.error(
+        "job_failed",
+        job_id=job_id,
+        source=jd.get("source", ""),
+        error_type=parsers.ParsersUnavailableError.__name__,
+        error=jd["error"],
+        processed_files=0,
+        total_files=jd.get("total_files", 0),
+    )
+    # Raise rather than return: the queue worker then takes its
+    # exception path, so a retryable kind (incremental/webhook) is
+    # re-enqueued and finally dead-lettered instead of silently lost.
+    raise parsers.ParsersUnavailableError(jd["error"])
 
 
 def _build_runner(job) -> "Coroutine | None":

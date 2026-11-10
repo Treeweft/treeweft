@@ -17,7 +17,7 @@ from treeweft.application import index_guard
 from treeweft.application import indexer_runners as runners
 from treeweft.application import indexer_state as state
 from treeweft.application.indexer_service import app
-from treeweft.domain.jobs import Job
+from treeweft.domain.jobs import Job, JobStatus
 
 pytestmark = pytest.mark.real_parser_check
 
@@ -87,6 +87,19 @@ class TestCheckParsers:
         assert parsers.check_parsers().ok
         assert len(calls) > n
 
+    def test_busy_check_answers_from_cache_instead_of_waiting(self, monkeypatch, clock):
+        _mock_get_language(monkeypatch, bad={"python"})
+        first = parsers.check_parsers()
+        clock.now += 31  # cache expired: a new check would re-download
+        calls = []
+        _mock_get_language(monkeypatch, calls=calls)
+        assert parsers._lock.acquire(blocking=False)  # another thread is checking
+        try:
+            assert parsers.check_parsers() is first
+        finally:
+            parsers._lock.release()
+        assert calls == []
+
     def test_force_bypasses_the_cache(self, monkeypatch, clock):
         calls = []
         _mock_get_language(monkeypatch, calls=calls)
@@ -134,6 +147,44 @@ class TestRoutes:
         assert body["reason"] == "parsers_unavailable"
         assert "python" in body["languages"]
 
+    @pytest.mark.parametrize(
+        "path, payload",
+        [
+            ("/index-directory", {"directory": "/tmp"}),
+            ("/index-repo", {"path": "/tmp"}),
+            ("/index-graph", {"source_id": "src-1"}),
+        ],
+    )
+    def test_other_parsing_routes_refused(self, monkeypatch, path, payload):
+        _mock_get_language(monkeypatch, bad={"python"})
+        resp = client.post(path, json=payload) if payload is not None else client.post(path)
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["reason"] == "parsers_unavailable"
+
+    @staticmethod
+    def _store_with(monkeypatch, job):
+        class _Store:
+            async def get(self, job_id):
+                return job
+
+        monkeypatch.setattr(state, "_job_store", _Store())
+
+    def test_retry_refused_for_a_parsing_job(self, monkeypatch):
+        _mock_get_language(monkeypatch, bad={"python"})
+        self._store_with(monkeypatch, Job(id="j1", kind="file", status=JobStatus.DEAD_LETTER))
+        resp = client.post("/jobs/j1/retry")
+        assert resp.status_code == 409
+        assert resp.json()["reason"] == "parsers_unavailable"
+
+    def test_retry_of_resummarize_is_not_gated_on_parsers(self, monkeypatch):
+        _mock_get_language(monkeypatch, bad={"python"})
+        # "running" is not retryable, so the route 409s on status, after the
+        # point where the parser gate would have refused.
+        self._store_with(monkeypatch, Job(id="r1", kind="resummarize", status=JobStatus.RUNNING))
+        resp = client.post("/jobs/r1/retry")
+        assert resp.status_code == 409
+        assert "can only retry" in resp.json()["detail"]
+
     def test_rebuild_refused_but_dry_run_is_not(self, monkeypatch):
         _mock_get_language(monkeypatch, bad={"python"})
         monkeypatch.setattr("treeweft.application.indexer_service.authz._require_admin", lambda r: None)
@@ -178,7 +229,8 @@ class TestRunner:
         _mock_get_language(monkeypatch, bad={"python"})
         ran = []
         job, persisted = self._file_job(tmp_path, monkeypatch, ran)
-        asyncio.run(runners.dispatch_job(job))
+        with pytest.raises(parsers.ParsersUnavailableError, match="parsers_unavailable: python"):
+            asyncio.run(runners.dispatch_job(job))
         assert ran == []
         assert persisted[-1]["status"] == "failed"
         assert persisted[-1]["error"].startswith("parsers_unavailable: python: DownloadError")
@@ -191,6 +243,21 @@ class TestRunner:
         asyncio.run(runners.dispatch_job(job))
         assert len(ran) == 1
         assert persisted == []
+
+    def test_close_without_await_closes_the_inner_runner(self, monkeypatch, tmp_path):
+        """lifecycle startup recovery probes dispatch_job() and close()s the
+        result unawaited; that must close the real runner coroutine too."""
+        import warnings
+
+        ran = []
+        job, _ = self._file_job(tmp_path, monkeypatch, ran)
+        probe = runners.dispatch_job(job)
+        inner = probe._coro
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            probe.close()
+        assert inner.cr_frame is None  # closed, so no "never awaited" warning
+        assert ran == []
 
     def test_resummarize_is_not_gated(self, monkeypatch):
         _mock_get_language(monkeypatch, bad={"python"})
@@ -218,7 +285,8 @@ class TestDownloadFailureLogging:
         errors = [r for r in caplog.records if r.levelno == logging.ERROR]
         assert len(errors) == 1
         assert "HTTP 503 from github" in errors[0].getMessage()
-        assert [r for r in caplog.records if r.levelno == logging.DEBUG]
+        warnings_ = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings_) == 1  # the repeat stays visible, below ERROR
 
 
 class TestCli:

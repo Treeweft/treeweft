@@ -751,14 +751,15 @@ async def retry_dead_letter_job(job_id: str, request: Request):
     gate = await index_guard.require_writable()
     if gate is not None:
         return gate
-    gate = await index_guard.require_parsers()
-    if gate is not None:
-        return gate
     if _state._job_store is None:
         raise HTTPException(503, "Job store not available")
     job = await _state._job_store.get(job_id)
     if job is None:
         raise HTTPException(404, f"Job not found: {job_id}")
+    if job.kind != "resummarize":  # the only kind that parses no code
+        gate = await index_guard.require_parsers()
+        if gate is not None:
+            return gate
     terminal_statuses = {"dead_letter", "failed", "done"}
     if job.status.value not in terminal_statuses:
         raise HTTPException(

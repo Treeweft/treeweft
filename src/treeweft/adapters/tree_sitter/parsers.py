@@ -29,6 +29,12 @@ DEFAULT_RETRY_SECONDS = 30.0
 DEFAULT_PREFETCH_ATTEMPTS = 5
 
 
+class ParsersUnavailableError(RuntimeError):
+    """Raised out of a queued index job whose parsers cannot load, so the
+    queue worker's retry/dead-letter path handles it (retryable kinds end in
+    `dead_letter`, recoverable with POST /jobs/{id}/retry)."""
+
+
 @dataclass(frozen=True)
 class ParserReadiness:
     ok: bool
@@ -68,7 +74,14 @@ def check_parsers(force: bool = False) -> ParserReadiness:
     so an outage doesn't start a download per request. Blocking (may download)
     — async callers use `check_parsers_async()`."""
     global _cached, _cached_at
-    with _lock:
+    if not _lock.acquire(blocking=False):
+        # Another thread is checking (during an outage each download can
+        # hang until its socket timeout). Don't park another executor thread
+        # behind it when there is any result to answer with.
+        if not force and _cached is not None:
+            return _cached
+        _lock.acquire()
+    try:
         if not force and _cached is not None:
             if _cached.ok or _clock() - _cached_at < retry_seconds():
                 return _cached
@@ -81,6 +94,8 @@ def check_parsers(force: bool = False) -> ParserReadiness:
         _cached = ParserReadiness(ok=not failures, failures=failures)
         _cached_at = _clock()
         return _cached
+    finally:
+        _lock.release()
 
 
 async def check_parsers_async() -> ParserReadiness:
@@ -94,11 +109,12 @@ _logged_lock = threading.Lock()
 
 
 def log_download_failure(lang: str, exc: BaseException) -> None:
-    """ERROR once per language per process, DEBUG afterwards."""
+    """ERROR once per language per process, WARNING afterwards (each
+    fallback stays visible, as the old per-file warning was)."""
     with _logged_lock:
         first = lang not in _logged_langs
         _logged_langs.add(lang)
-    level = logging.ERROR if first else logging.DEBUG
+    level = logging.ERROR if first else logging.WARNING
     logger.log(
         level,
         "tree-sitter parser download failed for %r: %s — falling back to token windows",

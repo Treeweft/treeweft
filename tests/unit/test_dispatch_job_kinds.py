@@ -40,7 +40,7 @@ class TestDispatchJobRepo:
             _Job("repo", source_path=str(tmp_path), source_url="", source_branch="")
         )
         assert coro is not None, "repo job produced no runner coroutine"
-        assert inspect.iscoroutine(coro)
+        assert asyncio.iscoroutine(coro)
         coro.close()
 
     def test_repo_job_by_url_dispatches(self):
