@@ -47,7 +47,7 @@ FTS_COLUMN = "chunk_text"
 # LanceDB mechanism that survives add/delete/FTS/optimize/reopen AND can be
 # applied to a table created before the stamp existed (research R1) — a
 # table's own top-level schema metadata can be set at create_table() but not
-# changed afterwards in lancedb 0.34.
+# changed afterwards in lancedb 0.33.
 _STAMP_SCHEMA_KEY = "treeweft.index_schema"
 _STAMP_MODEL_KEY = "treeweft.embedding_model"
 
@@ -116,15 +116,16 @@ def _current_stamp_metadata(tbl) -> dict[str, str]:
 def _stamp_field_metadata(tbl, stamp: IndexStamp) -> None:
     # update_field_metadata merges by default (replace=False): other keys on
     # the vector field survive and only the two stamp keys are overwritten.
-    tbl.update_field_metadata(
-        {
-            "path": "vector",
-            "metadata": {
-                _STAMP_SCHEMA_KEY: str(stamp.schema),
-                _STAMP_MODEL_KEY: stamp.embedding_model,
-            },
-        }
-    )
+    # It also treats a None value as "delete this key", so refuse empty values
+    # instead of silently erasing the stamp (ADR-004 §3).
+    values = {
+        _STAMP_SCHEMA_KEY: str(stamp.schema),
+        _STAMP_MODEL_KEY: stamp.embedding_model,
+    }
+    empty = [k for k, v in values.items() if not isinstance(v, str) or not v]
+    if empty:
+        raise ValueError(f"refusing to write an empty index stamp value: {empty}")
+    tbl.update_field_metadata({"path": "vector", "metadata": values})
 
 
 def _get_table():

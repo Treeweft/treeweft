@@ -148,7 +148,9 @@ Added, Fixed.
   `update_field_metadata` and `create_index(..., config=FTS())` with the same
   stamp and native BM25 index behaviour. Existing tables open unchanged (no
   second index, stamp intact; no re-index). The `lancedb` floor rises from
-  `>=0.33` to `>=0.34`, the first release with both replacement APIs.
+  `>=0.33` to `>=0.34`: `update_field_metadata` is lancedb's replacement as of
+  0.33.1, which was never published to PyPI, so 0.34.0 is the first
+  installable release that has it.
 - One CPU embedding server failed most files of an index job at the compose
   default `INDEX_FILE_CONCURRENCY`: requests it could not answer within the
   timeout failed, and the timeouts tripped its circuit breaker, so the rest
