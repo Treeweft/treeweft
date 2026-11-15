@@ -43,7 +43,7 @@ export function AppShell() {
       </header>
 
       {/* Tab navigation (react-router driven) */}
-      <nav className="sticky top-[65px] z-[9] border-b border-border bg-card px-8">
+      <nav className="sticky top-[65px] z-9 border-b border-border bg-card px-8">
         <Tabs
           value={active}
           onValueChange={(v) => {
