@@ -58,6 +58,17 @@
   Tailwind CSS v4 preflight no longer sets `cursor: pointer` on buttons (v3
   did), and no component sets it itself. Restore the v3 behavior.
 */
+/*
+  Tailwind CSS v4 changed `space-y-*` from margin-top on later siblings to
+  margin-bottom on earlier ones. A `<label>` is inline by default, so it
+  ignored that margin and every label lost its gap to the field below.
+*/
+@layer base {
+  label {
+    display: block;
+  }
+}
+
 @layer base {
   button:not(:disabled),
   [role='button']:not(:disabled) {
