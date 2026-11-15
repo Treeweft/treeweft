@@ -49,7 +49,7 @@ rather than via `npx shadcn@latest init`. The init flow makes network calls and
 runs an interactive prompt, which is unsuitable for an offline/CI scaffold. The
 equivalents live under `src/components/ui/` (`button.tsx`, `tabs.tsx`) alongside
 the `cn()` helper in `src/lib/utils.ts`, with the standard shadcn Tailwind theme
-tokens in `tailwind.config.js` + `src/index.css`. Add more components later with
+tokens in `src/index.css` (`@theme`). Add more components later with
 `npx shadcn@latest add <component>` once network is available — the config is
 already shadcn-compatible.
 
@@ -84,7 +84,7 @@ ui/
 ├─ index.html
 ├─ package.json
 ├─ vite.config.ts            # @ -> ./src alias
-├─ tailwind.config.js        # dark theme + brand tokens
+├─ (tailwind config lives in src/index.css @theme)
 ├─ postcss.config.js
 ├─ tsconfig*.json
 └─ src/
