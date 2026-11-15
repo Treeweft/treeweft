@@ -171,9 +171,15 @@ make no extra probe request and behave exactly as before.
   any prefix of it.
 - **FR-005**: The push webhook MUST NOT be refused on credential grounds; it MUST queue its job as
   today, and that job MUST end as in FR-007.
-- **FR-006**: When the optional summarizer language-model backend is configured and its
-  credential is `auth_failed`, the system MUST [NEEDS CLARIFICATION: block indexing, or proceed
-  and record that summaries are unavailable] and MUST say which backend failed.
+- **FR-006**: When per-chunk summaries are enabled for indexing (not merely when a language-model
+  endpoint is configured) and the summarizer backend's credential is `auth_failed`, the system
+  MUST refuse indexing exactly as for an embedding failure, with a reason that names the
+  summarizer backend. When summaries are disabled, the summarizer backend MUST NOT be probed and
+  its credential state MUST NOT block indexing. A language-model credential used only at search
+  time (query expansion) is outside this gate; its state appears in the health report (FR-010).
+- **FR-006a**: When two checked backends resolve to the same endpoint host and credential, the
+  system MUST make one probe and apply its outcome to both, naming each affected backend in the
+  reason.
 - **FR-007**: A running job MUST count consecutive embedding authentication failures; once the
   count reaches a bounded threshold it MUST stop making embedding calls and end in a terminal
   failed state whose reason names the backend and cause. The threshold MUST be configurable with a
@@ -236,6 +242,8 @@ make no extra probe request and behave exactly as before.
   stamp refusals.
 - Per Principle V the design favors visible refusal over silent fallback; no mode silently skips
   embedding when the key is bad.
+- In the simple profile one credential normally serves both embeddings and the language model, and
+  summaries are off by default, so the effective gate there is one embeddings probe.
 - Rotating a key at runtime without restart is already possible only by restart; this feature does
   not add hot reload. A corrected key is picked up when the process is restarted or its
   configuration reloaded by existing means, and the `auth_failed` re-check interval covers

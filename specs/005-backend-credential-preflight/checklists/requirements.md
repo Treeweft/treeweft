@@ -13,7 +13,7 @@
 
 ## Requirement Completeness
 
-- [ ] No [NEEDS CLARIFICATION] markers remain — 1 open: FR-006 (summarizer key: block vs warn)
+- [x] No [NEEDS CLARIFICATION] markers remain
 - [x] Requirements are testable and unambiguous
 - [x] Success criteria are measurable
 - [x] Success criteria are technology-agnostic (no implementation details)
@@ -31,4 +31,4 @@
 
 ## Notes
 
-- Resolve FR-006 via `/speckit-clarify` or by answering inline before `/speckit-plan`.
+- FR-006 resolved 2026-11-15: block (option A), applying only when summaries are enabled for indexing.
