@@ -102,9 +102,7 @@ sets `ready_for_indexing` false while a required role is `auth_failed`.
 echo risk is exactly why scrubbing matters. SC-006 is still met because the role names which
 credential fails.
 
-**Spec note**: this narrows FR-010 ("the refusal reason" in the health report) to a stable reason
-*code*, not free text. If you want host and model in `/health`, make `/health` admin-aware first;
-tracked as an open question below.
+**Spec note**: FR-010 was amended on 2026-11-15 to match: the public health report carries role and state only.
 
 ## R8. Credential scrubbing
 

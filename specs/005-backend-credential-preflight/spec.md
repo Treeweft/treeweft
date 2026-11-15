@@ -96,8 +96,8 @@ names the embedding authentication failure, rather than continuing through the r
 ### User Story 3 - Operators can see credential health without starting a job (Priority: P2)
 
 An operator opens the health report (or the operator UI that reads it) and sees whether each
-backend's credential was last seen valid, invalid, or unreachable, when it was last checked, and
-the same reason text a refused request would carry.
+backend role's credential was last seen valid, invalid, or unreachable, and when it was last
+checked.
 
 **Why this priority**: It lets the operator find and fix the problem before anyone submits work,
 but the feature already prevents the damage without it.
@@ -110,7 +110,7 @@ confirm each state and reason appears and that the credential value never does.
 1. **Given** a backend whose credential was last seen valid, **When** the health report is read,
    **Then** it shows that backend as valid with a check time.
 2. **Given** a backend that rejected the credential, **When** the health report is read, **Then**
-   it shows that backend as `auth_failed` with the same reason a refused request carries, and the
+   it shows that backend role as `auth_failed` (no host, model or free-text reason), and the
    overall report marks indexing as not ready.
 3. **Given** a backend that is unreachable, **When** the health report is read, **Then** it shows
    `unreachable`, distinct from `auth_failed`.
@@ -190,9 +190,12 @@ make no extra probe request and behave exactly as before.
 - **FR-009**: A passing result MUST be cached for a configurable interval (documented default);
   an `auth_failed` result MUST be re-checked after a shorter configurable interval so a corrected
   key is accepted without a restart. Concurrent callers with no cached result MUST share one probe.
-- **FR-010**: The health report MUST expose, per checked backend, the last outcome, the check
-  time and the refusal reason, and MUST mark indexing not ready while any required backend is
-  `auth_failed`. It MUST NOT include credential material.
+- **FR-010**: The health report is public, so it MUST expose, per backend role, only the last
+  outcome (`valid`, `auth_failed`, `unreachable`, or `skipped` when the backend is not required)
+  and the check time, and MUST mark indexing not ready while a required backend is `auth_failed`.
+  It MUST NOT include the backend host, model, free-text reason or any credential material; those
+  appear only in the refusal an authenticated caller receives (FR-004) and in the failed job's
+  error.
 - **FR-011**: The system MUST NOT probe an embedding backend that is configured without a
   credential.
 - **FR-012**: The credential, and any prefix, suffix or hash of it, MUST NOT appear in responses,
@@ -228,7 +231,7 @@ make no extra probe request and behave exactly as before.
 - **SC-005**: No test, log line, response or health output across the feature contains the
   credential or any part of it.
 - **SC-006**: An operator can tell from the health report alone, without reading logs, which
-  backend's credential is failing.
+  backend role's credential is failing (embedding or summarizer).
 
 ## Assumptions
 
