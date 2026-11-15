@@ -7,7 +7,7 @@ import re
 import typing
 
 import httpx
-from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import ValidationError
 
 from treeweft.application import mcp_compat
@@ -23,7 +23,7 @@ from treeweft.domain.shared import (
 
 logger = logging.getLogger(__name__)
 
-mcp = FastMCP(
+mcp = MCPServer(
     "treeweft",
     instructions="""\
 This server provides semantic GraphRAG search over indexed source code.

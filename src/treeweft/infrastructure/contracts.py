@@ -244,9 +244,9 @@ def api_surface(openapi: dict) -> dict:
 def mcp_surface(tools) -> dict:
     surface = {}
     for tool in sorted(tools, key=lambda t: t.name):
-        output = tool.outputSchema or {}
+        output = tool.output_schema or {}
         surface[tool.name] = {
-            "input": _resolve(tool.inputSchema, tool.inputSchema.get("$defs", {})),
+            "input": _resolve(tool.input_schema, tool.input_schema.get("$defs", {})),
             "output": _resolve(output, output.get("$defs", {})),
         }
     return _strip(surface)

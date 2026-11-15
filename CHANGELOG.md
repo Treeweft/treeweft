@@ -94,6 +94,11 @@ Added, Fixed.
 
 ### Operator configuration
 
+- MCP SDK upgraded to `mcp` 2.x (`mcp>=2.3,<3`; it pulls in `httpx2`). The
+  server uses `MCPServer` in place of the removed `FastMCP`. The wire
+  contract is unchanged: the 20 tool schemas are identical, and `mcp` 1.x and
+  2.x clients both initialize against the SSE transport. Source installs
+  that pin `mcp<2` alongside treeweft must lift the pin.
 - Treeloom compatibility is removed (#14). `TREELOOM_*` environment
   variables are now ignored; rename each to `TREEWEFT_*` with the same
   suffix (`TREELOOM_PROFILE` → `TREEWEFT_PROFILE`). `benchmark rollup` no

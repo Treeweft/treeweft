@@ -62,6 +62,6 @@ class MCPStdioClient:
         text = "\n".join(
             t for t in (getattr(c, "text", None) for c in result.content or []) if t
         )
-        if getattr(result, "isError", False):
+        if getattr(result, "is_error", False):
             raise RuntimeError(f"{name} failed: {text or 'unknown MCP error'}")
         return text

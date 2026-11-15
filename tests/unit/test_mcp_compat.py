@@ -6,7 +6,7 @@ import logging
 
 import httpx
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer as FastMCP
 
 from treeweft.application import mcp_compat
 
@@ -269,17 +269,17 @@ def _tools() -> dict:
 
 
 def _returns_list(tool) -> bool:
-    result = (tool.outputSchema or {}).get("properties", {}).get("result", {})
+    result = (tool.output_schema or {}).get("properties", {}).get("result", {})
     return result.get("type") == "array"
 
 
 def _arguments(tool) -> dict:
     """A value for each required argument, by its declared type."""
     values = {"string": "x", "integer": 1, "number": 1.0, "boolean": False, "array": [], "object": {}}
-    properties = tool.inputSchema.get("properties", {})
+    properties = tool.input_schema.get("properties", {})
     return {
         name: values[properties[name].get("type", "string")]
-        for name in tool.inputSchema.get("required", [])
+        for name in tool.input_schema.get("required", [])
     }
 
 
@@ -298,11 +298,11 @@ def test_the_list_returning_tools_are_the_ones_expected():
 def _error_of(result) -> str:
     """The error an agent reads in the result of a tool call: the structured
     result where the tool has an output schema, else the JSON text."""
-    if isinstance(result, tuple):
-        _content, structured = result
+    structured = result.structured_content
+    if structured is not None:
         payload = structured["result"] if set(structured) == {"result"} else structured
     else:
-        payload = json.loads(result[0].text)
+        payload = json.loads(result.content[0].text)
     if isinstance(payload, list):
         assert len(payload) == 1, payload
         payload = payload[0]
@@ -425,5 +425,5 @@ def test_every_tool_is_wrapped_and_its_schema_is_unchanged():
         scratch.tool(name=tool.name)(fn.__wrapped__)
     unwrapped = {t.name: t for t in asyncio.run(scratch.list_tools())}
     for tool in tools:
-        assert tool.inputSchema == unwrapped[tool.name].inputSchema, tool.name
-        assert tool.outputSchema == unwrapped[tool.name].outputSchema, tool.name
+        assert tool.input_schema == unwrapped[tool.name].input_schema, tool.name
+        assert tool.output_schema == unwrapped[tool.name].output_schema, tool.name
