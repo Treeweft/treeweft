@@ -102,4 +102,22 @@ else
 fi
 echo "====================="
 echo ""
+# Once the indexer is up, say so if its embeddings (or summarizer) key was
+# rejected: the indexer probes it at startup (specs/005). Advisory only.
+(
+    for _ in $(seq 1 60); do
+        if health=$(curl -fsS "http://${INDEXER_HOST}:${INDEXER_PORT}/health" 2>/dev/null); then
+            case "$health" in
+                *'"state":"auth_failed"'*)
+                    echo "" >&2
+                    echo "WARNING: a backend rejected its API key — index jobs will be refused (409)." >&2
+                    echo "  Fix OPENAI_API_KEY (or EMBEDDING_API_KEY / LLM_API_KEY) in .env and restart." >&2
+                    ;;
+                *'"state":"unchecked"'*) sleep 1; continue ;;
+            esac
+            break
+        fi
+        sleep 1
+    done
+) &
 uvicorn treeweft.indexer_service:app --host "${INDEXER_HOST}" --port "${INDEXER_PORT}"

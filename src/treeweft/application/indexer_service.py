@@ -760,6 +760,9 @@ async def retry_dead_letter_job(job_id: str, request: Request):
         gate = await index_guard.require_parsers()
         if gate is not None:
             return gate
+        gate = await index_guard.require_credentials()
+        if gate is not None:
+            return gate
     terminal_statuses = {"dead_letter", "failed", "done"}
     if job.status.value not in terminal_statuses:
         raise HTTPException(
@@ -798,6 +801,9 @@ async def handle_index_file(req: IndexFileRequest, request: Request):
     if gate is not None:
         return gate
     gate = await index_guard.require_parsers()
+    if gate is not None:
+        return gate
+    gate = await index_guard.require_credentials()
     if gate is not None:
         return gate
     path = Path(file_path)
@@ -852,6 +858,9 @@ async def handle_index_directory(req: IndexDirectoryRequest, request: Request):
     if gate is not None:
         return gate
     gate = await index_guard.require_parsers()
+    if gate is not None:
+        return gate
+    gate = await index_guard.require_credentials()
     if gate is not None:
         return gate
     if not os.path.isdir(directory):
@@ -929,6 +938,9 @@ async def handle_index_repo(req: IndexRepoRequest, request: Request):
     if gate is not None:
         return gate
     gate = await index_guard.require_parsers()
+    if gate is not None:
+        return gate
+    gate = await index_guard.require_credentials()
     if gate is not None:
         return gate
     label = req.url or os.path.expanduser(req.path or "")
@@ -1399,6 +1411,9 @@ async def handle_index_graph(req: IndexGraphRequest, request: Request):
     gate = await index_guard.require_parsers()
     if gate is not None:
         return gate
+    gate = await index_guard.require_credentials()
+    if gate is not None:
+        return gate
 
     record = await _state._source_repo.get_by_id(req.source_id)
     if record is None:
@@ -1611,6 +1626,9 @@ async def handle_index_rebuild(request: Request, dry_run: bool = False):
         # The rebuild drops the stores and re-indexes every source; don't
         # start that on token windows. A dry run changes nothing.
         gate = await index_guard.require_parsers()
+        if gate is not None:
+            return gate
+        gate = await index_guard.require_credentials()
         if gate is not None:
             return gate
     user = getattr(request.state, "user", None)

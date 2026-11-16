@@ -16,7 +16,7 @@ SemVer MINOR.
 ```
 
 Rules:
-- `state` is `valid`, `auth_failed`, `unreachable`, or `skipped` (summarizer with summaries off,
+- `state` is `valid`, `auth_failed`, `unreachable`, `unchecked` (required, no check has run in this process yet) or `skipped` (summarizer with summaries off,
   or a key-free embedder). `skipped` is never an error.
 - Public endpoint: no host, model, reason text or key material (R7, Principle VI).
 - `ready_for_indexing` is false only while a *required* role is `auth_failed`; `unreachable` does

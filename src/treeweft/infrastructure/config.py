@@ -97,6 +97,9 @@ def validate_config() -> None:
         index_verify_timeout_seconds,
         index_status_refresh_seconds,
         prompt_pins_refresh_seconds,
+        credential_check_seconds,
+        credential_retry_seconds,
+        credential_fail_streak,
     ):
         getter()
     llm_search_reserved_slots(_llm_concurrency())
@@ -120,6 +123,45 @@ def _positive_number_env(name: str, default: str) -> float:
         raise ConfigError(f"Env var {name!r}={raw!r} is not a valid number") from None
     if value <= 0:
         raise ConfigError(f"Env var {name!r}={raw!r} must be a positive number")
+    return value
+
+
+# ── Backend credential check tunables (specs/005-backend-credential-preflight) ─
+
+CREDENTIAL_CHECK_SECONDS_DEFAULT = "300"
+CREDENTIAL_RETRY_SECONDS_DEFAULT = "30"
+CREDENTIAL_FAIL_STREAK_DEFAULT = "5"
+
+
+def credential_check_seconds() -> float:
+    """How long a passing credential probe is reused (default 300)."""
+    return _positive_number_env(
+        "TREEWEFT_CREDENTIAL_CHECK_SECONDS", CREDENTIAL_CHECK_SECONDS_DEFAULT
+    )
+
+
+def credential_retry_seconds() -> float:
+    """How long a failed or unreachable probe is reused before re-probing, so
+    a corrected key is accepted without a restart (default 30)."""
+    return _positive_number_env(
+        "TREEWEFT_CREDENTIAL_RETRY_SECONDS", CREDENTIAL_RETRY_SECONDS_DEFAULT
+    )
+
+
+def credential_fail_streak() -> int:
+    """Consecutive credential failures after which a running job stops
+    (default 5, minimum 1)."""
+    raw = os.environ.get("TREEWEFT_CREDENTIAL_FAIL_STREAK", CREDENTIAL_FAIL_STREAK_DEFAULT)
+    try:
+        value = int(raw)
+    except ValueError:
+        raise ConfigError(
+            f"Env var 'TREEWEFT_CREDENTIAL_FAIL_STREAK'={raw!r} is not a valid integer"
+        ) from None
+    if value < 1:
+        raise ConfigError(
+            f"Env var 'TREEWEFT_CREDENTIAL_FAIL_STREAK'={raw!r} must be at least 1"
+        )
     return value
 
 
