@@ -9,6 +9,9 @@ Added, Fixed.
 
 ### Added
 
+- Docs: how to connect Claude Code to the Treeweft MCP server (`claude mcp add`
+  command, scopes, token handling, `claude mcp list` check) in the README and
+  `docs/simple-mode.md`.
 - Backend credential check. Before an index job is queued the indexer probes
   the embeddings endpoint (and the summarizer LLM when `USE_SUMMARY_VECTOR=1`)
   with one tiny request; a rejected key (401, or a 403 that is not about the

@@ -147,6 +147,29 @@ stdio):
 }
 ```
 
+### Connect Claude Code
+
+Register the stdio server with `claude mcp add` (needs `treeweft-mcp` on the
+`PATH` of the shell that starts Claude Code, i.e. the environment you
+installed Treeweft into; otherwise give the full path to the script):
+
+```bash
+claude mcp add treeweft -s user \
+  -e INDEXER_URL=http://localhost:8001 \
+  -- treeweft-mcp
+```
+
+- `-s user` makes it available in every project; `-s project` writes a
+  shareable `.mcp.json`; the default is this project only.
+- With `AUTH_ENABLED=true`, also pass `-e TREEWEFT_MCP_TOKEN=<your PAT or API
+  key>`. Do not do that with `-s project`: `.mcp.json` is meant to be
+  committed, so keep the token in a `user` or `local` scope entry.
+- Check it with `claude mcp list` (the server should show as connected) or
+  `/mcp` inside a session.
+- Searches need a scope: a `path_prefix` for one repo, or `cross_repo: true`.
+- Do not set `TREEWEFT_MCP_TRANSPORT=sse` in a shared `.env`; it turns the
+  stdio script into a second, colliding SSE server.
+
 Once everything is up:
 
 ```bash
