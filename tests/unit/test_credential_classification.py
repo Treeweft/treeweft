@@ -59,7 +59,8 @@ def test_scrub_leaves_ordinary_text_alone():
 def test_backend_auth_error_message_has_reason_code_and_no_body():
     exc = BackendAuthError("embedding", "api.openai.com", "text-embedding-3-small", 401)
     assert str(exc).startswith("embedding_auth_failed:")
-    assert "api.openai.com" in str(exc)
+    assert exc.host == "api.openai.com"
+    assert str(exc).startswith(f"embedding_auth_failed: embedding backend {exc.host} ")
     assert "HTTP 401" in str(exc)
 
 

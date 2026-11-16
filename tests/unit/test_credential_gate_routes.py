@@ -61,7 +61,7 @@ def test_rejected_credential_refuses_every_gated_route(monkeypatch, method, path
     assert resp.status_code == 409, resp.text
     payload = resp.json()
     assert payload["reason"] == "embedding_auth_failed"
-    assert "api.openai.com" in payload["detail"]
+    assert payload["backends"][0]["host"] == "api.openai.com"
     assert payload["backends"][0]["roles"] == ["embedding"]
 
 
