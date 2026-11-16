@@ -14,8 +14,12 @@ always reads live state.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
+import time
+from dataclasses import dataclass
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 from starlette.responses import JSONResponse
@@ -33,8 +37,16 @@ from treeweft.domain.index_stamp import (
     aggregate,
     decide_store,
 )
+from treeweft.domain.credentials import (
+    ROLE_EMBEDDING,
+    ROLE_SUMMARIZER,
+    BackendStatus,
+    CredentialState,
+)
 from treeweft.domain.jobs import JobStatus
 from treeweft.infrastructure.config import (
+    credential_check_seconds,
+    credential_retry_seconds,
     index_status_refresh_seconds,
     index_verify_interval_seconds,
     index_verify_timeout_seconds,
@@ -322,6 +334,7 @@ def health_fields() -> dict:
         out["reindex_reason"] = s.reason
     if s.state == "rebuilding" and s.rebuild_progress is not None:
         out["rebuild_progress"] = {"done": s.rebuild_progress[0], "total": s.rebuild_progress[1]}
+    out["credentials"] = credential_health()
     return out
 
 
@@ -482,6 +495,230 @@ def refusal_detail(job_id: str) -> str:
     """The refusal text for a job `dispatch_allowed()` just refused.
     Consumes the entry (each job's detail is read at most once)."""
     return _refusal_details.pop(job_id, "Index requires rebuild. See GET /health.")
+
+
+# ── Backend credentials (specs/005-backend-credential-preflight) ──────────
+#
+# A bad embeddings key used to be discovered one file at a time: every file
+# failed fast and the job stayed `running`. `require_credentials()` refuses the
+# index routes instead, with one cached, single-flight probe per distinct
+# endpoint+key. Only an authentication failure refuses; an unreachable
+# backend never does. The cache key (a hash of the key) lives in memory only
+# and is never logged or returned.
+
+@dataclass(frozen=True)
+class _Target:
+    role: str
+    kind: str  # "embeddings" | "chat"
+    url: str
+    model: str
+    key: str
+    setting: str
+
+    @property
+    def host(self) -> str:
+        return urlparse(self.url).netloc
+
+    @property
+    def cache_key(self) -> tuple[str, str]:
+        return (self.host, hashlib.sha256(self.key.encode()).hexdigest())
+
+
+_cred_cache: dict[tuple[str, str], tuple[BackendStatus, float]] = {}
+_cred_locks: dict[tuple[str, str], asyncio.Lock] = {}
+_cred_view: dict[str, BackendStatus] = {}
+_cred_logged: dict[str, CredentialState] = {}
+_cred_clock = time.monotonic
+
+
+def reset_credential_cache() -> None:
+    _cred_cache.clear()
+    _cred_locks.clear()
+    _cred_view.clear()
+    _cred_logged.clear()
+
+
+def _key_and_setting(*names: str) -> tuple[str, str]:
+    for name in names:
+        value = os.environ.get(name, "")
+        if value:
+            return value, name
+    return "", names[0]
+
+
+def _embedding_target() -> "_Target | None":
+    """None when no credential applies: the TEI path takes no key, and an
+    OpenAI-compatible endpoint with no key set is key-free (FR-011)."""
+    if os.environ.get("EMBEDDING_PROVIDER", "tei") != "openai":
+        return None
+    key, setting = _key_and_setting("EMBEDDING_API_KEY", "OPENAI_API_KEY")
+    if not key:
+        return None
+    return _Target(
+        ROLE_EMBEDDING, "embeddings",
+        os.environ.get("EMBEDDING_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+        os.environ.get("EMBEDDING_MODEL", "text-embedding-3-small"),
+        key, setting,
+    )
+
+
+def _summarizer_target() -> "_Target | None":
+    """Only when summaries are enabled for indexing (FR-006): an LLM used only
+    at search time (HyDE) is outside the gate."""
+    if os.environ.get("USE_SUMMARY_VECTOR", "1") != "1":
+        return None
+    url = os.environ.get("LLM_URL", "")
+    key, setting = _key_and_setting("LLM_API_KEY", "OPENAI_API_KEY")
+    if not url or not key:
+        return None
+    return _Target(
+        ROLE_SUMMARIZER, "chat", url.rstrip("/"), os.environ.get("LLM_MODEL", ""), key, setting
+    )
+
+
+def _targets() -> list[_Target]:
+    return [t for t in (_embedding_target(), _summarizer_target()) if t is not None]
+
+
+def _group_targets(targets: list[_Target]) -> list[list[_Target]]:
+    """Targets that share endpoint host and key are one probe (FR-006a)."""
+    groups: dict[tuple[str, str], list[_Target]] = {}
+    for t in targets:
+        groups.setdefault(t.cache_key, []).append(t)
+    return list(groups.values())
+
+
+def _log_credential_transition(status: BackendStatus) -> None:
+    for role in status.roles:
+        if _cred_logged.get(role) is status.state:
+            continue
+        prior = _cred_logged.get(role)
+        _cred_logged[role] = status.state
+        if status.state is CredentialState.AUTH_FAILED:
+            logger.warning(
+                "%s backend %s rejected its credential (HTTP %s, model %s): index jobs are "
+                "refused until %s is corrected",
+                role, status.host, status.status_code, status.model, " or ".join(status.settings),
+            )
+        elif status.state is CredentialState.UNREACHABLE:
+            logger.warning(
+                "%s backend %s could not be reached to check its credential; not blocking",
+                role, status.host,
+            )
+        elif prior in (CredentialState.AUTH_FAILED, CredentialState.UNREACHABLE):
+            logger.info("%s backend %s credential check passed again", role, status.host)
+
+
+async def _probe_group(group: list[_Target]) -> BackendStatus:
+    from treeweft.adapters.openai_api import credential_probe
+
+    first = group[0]
+    probe = credential_probe.probe_embeddings if first.kind == "embeddings" else credential_probe.probe_chat
+    state, code = await probe(first.url, first.model, first.key)
+    settings = tuple(dict.fromkeys(t.setting for t in group))
+    return BackendStatus(
+        roles=tuple(t.role for t in group), state=state, host=first.host, model=first.model,
+        settings=settings, status_code=code, checked_at=time.time(),
+    )
+
+
+async def check_backends(force: bool = False) -> list[BackendStatus]:
+    """Probe each distinct required backend (cached; concurrent callers share
+    one probe). Returns one status per probed endpoint+key. Never raises."""
+    results: list[BackendStatus] = []
+    targets = _targets()
+    for role in (ROLE_EMBEDDING, ROLE_SUMMARIZER):
+        if not any(t.role == role for t in targets):
+            _cred_view[role] = BackendStatus(roles=(role,), state=CredentialState.SKIPPED)
+    for group in _group_targets(targets):
+        key = group[0].cache_key
+        lock = _cred_locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            cached = _cred_cache.get(key)
+            ttl = None
+            if cached is not None and not force:
+                ttl = (
+                    credential_check_seconds()
+                    if cached[0].state is CredentialState.VALID
+                    else credential_retry_seconds()
+                )
+            if cached is not None and ttl is not None and _cred_clock() - cached[1] < ttl:
+                status = cached[0]
+            else:
+                try:
+                    status = await _probe_group(group)
+                except Exception:  # noqa: BLE001 - a probe bug must not block indexing
+                    logger.exception("credential probe failed unexpectedly; not blocking")
+                    status = BackendStatus(
+                        roles=tuple(t.role for t in group), state=CredentialState.UNREACHABLE,
+                        host=group[0].host, model=group[0].model,
+                    )
+                _cred_cache[key] = (status, _cred_clock())
+                _log_credential_transition(status)
+        for role in status.roles:
+            _cred_view[role] = status
+        results.append(status)
+    return results
+
+
+def _credential_reason(failed: list[BackendStatus]) -> str:
+    roles = {r for s in failed for r in s.roles}
+    return "embedding_auth_failed" if ROLE_EMBEDDING in roles else "summarizer_auth_failed"
+
+
+def _credential_refusal_body(failed: list[BackendStatus]) -> dict:
+    first = failed[0]
+    label = " and ".join(first.roles)
+    detail = (
+        f"The {label} backend rejected its credential (HTTP {first.status_code}): "
+        f"{first.host}, model {first.model}. Check {' / '.join(first.settings)}."
+    )
+    if len(failed) > 1:
+        detail += f" {len(failed) - 1} more backend(s) also failed; see backends."
+    return {
+        "detail": detail[:_MAX_DETAIL],
+        "reason": _credential_reason(failed),
+        "index_status": "credentials_invalid",
+        "backends": [
+            {
+                "roles": list(s.roles), "host": s.host, "model": s.model,
+                "state": s.state.value, "settings": list(s.settings),
+            }
+            for s in failed
+        ],
+    }
+
+
+async def require_credentials() -> "JSONResponse | None":
+    """409 when a required backend rejected its credential, so an index job is
+    refused up front. Call right after `require_parsers()`. An unreachable
+    backend never refuses (it is not evidence of a bad key)."""
+    failed = [s for s in await check_backends() if s.state is CredentialState.AUTH_FAILED]
+    if not failed:
+        return None
+    return JSONResponse(status_code=409, content=_credential_refusal_body(failed))
+
+
+def credential_health() -> dict:
+    """The public `/health` view: role, state and check time only, from the
+    cached results (never probes, never host/model/reason: Principle VI)."""
+    required = {t.role for t in _targets()}
+    backends = []
+    for role in (ROLE_EMBEDDING, ROLE_SUMMARIZER):
+        if role not in required:
+            backends.append({"role": role, "state": CredentialState.SKIPPED.value, "checked_at": None})
+            continue
+        status = _cred_view.get(role)
+        if status is None or status.state is CredentialState.SKIPPED:
+            backends.append({"role": role, "state": CredentialState.UNCHECKED.value, "checked_at": None})
+            continue
+        backends.append({
+            "role": role,
+            "state": status.state.value,
+            "checked_at": datetime.fromtimestamp(status.checked_at, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        })
+    ready = not any(b["state"] == CredentialState.AUTH_FAILED.value for b in backends)
+    return {"ready_for_indexing": ready, "backends": backends}
 
 
 # ── Rebuild (research R7) ─────────────────────────────────────────────────

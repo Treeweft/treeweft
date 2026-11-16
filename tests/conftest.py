@@ -301,6 +301,26 @@ def _compatible_indexer(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _credentials_ready(request, monkeypatch):
+    """Stub the backend credential check as passing, so route and runner tests
+    never probe a provider (specs/005-backend-credential-preflight). Tests of
+    the check itself opt out with @pytest.mark.real_credential_check."""
+    from treeweft.application import index_guard
+
+    index_guard.reset_credential_cache()
+    if request.node.get_closest_marker("real_credential_check"):
+        yield
+        index_guard.reset_credential_cache()
+        return
+
+    async def _passing(force=False):
+        return []
+
+    monkeypatch.setattr(index_guard, "check_backends", _passing)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _parsers_ready(request, monkeypatch):
     """Pre-seed tree-sitter parser readiness as ok, so route and runner tests
     never load (or download) real parsers. Tests of the check itself opt out

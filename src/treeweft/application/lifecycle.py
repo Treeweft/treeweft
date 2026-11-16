@@ -669,6 +669,22 @@ async def startup(app):
     # ── Tree-sitter parser warm-up (never blocks or fails startup) ────────
     start_parser_warmup()
 
+    # ── Backend credential check (never blocks or fails startup) ──────────
+    # Primes the cached view `/health` reports, and logs a rejected key at
+    # startup instead of at the first index request (specs/005).
+    global _credential_warmup_task
+    _credential_warmup_task = asyncio.create_task(_warm_credentials())
+
+
+_credential_warmup_task: "asyncio.Task | None" = None
+
+
+async def _warm_credentials() -> None:
+    try:
+        await index_guard.check_backends()
+    except Exception:  # noqa: BLE001
+        logger.exception("backend credential warm-up failed")
+
 
 def _warm_parsers() -> None:
     """Load every parser once at startup so a cold host cache downloads them

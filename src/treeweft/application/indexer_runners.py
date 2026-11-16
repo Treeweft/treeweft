@@ -32,7 +32,9 @@ from treeweft.graph_extractor import extract_graph
 from treeweft.graph_store import delete_entities_by_file
 from treeweft.indexer import CodeIndexer, detect_language, SUPPORTED_EXTENSIONS
 from treeweft.infrastructure import metrics
+from treeweft.domain.credentials import BackendAuthError, FailureStreak
 from treeweft.infrastructure.config import (
+    credential_fail_streak,
     FEATURE_SKIP_PATTERNS,
     LOG_INTERVAL,
     OTEL_TRACE_PER_CHUNK,
@@ -199,18 +201,14 @@ def dispatch_job(job) -> "Coroutine | _ParserGatedRunner | None":
     return _ParserGatedRunner(job.id, coro)
 
 
-async def _run_if_parsers_ready(job_id: str, coro: "Coroutine"):
-    from treeweft.adapters.tree_sitter import parsers
-
-    readiness = await parsers.check_parsers_async()
-    if readiness.ok:
-        return await coro
+async def _fail_before_start(job_id: str, coro: "Coroutine", error: str, exc: Exception):
+    """Fail a queued job whose gate refused it at start, then raise `exc` so the
+    queue worker takes its exception path: a retryable kind (incremental/
+    webhook) is re-enqueued and finally dead-lettered instead of silently lost."""
     coro.close()
     jd = _state._jobs.get(job_id) or {"job_id": job_id}
     jd["status"] = "failed"
-    jd["error"] = "parsers_unavailable: " + "; ".join(
-        f"{lang}: {err}" for lang, err in sorted(readiness.failures.items())
-    )
+    jd["error"] = error
     jd["finished_at"] = time.time()
     await _persist_job(jd)
     metrics.queue_depth.dec()
@@ -219,15 +217,36 @@ async def _run_if_parsers_ready(job_id: str, coro: "Coroutine"):
         "job_failed",
         job_id=job_id,
         source=jd.get("source", ""),
-        error_type=parsers.ParsersUnavailableError.__name__,
-        error=jd["error"],
+        error_type=type(exc).__name__,
+        error=error,
         processed_files=0,
         total_files=jd.get("total_files", 0),
     )
-    # Raise rather than return: the queue worker then takes its
-    # exception path, so a retryable kind (incremental/webhook) is
-    # re-enqueued and finally dead-lettered instead of silently lost.
-    raise parsers.ParsersUnavailableError(jd["error"])
+    raise exc
+
+
+async def _run_if_parsers_ready(job_id: str, coro: "Coroutine"):
+    """Run `coro` once parsers load and the backend credentials are not
+    rejected; otherwise fail the job with the reason (the push webhook cannot
+    be refused with a 409, so its job takes this path)."""
+    from treeweft.adapters.tree_sitter import parsers
+    from treeweft.application import index_guard
+    from treeweft.domain.credentials import BackendAuthError, CredentialState
+
+    readiness = await parsers.check_parsers_async()
+    if not readiness.ok:
+        error = "parsers_unavailable: " + "; ".join(
+            f"{lang}: {err}" for lang, err in sorted(readiness.failures.items())
+        )
+        await _fail_before_start(job_id, coro, error, parsers.ParsersUnavailableError(error))
+    failed = [s for s in await index_guard.check_backends() if s.state is CredentialState.AUTH_FAILED]
+    if failed:
+        first = failed[0]
+        auth_error = BackendAuthError(
+            first.roles[0], first.host, first.model, first.status_code or 401
+        )
+        await _fail_before_start(job_id, coro, str(auth_error), auth_error)
+    return await coro
 
 
 def _build_runner(job) -> "Coroutine | None":
@@ -860,9 +879,15 @@ async def _walk_and_index(
     persist_lock = asyncio.Lock()
     skip_graph = bool(job.get("skip_graph", False))
     summary_version = (job.get("payload") or {}).get("summary_version")
+    # Consecutive credential failures: once past the threshold, stop embedding
+    # (specs/005, FR-007). Plain counters are race-free on the event loop.
+    streak = FailureStreak(credential_fail_streak())
 
     async def _process_one(file_path: str) -> None:
         async with sem:
+            if streak.aborted:
+                # Not processed and not counted as an error: a retry resumes it.
+                return
             # `current_file` is racy under concurrency; treat it as
             # "most-recently-started" for human-readable status.
             job["current_file"] = file_path
@@ -908,6 +933,27 @@ async def _walk_and_index(
                         error_message=f"timed out after {file_elapsed:.1f}s",
                         elapsed_s=file_elapsed,
                     )
+                except BackendAuthError as exc:
+                    _mark_span_error(file_span, exc)
+                    file_elapsed = time.time() - file_start
+                    was_aborted = streak.aborted
+                    streak.record_failure(exc)
+                    if streak.aborted and not was_aborted:
+                        logger.error(
+                            "[job %s] %d consecutive credential failures from the %s backend %s "
+                            "— stopping the job",
+                            job.get("job_id", "?"), streak.consecutive, exc.role, exc.host,
+                        )
+                    job["errors"] = (job.get("errors") or 0) + 1
+                    n = 0
+                    had_error = True
+                    await _state._job_file_error_store.record(
+                        job_id=job.get("job_id", ""),
+                        file_path=file_path,
+                        error_kind="credential",
+                        error_message=str(exc)[:2000],
+                        elapsed_s=file_elapsed,
+                    )
                 except Exception as exc:
                     _mark_span_error(file_span, exc)
                     file_elapsed = time.time() - file_start
@@ -926,6 +972,9 @@ async def _walk_and_index(
                         elapsed_s=file_elapsed,
                     )
                 file_span.set_attribute("treeweft.chunk_count", n)
+                if not had_error and n > 0:
+                    # Only a file that embedded chunks proves the key works.
+                    streak.record_success()
 
             # asyncio is single-threaded; bare += is atomic between awaits.
             total_chunks_ref[0] += n
@@ -942,6 +991,10 @@ async def _walk_and_index(
     async with persist_lock:
         await _persist_job(job)
     _log_progress(job, force=True)
+    if streak.aborted and streak.last_error is not None:
+        # The job fails (not `done`) with the reason; the files not reached
+        # are untouched, so a retry resumes them.
+        raise streak.last_error
     # Every file of the source, including those a resume skipped as done.
     return total_chunks_ref[0], job["total_files"]
 
@@ -1137,7 +1190,13 @@ async def _fail_job(job: dict, exc: BaseException):
 
     job["status"] = "failed"
     tb_str = tb.format_exc()
-    job["error"] = f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, BackendAuthError):
+        # Reason code first, no traceback: the cause is the operator's key,
+        # not a code defect (specs/005, FR-007).
+        job["error"] = str(exc)
+        tb_str = ""
+    else:
+        job["error"] = f"{type(exc).__name__}: {exc}"
     if tb_str and tb_str.strip():
         # Append traceback (truncated to fit in the error field) so
         # operators can diagnose without hunting through container logs.
@@ -1741,6 +1800,7 @@ async def _run_incremental_index(
         files_processed = 0
         files_removed = 0
         files_failed = 0
+        streak = FailureStreak(credential_fail_streak())  # specs/005, FR-007
         chunks_added = 0
 
         # Separate removed files from to-process files
@@ -1850,6 +1910,14 @@ async def _run_incremental_index(
 
                 chunks_added += len(chunks)
                 job["total_chunks"] = chunks_added
+                streak.record_success()
+            except BackendAuthError as exc:
+                files_failed += 1
+                streak.record_failure(exc)
+                if streak.aborted:
+                    # The handler below fails the job and re-raises for the
+                    # queue worker's retry/dead-letter logic.
+                    raise
             except Exception:
                 files_failed += 1
 

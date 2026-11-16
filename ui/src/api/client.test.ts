@@ -124,6 +124,22 @@ describe("createClient request behavior", () => {
     await expect(client.get("/health")).rejects.toBeInstanceOf(ApiError);
   });
 
+  it("surfaces the detail of a credential refusal (409) instead of a generic error", async () => {
+    const detail =
+      "The embedding backend rejected its credential (HTTP 401): api.openai.com, model text-embedding-3-small. Check OPENAI_API_KEY.";
+    const { fetchImpl } = stubFetch({
+      status: 409,
+      body: { detail, reason: "embedding_auth_failed" },
+    });
+    const client = createClient(deps({ fetchImpl }));
+
+    await expect(client.post("/index-repo", { path: "/x" })).rejects.toMatchObject({
+      name: "ApiError",
+      status: 409,
+      message: detail,
+    });
+  });
+
   it("distinguishes a 401 via status and isUnauthorized", async () => {
     const { fetchImpl } = stubFetch({
       status: 401,

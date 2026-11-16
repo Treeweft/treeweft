@@ -325,6 +325,27 @@ async def test_major_mismatch_reaches_the_agent_from_every_tool(name, fake_http,
 
 
 @pytest.mark.asyncio
+async def test_credential_refusal_reaches_the_agent_as_readable_text(fake_http, fresh_state):
+    """A 409 `embedding_auth_failed` from an index route is the agent's answer,
+    not a generic failure (specs/005-backend-credential-preflight, FR-014)."""
+    from treeweft import versions
+    from treeweft.application import mcp_server
+
+    detail = (
+        "The embedding backend rejected its credential (HTTP 401): api.openai.com, "
+        "model text-embedding-3-small. Check OPENAI_API_KEY."
+    )
+    script, _ = fake_http
+    script["GET"] = _resp(200, {"status": "ok", "version": versions.SOURCE_VERSION})
+    script["POST"] = _resp(409, {"detail": detail, "reason": "embedding_auth_failed"})
+    tool = TOOLS["index_repo"]
+
+    result = await mcp_server.mcp.call_tool("index_repo", _arguments(tool))
+
+    assert _error_of(result) == f"Indexer returned HTTP 409: {detail}"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("name", LIST_TOOLS)
 async def test_indexer_error_reaches_the_agent_from_every_list_tool(name, fake_http, fresh_state):
     from treeweft import versions

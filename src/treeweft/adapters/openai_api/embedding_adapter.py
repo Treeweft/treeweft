@@ -16,7 +16,17 @@ import asyncio
 import logging
 import os
 
+from urllib.parse import urlparse
+
 import httpx
+
+from treeweft.domain.credentials import (
+    ROLE_EMBEDDING,
+    BackendAuthError,
+    CredentialState,
+    classify,
+    scrub,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -154,8 +164,23 @@ async def _embed_batch(batch: list[str]) -> list[list[float]]:
                 last_exc = exc
                 status = exc.response.status_code
                 if status != 429 and status < 500:
+                    # A rejected credential gets a typed error with no response
+                    # body: providers echo a key prefix in a 401 (the incident
+                    # log did). `classify` keeps a 403 about the model or quota
+                    # out of this branch.
+                    if classify(status, exc.response.text) is CredentialState.AUTH_FAILED:
+                        logger.error(
+                            "embeddings backend %s rejected its credential (HTTP %d, model %s)",
+                            urlparse(EMBEDDING_BASE_URL).netloc, status, EMBEDDING_MODEL,
+                        )
+                        raise BackendAuthError(
+                            ROLE_EMBEDDING, urlparse(EMBEDDING_BASE_URL).netloc,
+                            EMBEDDING_MODEL, status,
+                        ) from None
                     logger.error(
-                        "embeddings API %d: %s", status, exc.response.text[:200]
+                        "embeddings API %d: %s",
+                        status,
+                        scrub(exc.response.text[:200], [EMBEDDING_API_KEY]),
                     )
                     raise
             except httpx.HTTPError as exc:

@@ -9,6 +9,21 @@ Added, Fixed.
 
 ### Added
 
+- Backend credential check. Before an index job is queued the indexer probes
+  the embeddings endpoint (and the summarizer LLM when `USE_SUMMARY_VECTOR=1`)
+  with one tiny request; a rejected key (401, or a 403 that is not about the
+  model or quota) refuses `/index-file`, `/index-directory`, `/index-repo`,
+  `/index-graph`, job retry and `POST /index/rebuild` with a 409
+  `embedding_auth_failed` / `summarizer_auth_failed` naming the host, model and
+  setting (never the key). The push webhook still queues its job, which fails
+  at start with the same reason and is recoverable by retry. A running job now
+  stops after `TREEWEFT_CREDENTIAL_FAIL_STREAK` (5) consecutive credential
+  failures and ends `failed` instead of failing every file (a wrong key used to
+  leave a 37,019-file job `running` at 10 files). `GET /health` gains
+  `credentials` (`ready_for_indexing` and per-role `state`, no host or model).
+  A timeout, 429 or 5xx is `unreachable` and never blocks; key-free embedders
+  are never probed. Provider error text that echoed a key prefix is no longer
+  logged. `./run-simple.sh` warns when the key is rejected.
 - Tree-sitter parser readiness. When a `LANGUAGE_MAP` parser cannot load (for
   example a failed download), index routes (`/index-file`, `/index-directory`,
   `/index-repo`, `/index-graph`, job retry, `POST /index/rebuild`) answer 409
@@ -94,6 +109,10 @@ Added, Fixed.
 
 ### Operator configuration
 
+- New settings: `TREEWEFT_CREDENTIAL_CHECK_SECONDS` (300, how long a passing
+  credential probe is reused), `TREEWEFT_CREDENTIAL_RETRY_SECONDS` (30, before a
+  failed one is re-probed) and `TREEWEFT_CREDENTIAL_FAIL_STREAK` (5). Invalid
+  values fail at startup naming the setting.
 - MCP SDK upgraded to `mcp` 2.x (`mcp>=2.3,<3`; it pulls in `httpx2`). The
   server uses `MCPServer` in place of the removed `FastMCP`. The wire
   contract is unchanged: the 20 tool schemas are identical, and `mcp` 1.x and

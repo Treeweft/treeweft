@@ -121,6 +121,33 @@ Stop everything with `./stop-simple.sh`.
 - Searches run the same pipeline as full mode: hybrid (dense + BM25) vector
   search → CPU rerank → graph-signal rescoring → symbol promotion.
 
+## A wrong or revoked API key
+
+The indexer checks the key before it queues work. At startup, and again before
+each index request (cached for five minutes, or 30 seconds after a failure), it
+sends one tiny embeddings request. If the provider answers 401, every index
+route (`/index-file`, `/index-directory`, `/index-repo`, `/index-graph`, job
+retry, `POST /index/rebuild`) answers **409** `embedding_auth_failed`, names the
+host, the model and the setting to fix (`OPENAI_API_KEY`, or
+`EMBEDDING_API_KEY`), and creates no job. `GET /health` shows
+`credentials.backends[].state` as `auth_failed`, and `./run-simple.sh` prints a
+warning once the indexer is up.
+
+- A key that stops working **mid-job** stops the job after 5 consecutive
+  failures (`TREEWEFT_CREDENTIAL_FAIL_STREAK`); it ends `failed` with
+  `embedding_auth_failed: ...` and `POST /jobs/{id}/retry` resumes the files it
+  did not reach once the key is fixed. The push webhook is not refused (a 409
+  would drop the push); its job is queued and fails the same way.
+- Only a rejected key (401, or a 403 that is not about the model or quota)
+  blocks. A timeout, a 429 or a 5xx is reported `unreachable` and never blocks.
+- The simple profile uses one key for embeddings and the HyDE model, so this is
+  normally a single probe. The summarizer is checked only with
+  `USE_SUMMARY_VECTOR=1`. A local OpenAI-compatible endpoint with no key is
+  never probed.
+- Tunables: `TREEWEFT_CREDENTIAL_CHECK_SECONDS` (300),
+  `TREEWEFT_CREDENTIAL_RETRY_SECONDS` (30), `TREEWEFT_CREDENTIAL_FAIL_STREAK` (5).
+  The key is never logged or returned; provider error text is scrubbed.
+
 ## Capability differences vs full mode
 
 - **Reranker quality** — measured 2026-06-11 on `featbit-clean-100` (the
