@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.15-slim
 
 # Git needed for gitpython (commit SHA tracking, repo cloning)
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
